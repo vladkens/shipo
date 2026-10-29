@@ -1,0 +1,15 @@
+[package]
+name = "shipo"
+version = "0.0.1"
+edition = "2024"
+description = "In-place updates for desktop apps from a signed feed, made by the shipo packer."
+authors = ["vladkens"]
+license = "MIT"
+repository = "https://github.com/vladkens/shipo"
+readme = "readme.md"
+include = ["/src/**/*.rs", "/Cargo.toml", "/LICENSE", "/readme.md", "/SPEC.md"]
+
+[dependencies]
+
+[workspace]
+members = ["cli"]
