@@ -1,6 +1,6 @@
 # shipo
 
-Releases and updates for desktop apps. The packer (`cli/`, the `shipo` binary) turns an app's bare binaries for macOS, Windows and Linux into signed installers and a signed update feed, on one Ubuntu host. The library (`src/`, the `shipo` crate) runs inside the app: it checks the feed, downloads the update and installs it in place after the app quits, silently. `SPEC.md` is the contract between the two, so either side can be written by someone else.
+Releases and updates for desktop apps. The packer (`cli/`, the `shipo` binary) turns an app's bare binaries for macOS, Windows and Linux into signed installers and a signed update feed, on one Ubuntu host. The library (`src/`, the `shipo` crate) runs inside the app: it checks the feed, downloads the update and installs it in place after the app quits, silently. `spec.md` is the contract between the two, so either side can be written by someone else.
 
 ## Scope
 

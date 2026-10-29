@@ -7,9 +7,19 @@ authors = ["vladkens"]
 license = "MIT"
 repository = "https://github.com/vladkens/shipo"
 readme = "readme.md"
-include = ["/src/**/*.rs", "/Cargo.toml", "/LICENSE", "/readme.md", "/SPEC.md"]
+include = ["/src/**/*.rs", "/Cargo.toml", "/LICENSE", "/readme.md", "/spec.md"]
 
 [dependencies]
+ed25519-compact = { version = "2.6.0", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = { version = "0.6.2", default-features = false, features = ["std"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFURL", "CFString"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "NSString", "NSURL", "NSURLSession", "NSURLRequest", "NSURLResponse", "NSError", "NSBundle", "NSDate"] }
+objc2-security = { version = "0.3.2", default-features = false, features = ["std", "CSCommon", "SecCode", "SecStaticCode"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61.2", default-features = false, features = ["Win32_Foundation", "Win32_Networking_WinHttp", "Win32_System_Threading"] }
 
 [workspace]
 members = ["cli"]
