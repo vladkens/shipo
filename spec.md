@@ -141,4 +141,4 @@ The setup is a per-user NSIS installer; it asks for no administrator (`RequestEx
 
 The AppImage is the type2 runtime with a squashfs appended, of an AppDir holding `AppRun` (a link to `usr/bin/<bin>`), `usr/bin/<bin>`, `<id>.desktop`, `<id>.png` and `.DirIcon`. The runtime needs no libfuse2 and sets `APPIMAGE` and `APPDIR` for the app.
 
-The .deb installs `/usr/bin/<bin>`, the `.desktop` entry and the icon. Its version is the app's with the first `-` as `~`, and `~dev` after a dev build's, so apt orders both before the release.
+The .deb installs `/usr/bin/<bin>`, the `.desktop` entry and the icon. Its version is the app's without the build metadata (`+…`), with the first `-` as `~` and any later one as `.`, and `~dev` after a dev build's, so apt orders both before the release: `1.2.0-rc-3+b5` is `1.2.0~rc.3`.

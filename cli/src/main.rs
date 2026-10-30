@@ -6,9 +6,16 @@ mod config;
 mod ds_store;
 mod feed;
 mod image;
+#[cfg_attr(
+  not(all(test, target_os = "linux")),
+  expect(dead_code, reason = "release calls it in its step; tests build the packages on Linux")
+)]
+mod linux;
 mod macos;
+mod pe;
 mod plist;
 mod tool;
+mod windows;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

@@ -594,6 +594,7 @@ mod tests {
       authors: vec![],
       repository: String::new(),
       root: dir.to_path_buf(),
+      workspace: dir.to_path_buf(),
       target: dir.join("target"),
     }
   }

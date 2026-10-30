@@ -39,6 +39,8 @@ pub struct Config {
   pub repository: String,
   /// The manifest's folder.
   pub root: PathBuf,
+  /// The workspace's root folder, else the manifest's.
+  pub workspace: PathBuf,
   /// Cargo's target folder, where the builds are.
   pub target: PathBuf,
 }
@@ -113,7 +115,8 @@ impl Config {
       _ => text(pkg.get("default-run"), "package.default-run")?.unwrap_or(package),
     };
 
-    let target = target(env, ws.as_ref().map_or(&root, |w| &w.dir))?;
+    let workspace = ws.as_ref().map_or_else(|| root.clone(), |w| w.dir.clone());
+    let target = target(env, &workspace)?;
     Ok(Self {
       id: id.into(),
       name: name.into(),
@@ -128,6 +131,7 @@ impl Config {
       authors,
       repository,
       root,
+      workspace,
       target,
     })
   }
@@ -402,7 +406,7 @@ mod tests {
     assert_eq!((c.bin.as_str(), c.comment.as_str(), c.publisher.as_str()), ("app", "", ""));
     assert!(c.macos.is_empty() && c.windows.is_empty() && c.linux.is_empty());
     assert_eq!((c.authors, c.repository), (vec![], String::new()));
-    assert_eq!(c.target, dir.join("target"));
+    assert_eq!((c.workspace, c.target), (dir.to_path_buf(), dir.join("target")));
   }
 
   #[test]
@@ -474,6 +478,7 @@ mod tests {
       (vec!["Jane Doe <jane@example.com>".into()], "Jane Doe")
     );
     assert_eq!((c.root, c.target), (dir.join("app"), dir.join("target")));
+    assert_eq!(c.workspace, dir.to_path_buf());
 
     // The package's own manifest is the workspace's root.
     let own = app(package, "[workspace]\n[workspace.package]\nversion = \"3.0.0\"\nauthors = []\n");
@@ -490,6 +495,7 @@ mod tests {
     let dir = Dir::new("far", &files);
     let c = Config::read(&dir.join("app/Cargo.toml"), &none).unwrap();
     assert_eq!((c.version.as_str(), c.target), ("4.0.0", dir.join("real/target")));
+    assert_eq!(c.workspace, dir.join("real"));
 
     // From a path with `..` the walk up starts at the package's real folder.
     let c = Config::read(&dir.join("real/../app/Cargo.toml"), &none).unwrap();
@@ -506,6 +512,7 @@ mod tests {
     let dir = Dir::new("excluded", &[("Cargo.toml", root), ("app/Cargo.toml", APP)]);
     let c = Config::read(&dir.join("app/Cargo.toml"), &none).unwrap();
     assert_eq!((c.version.as_str(), c.target), ("1.2.0", dir.join("app/target")));
+    assert_eq!(c.workspace, dir.join("app"));
 
     let manifest = app("version.workspace = true", "").replace("version = \"1.2.0\"\n", "");
     let e = error(
