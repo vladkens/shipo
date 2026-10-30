@@ -103,27 +103,72 @@ The machine that packs is Linux (x86_64 or aarch64) or an Apple silicon Mac, wit
 [package]
 name = "hello"
 version = "1.2.0"
-repository = "https://github.com/me/hello"  # where --tag links the feed's files
+authors = ["Jane Doe <jane@example.com>"]
+repository = "https://github.com/me/hello"
 
 [package.metadata.shipo]
-id = "com.example.hello"   # the bundle id, the .desktop's StartupWMClass
-name = "Hello"             # the name people see and the files' prefix
-icon = "assets/icon.png"   # a square PNG, 1024 px recommended
+id = "com.example.hello"
+name = "Hello"
+icon = "assets/icon.png"
 comment = "Says hello"
+publisher = "Example Labs"
 
 [package.metadata.shipo.macos]
-accessory = true                      # no Dock icon
+accessory = true
 entitlements = "assets/hello.entitlements"
 plist.NSMicrophoneUsageDescription = "Hello hears you."
 
 [package.metadata.shipo.windows]
-app-id = "…"                          # the setup's GUID, else derived from `id`
+app-id = "7d3f1c2a-5b8e-4f61-9a0d-2c4e6b8f1a35"
+copyright = "© 2026 Example Labs"
 
 [package.metadata.shipo.linux]
 categories = ["Utility"]
+deb-package = "hello"
 deb-depends = ["libc6 (>= 2.35)"]
 deb-recommends = ["libgtk-3-0"]
 ```
+
+From `[package]` shipo reads these; `version`, `authors` and `repository` can come from `[workspace.package]`:
+
+- `version`: the release's version; `--tag` is `v` and it, and macOS and Windows take its leading numbers (1.2.0 of 1.2.0-beta.1)
+- `authors`: the first one's name is the publisher when `publisher` isn't set, and the first one with a mail gives the .deb's maintainer its mail, which the .deb needs
+- `repository`: with `--tag`, `https://github.com/<owner>/<repo>`, whose release the feed links
+- `name`, `default-run` and the bin targets: the binary to pack, the only one, else `default-run`, else the one named as the package
+
+`[package.metadata.shipo]` and its tables take these keys; any other is an error:
+
+| Key | Type | Default | What it does |
+|---|---|---|---|
+| `id` | string | required | the reverse-DNS id: the bundle id the macOS updater checks a release by, the `.desktop`'s name and `StartupWMClass`, the source of the Windows `app-id` |
+| `name` | string | required | the name people see: the app's, the DMG's, the Start menu entry's, the install folder's, and the files' prefix; with `--tag` only `A-Z a-z 0-9 . _ -` |
+| `icon` | path | required | a square PNG of 1024 px or more, from the `Cargo.toml`'s folder |
+| `comment` | string | none | a line about the app: the `.desktop`'s Comment, the .deb's description (else `name`), the Start menu shortcut's tip |
+| `publisher` | string | the first author's name, else the id's owner (`example` of `com.example.hello`) | the Windows exe's, setup's and Apps list's publisher, the .deb's maintainer name |
+
+`[package.metadata.shipo.macos]`:
+
+| Key | Type | Default | What it does |
+|---|---|---|---|
+| `accessory` | bool | `false` | a menu bar app: no Dock icon (`LSUIElement`), never quit by macOS on its own |
+| `entitlements` | path | none | the entitlements plist the app is signed with, from the `Cargo.toml`'s folder |
+| `plist` | table | none | any Info.plist keys, usage strings among them, over shipo's own; all but `CFBundleExecutable`, `CFBundleIdentifier`, `CFBundleIconFile` and `CFBundlePackageType` |
+
+`[package.metadata.shipo.windows]`:
+
+| Key | Type | Default | What it does |
+|---|---|---|---|
+| `app-id` | string, a GUID | the UUID v5 of `id` | the setup's AppId, by which a newer setup replaces the install: never change it |
+| `copyright` | string | `© <publisher>` | the exe's and setup's LegalCopyright |
+
+`[package.metadata.shipo.linux]`:
+
+| Key | Type | Default | What it does |
+|---|---|---|---|
+| `categories` | list | `["Utility"]` | the `.desktop`'s Categories |
+| `deb-package` | string | the binary's name, lowercase, `_` as `-` | the .deb's package name |
+| `deb-depends` | list | none | the .deb's Depends |
+| `deb-recommends` | list | none | the .deb's Recommends |
 
 Put the release builds, x86_64 or aarch64, in `dist/<target>/<bin>[.exe]`, such as `dist/aarch64-apple-darwin/hello`, and run:
 
