@@ -236,11 +236,12 @@ def uninstall(exe: Path) -> None:
     sys.exit(f"e2e: the install is not spec.md's: {wrong}, {lnk} {lnk.is_file()}")
 
   # Our key alone, whole, and our files alone, whatever installed 1.0.0 (an NSIS setup).
-  names = {"DisplayName", "DisplayVersion", "Publisher", "DisplayIcon", "InstallLocation", "UninstallString", "QuietUninstallString", "NoModify", "NoRepair", "EstimatedSize"}
+  names = {*want, "DisplayName", "DisplayVersion", "Publisher", "UninstallString", "EstimatedSize"}
   files = sorted(p.name for p in folder.iterdir() if not p.name.startswith(".shipo-update-"))
   ours = b"shipo-setup-v1\0\0" in (folder / "Uninstall.exe").read_bytes()
-  if len(uninstall_keys()) != 1 or set(key) != names or files != ["Hello.exe", "LICENSE.txt", "Uninstall.exe"] or not ours:
-    sys.exit(f"e2e: not ours alone: {len(uninstall_keys())} keys, {sorted(key)}, {files}, our uninstaller {ours}")
+  keys = len(uninstall_keys())
+  if keys != 1 or set(key) != names or files != ["Hello.exe", "LICENSE.txt", "Uninstall.exe"] or not ours:
+    sys.exit(f"e2e: not ours alone: {keys} keys, {sorted(key)}, {files}, our uninstaller {ours}")
 
   log(f"installed as spec.md has it: {sorted(key)}")
   with winreg.CreateKey(winreg.HKEY_CURRENT_USER, RUN) as run_key:
