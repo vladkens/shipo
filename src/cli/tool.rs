@@ -135,6 +135,8 @@ pub fn fetch(url: &str, sha256: &str, path: &Path) -> io::Result<PathBuf> {
     fs::create_dir_all(dir)?;
   }
 
+  sweep(path)?;
+
   let mut curl = Command::new("curl");
   curl.args(["-fsSL", "--connect-timeout", "30", "--speed-limit", "1024", "--speed-time", "60"]);
   curl.args(["--retry", "3", "--retry-all-errors", "-o"]);
@@ -161,28 +163,30 @@ fn sha256(path: &Path) -> io::Result<String> {
   Ok(hex(&hmac_sha256::Hash::hash(&read(path)?)))
 }
 
-/// The file `member` of the gzipped tarball `tarball` at `path` (0755), [place]d: renamed over
-/// it, so a copy that runs is never rewritten.
+/// The file `member` of the gzipped tarball `tarball` at `path` as [executable] puts it.
 pub fn untar(tarball: &Path, member: &str, path: &Path) -> io::Result<PathBuf> {
   let files = tar_files(&read(tarball)?).map_err(at(tarball))?;
   let Some((_, data)) = files.into_iter().find(|(name, _)| name == member) else {
     return Err(bad(format!("{}: no {member}", tarball.display())));
   };
 
-  place(path, |part| {
-    File::create_new(part)?.write_all(&data)?;
-    set_mode(part, 0o755)
-  })?;
-  Ok(path.to_path_buf())
+  executable(&data, path)
 }
 
-/// The file `member` of the zip `zip` at `path` (0755), [place]d as [untar] does.
+/// The file `member` of the zip `zip` at `path` as [executable] puts it.
 pub fn unzip(zip: &Path, member: &str, path: &Path) -> io::Result<PathBuf> {
-  let data = zip_file(&read(zip)?, member).map_err(at(zip))?;
-  place(path, |part| {
-    File::create_new(part)?.write_all(&data)?;
-    set_mode(part, 0o755)
-  })?;
+  executable(&zip_file(&read(zip)?, member).map_err(at(zip))?, path)
+}
+
+/// `data` at `path` (0755), [place]d, or kept when it holds `data` (Windows can't rename over it).
+fn executable(data: &[u8], path: &Path) -> io::Result<PathBuf> {
+  let there = || fs::read(path).is_ok_and(|had| had == data);
+  if !there() {
+    let placed = place(path, |part| File::create_new(part)?.write_all(data));
+    placed.or_else(|e| if there() { Ok(()) } else { Err(e) })?;
+  }
+
+  set_mode(path, 0o755)?;
   Ok(path.to_path_buf())
 }
 
@@ -304,11 +308,7 @@ impl Temp {
   }
 
   pub fn new() -> io::Result<Self> {
-    static COUNT: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
-    let n = COUNT.fetch_add(1, Ordering::Relaxed);
-    let name = format!("shipo-{}-{}-{n}", std::process::id(), nanos.as_nanos());
-    let path = std::env::temp_dir().join(name);
+    let path = std::env::temp_dir().join(format!("shipo-{}", unique()));
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut fs::DirBuilder::new(), 0o700).create(&path)?;
     #[cfg(not(unix))]
@@ -346,19 +346,48 @@ pub fn private(path: &Path, data: &[u8]) -> io::Result<PathBuf> {
   Ok(path.to_path_buf())
 }
 
-/// The file `out`, made by `make` at `<out>.part` and renamed into place. A part there before, or
-/// a link there, is removed first, so `make` makes a new file (`create_new`), never one written
-/// through; on any error the part is removed, so no folder a release uploads or the apps fetch
-/// from holds half a file.
-pub fn place(out: &Path, make: impl FnOnce(&Path) -> io::Result<()>) -> io::Result<()> {
-  let mut name = out.file_name().unwrap_or_default().to_os_string();
-  name.push(".part");
-  let part = out.with_file_name(name);
-  match fs::remove_file(&part) {
-    Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(at(&part)(e)),
-    _ => {}
+/// A name no other call gets, in this run or another: the pid, the time and a count.
+fn unique() -> String {
+  static COUNT: AtomicU64 = AtomicU64::new(0);
+  let nanos = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
+  let n = COUNT.fetch_add(1, Ordering::Relaxed);
+  format!("{}-{}-{n}", std::process::id(), nanos.as_nanos())
+}
+
+/// `<file>` of `<file>.<unique>.part`, a part [place] makes.
+pub fn part_of(name: &str) -> Option<&str> {
+  let (file, unique) = name.strip_suffix(".part")?.rsplit_once('.')?;
+  let digits = |x: &str| !x.is_empty() && x.bytes().all(|b| b.is_ascii_digit());
+  (unique.split('-').count() == 3 && unique.split('-').all(digits)).then_some(file)
+}
+
+/// Removes the parts of `path` an hour old or more, of a run stopped midway; a newer one may be
+/// another run's at work.
+fn sweep(path: &Path) -> io::Result<()> {
+  let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else {
+    return Ok(());
+  };
+
+  let hour = Duration::from_secs(3600);
+  let old = |e: &fs::DirEntry| {
+    let age = e.metadata().and_then(|m| m.modified()).map(|t| t.elapsed().unwrap_or_default());
+    age.is_ok_and(|age| age >= hour)
+  };
+  for e in fs::read_dir(dir)?.flatten() {
+    if e.file_name().to_str().and_then(part_of) == Some(name) && old(&e) {
+      fs::remove_file(e.path())?;
+    }
   }
 
+  Ok(())
+}
+
+/// The file `out`, made by `make` at a part of its own, `<out>.<unique>.part`, and renamed into
+/// place; on any error the part is removed, so no folder holds half a file.
+pub fn place(out: &Path, make: impl FnOnce(&Path) -> io::Result<()>) -> io::Result<()> {
+  let mut name = out.file_name().unwrap_or_default().to_os_string();
+  name.push(format!(".{}.part", unique()));
+  let part = out.with_file_name(name);
   let made = make(&part).and_then(|()| fs::rename(&part, out).map_err(at(out)));
   if made.is_err() {
     let _ = fs::remove_file(&part);
@@ -385,6 +414,17 @@ pub fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
     let _ = (path, mode);
     Ok(())
   }
+}
+
+/// The time of a package's files: `$SOURCE_DATE_EPOCH` when set, else `meta`'s.
+pub fn time(meta: &fs::Metadata) -> io::Result<u64> {
+  if let Some(epoch) = std::env::var_os("SOURCE_DATE_EPOCH") {
+    let epoch = epoch.to_string_lossy();
+    let secs = epoch.trim().parse();
+    return secs.map_err(|_| bad(format!("SOURCE_DATE_EPOCH is {epoch:?}, not seconds")));
+  }
+
+  Ok(meta.modified()?.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs()))
 }
 
 // MARK: Bytes
@@ -624,12 +664,29 @@ mod tests {
     assert_eq!(fs::read(&path).unwrap(), b"pinned");
     assert_eq!(listed(), 1);
 
+    // Many at once, as two releases on one machine.
+    let twice = tools.join("twice");
+    thread::scope(|s| (0..8).for_each(|_| drop(s.spawn(|| fetch(&url, &good, &twice).unwrap()))));
+    assert_eq!(fs::read(&twice).unwrap(), b"pinned");
+    assert_eq!(listed(), 2);
+    fs::remove_file(&twice).unwrap();
+
     // Fetched once: a changed source is not read again, a changed file is refused and removed.
     fs::write(&src, "other").unwrap();
     assert_eq!(fetch(&url, &good, &path).unwrap(), path);
     fs::write(&path, "tampered").unwrap();
     assert!(fetch(&url, &good, &path).unwrap_err().to_string().contains("pinned"));
     assert_eq!(listed(), 0);
+
+    // A part an hour old is a stopped run's and goes; a newer one may be another run's at work.
+    let (stale, fresh) = (tools.join("tool.1-2-3.part"), tools.join("tool.4-5-6.part"));
+    let hour = SystemTime::now() - Duration::from_secs(3600);
+    File::create(&stale).unwrap().set_modified(hour).unwrap();
+    File::create(&fresh).unwrap();
+    fetch(&url, &sha256(&src).unwrap(), &path).unwrap();
+    assert!(!stale.exists() && fresh.exists());
+    assert_eq!(part_of("App.deb.12-345-0.part"), Some("App.deb"));
+    assert_eq!([part_of("App.deb.part"), part_of("App.deb.1-x-2.part")], [None, None]);
   }
 
   #[cfg(unix)]
@@ -708,6 +765,10 @@ mod tests {
     assert_eq!(fs::read(&out).unwrap(), b"x");
     assert_eq!(fs::metadata(&out).unwrap().permissions().mode() & 0o777, 0o755);
     assert!(untar(&tar, "d/none", &tmp.join("none")).is_err());
+    // Its mode lost: given back.
+    set_mode(&out, 0o644).unwrap();
+    untar(&tar, "d/tool", &out).unwrap();
+    assert_eq!(fs::metadata(&out).unwrap().permissions().mode() & 0o777, 0o755);
 
     // Put in place by a rename: a copy open before keeps its own file.
     let before = fs::File::open(&out).unwrap();
@@ -716,7 +777,8 @@ mod tests {
     untar(&tar, "d/tool", &out).unwrap();
     assert_eq!(io::read_to_string(before).unwrap(), "x");
     assert_eq!(fs::read(&out).unwrap(), b"y");
-    assert!(!tmp.join("tool.part").exists());
+    let parts = fs::read_dir(&*tmp).unwrap().flatten();
+    assert!(parts.filter(|e| e.path().extension().is_some_and(|x| x == "part")).count() == 0);
 
     drop(tmp);
     assert!(!path.exists());

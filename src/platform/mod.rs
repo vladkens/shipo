@@ -53,6 +53,12 @@ fn http(url: &str, message: impl ToString) -> Error {
   Error::Http { url: url.into(), status: None, message: message.to_string() }
 }
 
+/// Whether `hdiutil attach` failed as it does while DiskImages is busy for a moment.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn attach_again(e: &std::io::Error) -> bool {
+  e.to_string().ends_with("Resource temporarily unavailable")
+}
+
 // MARK: Unix
 
 /// The update's processes and files on every Unix: whether a process runs, the installer's wait
@@ -134,5 +140,18 @@ mod unix {
       assert!(start.elapsed() >= Duration::from_millis(60));
       assert!(alive(std::process::id()) && !alive(0));
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  /// Only DiskImages' busy error tries the attach again.
+  #[test]
+  fn attach_again_while_busy() {
+    let e = |why: &str| {
+      std::io::Error::other(format!("/usr/bin/hdiutil: hdiutil: attach failed - {why}"))
+    };
+    assert!(super::attach_again(&e("Resource temporarily unavailable")));
+    assert!(!super::attach_again(&e("image not recognized")));
   }
 }

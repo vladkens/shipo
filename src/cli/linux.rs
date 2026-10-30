@@ -8,7 +8,6 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::iter;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use flate2::Compression;
 use flate2::write::{GzEncoder, ZlibEncoder};
@@ -361,19 +360,9 @@ fn glibc(elf: &[u8]) -> Option<String> {
 
 // MARK: Files
 
-/// The time of the packages' files: `$SOURCE_DATE_EPOCH` when set, else the binary `bin`'s, so a
-/// build of the same binary packs the same bytes.
+/// The time of the packages' files: [tool::time] of the binary `bin`.
 fn mtime(bin: &Path) -> io::Result<u64> {
-  if let Some(epoch) = std::env::var_os("SOURCE_DATE_EPOCH") {
-    let epoch = epoch.to_string_lossy();
-    return epoch
-      .trim()
-      .parse()
-      .map_err(|_| bad(format!("SOURCE_DATE_EPOCH is {epoch:?}, not seconds")));
-  }
-
-  let time = fs::metadata(bin).and_then(|m| m.modified()).map_err(at(bin))?;
-  Ok(time.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs()))
+  tool::time(&fs::metadata(bin).map_err(at(bin))?)
 }
 
 // MARK: .deb archive
@@ -819,7 +808,7 @@ pub(crate) mod tests {
   use std::io::Read;
   #[cfg(target_os = "linux")]
   use std::process::Command;
-  use std::time::Duration;
+  use std::time::{Duration, SystemTime};
 
   use flate2::read::{GzDecoder, ZlibDecoder};
 

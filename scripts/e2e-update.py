@@ -6,7 +6,7 @@
 installed as a user installs it, then updated in place from 2.0.0's feed served on loopback.
 
 uv run scripts/e2e-update.py build <dir>   the example at both versions, <dir>/<version>/<triple>/hello[.exe]
-uv run scripts/e2e-update.py pack <dir>    `shipo release` of each version, a throwaway key, 2.0.0's feed
+uv run scripts/e2e-update.py pack <dir>    `shipo release` of each version, a fixed key, 2.0.0's feed, SHA256SUMS
 uv run scripts/e2e-update.py run <dir>     1.0.0 installed and updated; checks that 2.0.0 is what runs
   [--v1 <setup>]                           Windows: 1.0.0 installed by this setup (an NSIS one), not <dir>'s
 uv run scripts/e2e-update.py all <dir>     the three on this host (`make e2e`)
@@ -116,17 +116,18 @@ def keychain(out: Path) -> None:
 
 
 def pack(out: Path) -> None:
-  """Each version's installers, a throwaway key (key.pub its public half) and 2.0.0's feed,
-  out/update.txt, of the files served at http://127.0.0.1:<port>/<version>/."""
+  """Each version's installers, a fixed key (key.pub its public half), 2.0.0's feed,
+  out/update.txt, of the files served at http://127.0.0.1:<port>/<version>/, and their SHA256SUMS."""
   run("cargo", "build", "--release", "--bin", "shipo", cwd=ROOT)
   shipo = target_dir() / "release" / f"shipo{EXE}"
   # The tools shipo fetches (rcodesign, the AppImage runtime) once for both versions.
   env = os.environ | {"CARGO_TARGET_DIR": str(out / "target")}
+  # the commit's time, so every host packs the same bytes
+  env.setdefault("SOURCE_DATE_EPOCH", run("git", "log", "-1", "--format=%ct", cwd=ROOT).strip())
   (out / "icon.png").write_bytes(png(1024))
 
   key = out / "update.key"
-  key.unlink(missing_ok=True)
-  run(shipo, "keygen", key, env=env)
+  key.write_text(hashlib.sha256(b"shipo e2e").hexdigest() + "\n")
   (out / "key.pub").write_text(run(shipo, "keygen", "--public", key, env=env).strip())
 
   if sys.platform == "darwin" and os.environ.get("CI"):
@@ -135,7 +136,8 @@ def pack(out: Path) -> None:
   for version in VERSIONS:
     manifest = out / version / "Cargo.toml"
     manifest.write_text(MANIFEST.format(bin=BIN, version=version, id=ID, name=NAME))
-    shutil.copy2(ROOT / "LICENSE", out / version / "LICENSE")
+    # LF: git checks it out with CRLF on Windows
+    (out / version / "LICENSE").write_bytes((ROOT / "LICENSE").read_bytes().replace(b"\r\n", b"\n"))
     print(run(shipo, "release", out / version, "--manifest", manifest, env=env), end="")
 
   newest = out / VERSIONS[-1]
@@ -144,6 +146,11 @@ def pack(out: Path) -> None:
   feed = run(shipo, "feed", "--manifest", newest / "Cargo.toml", "--url", url, "--key", key, *files, env=env)
   shutil.copy2(feed.strip(), out / "update.txt")
   print((out / "update.txt").read_text(), end="")
+
+  packed = sorted(f.relative_to(out).as_posix() for f in out.glob(f"*/{NAME}-dev-*")) + ["update.txt"]
+  sums = "".join(f"{hashlib.sha256((out / f).read_bytes()).hexdigest()}  {f}\n" for f in packed)
+  (out / "SHA256SUMS").write_text(sums, newline="\n")
+  print(sums, end="")
 
 
 def serve(root: Path) -> None:

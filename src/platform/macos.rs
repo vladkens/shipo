@@ -11,7 +11,7 @@ use std::process::Command;
 use std::ptr::{self, NonNull};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
-use std::{fs, io};
+use std::{fs, io, iter, thread};
 
 use block2::RcBlock;
 use objc2_core_foundation::{CFRetained, CFURL, Type};
@@ -44,7 +44,7 @@ pub fn get(url: &str, to: &Path, max: u64, big: Big, progress: Progress) -> Resu
     let (file, res, err) = unsafe { (file.as_ref(), res.as_ref(), err.as_ref()) };
     let code =
       res.and_then(|r| r.downcast_ref::<NSHTTPURLResponse>()).map_or(0, |r| r.statusCode());
-    let r = match (err, file.and_then(|f| f.path())) {
+    let _ = tx.send(match (err, file.and_then(|f| f.path())) {
       (Some(e), _) => Err(super::http(&link, e.localizedDescription())),
       (None, None) => Err(super::http(&link, "no file")),
       // The task's file is removed once the handler returns; it may be on another volume. Its
@@ -53,9 +53,7 @@ pub fn get(url: &str, to: &Path, max: u64, big: Big, progress: Progress) -> Resu
         let from = from.to_string();
         Ok(fs::rename(&from, &into).or_else(|_| fs::copy(&from, &into).map(drop))?)
       }),
-    };
-
-    let _ = tx.send(r);
+    });
   });
 
   // SAFETY: the handler only owns sendable values (a channel's sender, two strings).
@@ -84,13 +82,18 @@ pub fn get(url: &str, to: &Path, max: u64, big: Big, progress: Progress) -> Resu
 
 /// Copies the one bundle at the top of the disk image `file` into `file`'s folder, as
 /// `<folder>/new/<name>.app`, once it [accepts] it in place of `app`: the image attached read-only
-/// at `<folder>/volume`, unseen by Finder, and detached again, forced if it must be.
+/// at `<folder>/volume`, unseen by Finder, up to five tries a second apart, and detached again,
+/// forced if it must be.
 /// [Error::Bundle] for an image with more than one `.app` at its top, or none.
 pub fn unpack(file: &Path, app: &Path) -> Result<PathBuf> {
   let dir = file.parent().unwrap_or(file);
   let (volume, hdiutil) = (dir.join("volume"), || Command::new("/usr/bin/hdiutil"));
   let attach = ["attach", "-nobrowse", "-noautoopen", "-readonly", "-mountpoint"];
-  run(hdiutil().args(attach).arg(&volume).arg(file))?;
+  let mut pauses = iter::repeat_n(Duration::from_secs(1), 4);
+  while let Err(e) = run(hdiutil().args(attach).arg(&volume).arg(file)) {
+    thread::sleep(pauses.next().filter(|_| super::attach_again(&e)).ok_or(e)?);
+  }
+
   let new = copy(&volume, dir, app);
   let detach = |force: &[&str]| run(hdiutil().arg("detach").arg(&volume).args(force));
   let detached = detach(&[]).or_else(|_| detach(&["-force"]));
@@ -192,10 +195,8 @@ pub fn exchange(a: &Path, b: &Path) -> io::Result<()> {
   let path = |p: &Path| CString::new(p.as_os_str().as_bytes()).map_err(io::Error::from);
   let (a, b) = (path(a)?, path(b)?);
   // SAFETY: two C strings that live through the call.
-  match unsafe { renamex_np(a.as_ptr(), b.as_ptr(), RENAME_SWAP) } {
-    0 => Ok(()),
-    _ => Err(io::Error::last_os_error()),
-  }
+  let done = unsafe { renamex_np(a.as_ptr(), b.as_ptr(), RENAME_SWAP) };
+  if done == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
 }
 
 /// Opens the bundle `app` as a new instance with `args` and `note` in its [NOTE] without taking
@@ -203,13 +204,8 @@ pub fn exchange(a: &Path, b: &Path) -> io::Result<()> {
 /// gets launchd's environment, not this process's, and `/` as its working directory.
 /// `open`'s error if LaunchServices fails.
 pub fn start(app: &Path, args: &[OsString], note: Option<&str>) -> io::Result<()> {
-  let mut open = Command::new("/usr/bin/open");
-  open.args(["-n", "-g"]);
-  if let Some(n) = note {
-    open.arg("--env").arg(format!("{NOTE}={n}"));
-  }
-
-  run(open.arg(app).arg("--args").args(args))
+  let env = note.into_iter().flat_map(|n| ["--env".into(), format!("{NOTE}={n}")]);
+  run(Command::new("/usr/bin/open").args(["-n", "-g"]).args(env).arg(app).arg("--args").args(args))
 }
 
 /// Runs `cmd` to its end; an error with its stderr if it failed.
