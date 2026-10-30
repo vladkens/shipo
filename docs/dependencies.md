@@ -7,6 +7,7 @@ Why each crate is in, and why the packer writes some formats itself. A crate com
 | Crate | For | Why |
 |---|---|---|
 | `ed25519-compact` | the feed's signature, SHA-512 | no dependencies, `default-features = false` |
+| `thiserror` | the library's `Error` | the person's standard for a library's error type; 6 crates (`thiserror-impl` and its proc-macro crates `syn`, `quote`, `proc-macro2`, `unicode-ident`), build time only: nothing of them is in the app's binary |
 | `objc2` family (macOS) | NSURLSession, Security.framework | the system's own HTTP and code-signing check |
 | `windows-sys` (Windows) | WinHTTP, processes | the system's own HTTP |
 | none (Linux) | libcurl, loaded at run time | no link-time dependency |

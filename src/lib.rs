@@ -11,8 +11,6 @@
 //! release files, where each OS's app is and how it is replaced.
 //!
 //! ```no_run
-//! use std::io;
-//!
 //! /// The feed and the public keys `shipo keygen` printed, the working one and the spare.
 //! const FEED: shipo::Feed = shipo::Feed::new(
 //!   "https://github.com/me/app/releases/latest/download/update.txt",
@@ -23,7 +21,7 @@
 //! );
 //!
 //! /// Run on a thread of the app's own when the user asks; the app quits after it, within 30 s.
-//! fn update() -> io::Result<()> {
+//! fn update() -> shipo::Result<()> {
 //!   let Some(release) = shipo::check(&FEED, env!("CARGO_PKG_VERSION"))? else { return Ok(()) };
 //!   let staged = shipo::download(&release, |done, total| println!("{done} of {total}"))?;
 //!   shipo::install(staged)
@@ -44,6 +42,7 @@
 //! update only when every release is signed with one stable identity: an ad-hoc signature's
 //! requirement is its own build, so [download] refuses the next one.
 
+mod error;
 mod feed;
 mod installer;
 mod platform;
@@ -55,8 +54,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use std::{env, fmt, fs, io};
+use std::{env, fs};
 
+pub use error::{Error, Result};
 pub use feed::{Feed, Release};
 use installer::{Folder, INSTALL, NOTE, READY, home};
 use platform::imp;
@@ -83,49 +83,49 @@ const _: () = {
 
 /// The release `feed` offers this platform when it is newer than `current`: the feed fetched over
 /// the OS's HTTP, then [Feed::read]; `None` when it is up to date. Nothing is fetched for a
-/// pre-release `current` (a dev build, `0.1.0-5-gabc`: `Unsupported`) or a feed of no key or a
-/// malformed one (`InvalidInput`).
-pub fn check(feed: &Feed, current: &str) -> io::Result<Option<Release>> {
+/// pre-release `current` (a dev build, `0.1.0-5-gabc`: [Error::Unsupported]), a feed URL not https
+/// ([Error::Feed]) or a feed of no key or a malformed one ([Error::Keys]).
+pub fn check(feed: &Feed, current: &str) -> Result<Option<Release>> {
   if current.contains('-') {
-    let what = format!("{current} is a dev build, which takes no update");
-    return Err(error(io::ErrorKind::Unsupported, what));
+    return Err(Error::Unsupported(format!("{current} is a dev build, which takes no update")));
   }
 
   if !feed::secure(feed.url) {
-    return Err(bad(format!("{} is not https", feed.url)));
+    return Err(Error::Feed(format!("{} is not https", feed.url)));
   }
 
   feed.public_keys()?;
   let dir = Folder::new(&env::temp_dir())?;
   let to = dir.0.join("update.txt");
-  imp::get(feed.url, &to, feed::MAX, &mut |_| {})?;
+  let big = || Error::Feed(format!("more than {} bytes", feed::MAX));
+  imp::get(feed.url, &to, feed::MAX, &big, &mut |_| {})?;
   feed.read(&fs::read(to)?, current)
 }
 
 /// Whether the running app can update in place, checked with no network, so an app can hide its
-/// update up front: not without an installed app to replace (`Unsupported`: a build, a Windows exe
-/// outside `%LOCALAPPDATA%\Programs`, a Linux one not run as an AppImage, as a .deb's in /usr) or
-/// one whose folder the user can't write (`PermissionDenied`: `/Applications` for a standard user,
-/// `/opt`, a translocated app).
-pub fn supported() -> io::Result<()> {
+/// update up front: not without an installed app to replace ([Error::Unsupported]: a build, a
+/// Windows exe outside `%LOCALAPPDATA%\Programs`, a Linux one not run as an AppImage, as a .deb's
+/// in /usr, a translocated app) or one whose folder the user can't write ([Error::Io],
+/// `PermissionDenied`: `/Applications` for a standard user, `/opt`).
+pub fn supported() -> Result<()> {
   installed().map(drop)
 }
 
 /// The app an update replaces ([target]), its [home] writable: a staging folder made there.
-fn installed() -> io::Result<PathBuf> {
+fn installed() -> Result<PathBuf> {
   let target = target(OS, &env::current_exe()?, &|k| env::var_os(k))?;
   Folder::new(home(OS, &target))?;
   Ok(target)
 }
 
-/// Downloads `release`'s file beside the running app, checks its SHA-512 (`InvalidData` if it
-/// differs) and stages it: on macOS the one `.app` on the image (`InvalidData` for more or none),
-/// held to the running bundle's id and designated requirement. Before a byte is fetched it fails
-/// as [supported] does and removes what an installer stopped midway left.
+/// Downloads `release`'s file beside the running app, checks its size and SHA-512
+/// ([Error::Mismatch] if either differs) and stages it: on macOS the one `.app` on the image, held
+/// to the running bundle's id and designated requirement ([Error::Bundle]). Before a byte is
+/// fetched it fails as [supported] does and removes what an installer stopped midway left.
 ///
 /// `progress` gets the bytes done and the total, `release.size`, on the calling thread: at most
 /// about 4 times a second while the file comes, then once with the total when it is verified.
-pub fn download(release: &Release, mut progress: impl FnMut(u64, u64)) -> io::Result<Staged> {
+pub fn download(release: &Release, mut progress: impl FnMut(u64, u64)) -> Result<Staged> {
   let target = installed()?;
   installer::tidy(OS, &target, &imp::alive);
   let (dir, file) = fetch(release, home(OS, &target), &mut progress)?;
@@ -136,10 +136,10 @@ pub fn download(release: &Release, mut progress: impl FnMut(u64, u64)) -> io::Re
 /// Starts the [Staged] app's installer, the new version's [finish] (on Windows this one's), and
 /// returns once it runs; the app must then quit within 30 s. The installer waits for this process
 /// to end, puts the new version in, starts it with this process's arguments and removes what is
-/// left; an error of those comes from [finish] in the app it starts. `TimedOut` when the installer
-/// gives no sign in 10 s, nothing swapped. The staging folder is the installer's from here on: on
-/// an error the next [download] removes it.
-pub fn install(staged: Staged) -> io::Result<()> {
+/// left; an error of those comes from [finish] in the app it starts. [Error::Install] when the
+/// installer gives no sign in 10 s, nothing swapped. The staging folder is the installer's from
+/// here on: on an error the next [download] removes it.
+pub fn install(staged: Staged) -> Result<()> {
   let Staged { new, target, dir } = staged;
   let (dir, exe) = (dir.keep(), env::current_exe()?);
   let name = exe.file_name().unwrap_or_default();
@@ -167,10 +167,10 @@ pub fn install(staged: Staged) -> io::Result<()> {
 /// and before any window. Started by [install] (`--shipo-install` the first argument), it is the
 /// installer and never returns: it waits for the old app to end, puts the new one in, starts it
 /// and exits (status 0, 1 on a failure, 2 for malformed arguments). Otherwise the error of the
-/// installer that started this app, in `SHIPO_UPDATE_ERROR`, the first time it is called and
-/// `None` after; the variable stays in the environment, so an app this one starts would show it
-/// too.
-pub fn finish() -> Option<io::Error> {
+/// installer that started this app, its `SHIPO_UPDATE_ERROR` as [Error::Install], the first time
+/// it is called and `None` after; the variable stays in the environment, so an app this one starts
+/// would show it too.
+pub fn finish() -> Option<Error> {
   static DONE: AtomicBool = AtomicBool::new(false);
   match installer::job(OS, &env::args_os().skip(1).collect::<Vec<_>>()) {
     Some(Some(job)) => installer::run(&job),
@@ -186,13 +186,13 @@ pub fn finish() -> Option<io::Error> {
   #[cfg(windows)]
   std::thread::spawn(|| {
     std::thread::sleep(Duration::from_secs(5));
-    let found = env::current_exe().and_then(|exe| target(OS, &exe, &|k| env::var_os(k)));
-    if let Ok(target) = found {
+    let found = env::current_exe().ok().and_then(|exe| target(OS, &exe, &|k| env::var_os(k)).ok());
+    if let Some(target) = found {
       installer::tidy(OS, &target, &imp::alive);
     }
   });
 
-  env::var(NOTE).ok().map(io::Error::other)
+  env::var(NOTE).ok().map(Error::Install)
 }
 
 // MARK: The installed app
@@ -214,10 +214,10 @@ const OS: Os = match () {
 /// An environment variable by its name: [env::var_os], or a test's.
 type Env<'a> = &'a dyn Fn(&str) -> Option<OsString>;
 
-/// The app an update replaces, of the running `exe`: `Unsupported` for none (a build),
-/// `PermissionDenied` for a bundle macOS translocated (run from a read-only copy, as it does for
-/// one downloaded and not moved).
-fn target(os: Os, exe: &Path, env: Env) -> io::Result<PathBuf> {
+/// The app an update replaces, of the running `exe`: [Error::Unsupported] for none (a build) or a
+/// bundle macOS translocated (run from a read-only copy, as it does for one downloaded and not
+/// moved).
+fn target(os: Os, exe: &Path, env: Env) -> Result<PathBuf> {
   let target = match os {
     // The `.app` bundle, by its layout: `<name>.app/Contents/MacOS/<exe>`.
     Os::Mac => {
@@ -247,9 +247,9 @@ fn target(os: Os, exe: &Path, env: Env) -> io::Result<PathBuf> {
 
   let what = format!("{} is not an installed app", exe.display());
   match target {
-    None => Err(error(io::ErrorKind::Unsupported, what)),
+    None => Err(Error::Unsupported(what)),
     Some(t) if t.to_string_lossy().contains("/AppTranslocation/") => {
-      Err(error(io::ErrorKind::PermissionDenied, format!("{what}: it runs translocated")))
+      Err(Error::Unsupported(format!("{what}: it runs translocated")))
     }
     Some(t) => Ok(t),
   }
@@ -266,9 +266,9 @@ const TICK: Duration = Duration::from_millis(250);
 /// The release's file fetched over https (or loopback) and verified into a fresh folder under
 /// `parent`, gone again on an error; one the user can't write fails first. `progress` as
 /// [download]'s.
-fn fetch(release: &Release, parent: &Path, progress: Progress) -> io::Result<(Folder, PathBuf)> {
+fn fetch(release: &Release, parent: &Path, progress: Progress) -> Result<(Folder, PathBuf)> {
   if !feed::secure(&release.url) {
-    return Err(bad(format!("{} is not https", release.url)));
+    return Err(Error::Feed(format!("{:?} is not https", release.url)));
   }
 
   let exe = env::current_exe()?;
@@ -282,7 +282,8 @@ fn fetch(release: &Release, parent: &Path, progress: Progress) -> io::Result<(Fo
       progress(done, total);
     }
   };
-  imp::get(&release.url, &file, total, &mut tell)?;
+  let big = || Error::Mismatch(format!("{} sent more than {total} bytes", release.url));
+  imp::get(&release.url, &file, total, &big, &mut tell)?;
   release.verify(&file)?;
   progress(total, total);
   Ok((dir, file))
@@ -290,9 +291,9 @@ fn fetch(release: &Release, parent: &Path, progress: Progress) -> io::Result<(Fo
 
 /// The name the release's file at `url` is staged by. On Windows its own, the last part of the
 /// URL's path: a plain `<name>.exe` other than the running `exe`'s, whose copy, the installer,
-/// goes beside it (`InvalidData` else). Windows loads compatibility shims into an exe named
+/// goes beside it ([Error::Feed] else). Windows loads compatibility shims into an exe named
 /// `setup.exe` (makensis' warning 9000), and the packer names none so.
-fn stage_name<'a>(os: Os, url: &'a str, exe: &OsStr) -> io::Result<&'a str> {
+fn stage_name<'a>(os: Os, url: &'a str, exe: &OsStr) -> Result<&'a str> {
   match os {
     Os::Mac => Ok("update.dmg"),
     Os::Linux => Ok("app.AppImage"),
@@ -303,21 +304,9 @@ fn stage_name<'a>(os: Os, url: &'a str, exe: &OsStr) -> io::Result<&'a str> {
       let ext = Path::new(name).extension().is_some_and(|e| e.eq_ignore_ascii_case("exe"));
       let own = OsStr::new(name).eq_ignore_ascii_case(exe);
       let ok = plain && ext && !own;
-      ok.then_some(name).ok_or_else(|| bad(format!("{url} names no setup to stage")))
+      ok.then_some(name).ok_or_else(|| Error::Feed(format!("{url} names no setup to stage")))
     }
   }
-}
-
-// MARK: Errors
-
-/// An `InvalidData` error of the update.
-fn bad(what: impl fmt::Display) -> io::Error {
-  error(io::ErrorKind::InvalidData, what)
-}
-
-/// An error of the update of the kind `kind`.
-fn error(kind: io::ErrorKind, what: impl fmt::Display) -> io::Error {
-  io::Error::new(kind, format!("update: {what}"))
 }
 
 #[cfg(test)]
@@ -373,13 +362,16 @@ mod tests {
     let app = target(Os::Mac, "/Applications/A.app/Contents/MacOS/a").unwrap();
     assert_eq!(app, Path::new("/Applications/A.app"));
     let moved = "/private/var/folders/x/T/AppTranslocation/1-2/d/A.app/Contents/MacOS/a";
-    assert_eq!(target(Os::Mac, moved).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
     let windows = "C:/Users/Me/AppData/Local/Programs/W/a.exe";
-    for (os, exe) in [(Os::Mac, "/Users/me/a/target/debug/a"), (Os::Linux, "/usr/bin/a")] {
-      assert_eq!(target(os, exe).unwrap_err().kind(), io::ErrorKind::Unsupported);
+    for (os, exe) in [
+      (Os::Mac, moved),
+      (Os::Mac, "/Users/me/a/target/debug/a"),
+      (Os::Linux, "/usr/bin/a"),
+      (Os::Windows, windows),
+    ] {
+      let e = target(os, exe).unwrap_err();
+      assert!(matches!(e, Error::Unsupported(_)), "{exe}: {e}");
     }
-
-    assert_eq!(target(Os::Windows, windows).unwrap_err().kind(), io::ErrorKind::Unsupported);
   }
 
   #[test]
@@ -397,7 +389,7 @@ mod tests {
       "C:/Users/Me/src/w/target/release/a.exe".into(),
       "C:/Program Files/W/a.exe".into(),
     ] {
-      assert_eq!(target(&exe).unwrap_err().kind(), io::ErrorKind::Unsupported, "{exe}");
+      assert!(matches!(target(&exe).unwrap_err(), Error::Unsupported(_)), "{exe}");
     }
   }
 
@@ -440,7 +432,8 @@ mod tests {
     let r = Release { url: "http://127.0.0.1:9/a".into(), size: 1, ..Release::test("2") };
     let e = fetch(&r, &root, &mut |_, _| {}).unwrap_err();
     fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
-    assert_eq!(e.kind(), io::ErrorKind::PermissionDenied, "{e}");
+    let denied = std::io::ErrorKind::PermissionDenied;
+    assert!(matches!(&e, Error::Io(e) if e.kind() == denied), "{e}");
     fs::remove_dir(root).unwrap();
   }
 
@@ -448,16 +441,17 @@ mod tests {
   fn get_follows_a_redirect_and_fails_on_a_404() {
     let (url, root) = (serve(), dir("get"));
     let to = root.join("update.txt");
-    let mut seen = Vec::new();
-    imp::get(&format!("{url}/update.txt"), &to, FEED.len() as u64, &mut |n| seen.push(n)).unwrap();
+    let (mut seen, big) = (Vec::new(), &|| Error::Feed("big".into()));
+    let len = FEED.len() as u64;
+    imp::get(&format!("{url}/update.txt"), &to, len, big, &mut |n| seen.push(n)).unwrap();
     assert_eq!(fs::read_to_string(&to).unwrap(), FEED);
-    assert!(seen.is_sorted() && seen.last() == Some(&(FEED.len() as u64)), "{seen:?}");
+    assert!(seen.is_sorted() && seen.last() == Some(&len), "{seen:?}");
     let none = &mut |_| {};
-    let missing = imp::get(&format!("{url}/none"), &to, 1 << 10, none).unwrap_err();
-    assert_eq!(missing.kind(), io::ErrorKind::NotFound, "{missing}");
-    let big = imp::get(&format!("{url}/update.txt"), &to, FEED.len() as u64 - 1, none);
-    let big = big.unwrap_err();
-    assert_eq!(big.kind(), io::ErrorKind::InvalidData, "{big}");
+    let missing = imp::get(&format!("{url}/none"), &to, 1 << 10, big, none).unwrap_err();
+    assert!(matches!(&missing, Error::Http { status: Some(404), .. }), "{missing}");
+    assert!(missing.to_string().ends_with("/none: HTTP 404"), "{missing}");
+    let past = imp::get(&format!("{url}/update.txt"), &to, len - 1, big, none).unwrap_err();
+    assert_eq!(past.to_string(), "invalid feed: big");
     fs::remove_dir_all(root).unwrap();
   }
 
@@ -469,11 +463,12 @@ mod tests {
     let offered = checked(&at("update.txt"), "1.0").unwrap();
     assert_eq!(offered, feed::release(FEED, "1.0", &feed::platform()).unwrap());
     assert_eq!(checked(&at("update.txt"), "1.2.0").unwrap(), None);
-    let kind = |url: &str| checked(url, "1.0").unwrap_err().kind();
-    assert_eq!(kind(&at("none.txt")), io::ErrorKind::NotFound);
-    assert_eq!(kind("http://example.com/update.txt"), io::ErrorKind::InvalidData, "not https");
-    assert_eq!(kind(&at("bad.txt")), io::ErrorKind::InvalidData, "changed after it was signed");
-    assert_eq!(kind(&at("spare.txt")), io::ErrorKind::InvalidData, "signed by another key");
+    let error = |url: &str| checked(url, "1.0").unwrap_err();
+    assert!(matches!(error(&at("none.txt")), Error::Http { status: Some(404), .. }));
+    assert!(matches!(error("http://example.com/update.txt"), Error::Feed(_)), "not https");
+    let bad = error(&at("bad.txt"));
+    assert!(matches!(bad, Error::Signature(_)), "changed after it was signed: {bad}");
+    assert!(matches!(error(&at("spare.txt")), Error::Signature(_)), "signed by another key");
 
     // The spare's feed, taken by an app that holds both keys; no keys fail before a fetch.
     let both = |keys| check(&Feed::new(&at("spare.txt"), keys), "1.0");
@@ -482,7 +477,7 @@ mod tests {
     let zero = "00".repeat(32);
     for keys in [&[][..], &[KEY, "AAAA"], &[KEY, &zero]] {
       let gone = check(&Feed::new(&at("none.txt"), keys), "1.0");
-      assert_eq!(gone.unwrap_err().kind(), io::ErrorKind::InvalidInput, "{keys:?}");
+      assert!(matches!(gone.unwrap_err(), Error::Keys), "{keys:?}");
     }
 
     let parent = dir("parent");
@@ -507,15 +502,17 @@ mod tests {
       |r| r.sha512[0] ^= 1,
       |r| r.url = "http://example.com/abc.exe".into(),
     ];
-    for change in changes {
+    for (i, change) in changes.into_iter().enumerate() {
       let mut r = r.clone();
       change(&mut r);
       let e = fetch(&r, &parent, &mut |_, _| {}).unwrap_err();
-      assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{r:?}");
+      let mismatch = matches!(e, Error::Mismatch(_));
+      assert!(if i < 3 { mismatch } else { matches!(e, Error::Feed(_)) }, "{r:?}: {e}");
     }
 
     let gone = Release { url: at("none.exe"), ..r };
-    assert_eq!(fetch(&gone, &parent, &mut |_, _| {}).unwrap_err().kind(), io::ErrorKind::NotFound);
+    let e = fetch(&gone, &parent, &mut |_, _| {}).unwrap_err();
+    assert!(matches!(e, Error::Http { status: Some(404), .. }), "{e}");
     assert_eq!(fs::read_dir(&parent).unwrap().count(), 0, "no folder is left");
     fs::remove_dir(parent).unwrap();
   }
@@ -532,7 +529,7 @@ mod tests {
     for name in bad {
       let url = format!("https://h/{name}");
       let e = stage_name(Os::Windows, &url, OsStr::new("a.exe")).unwrap_err();
-      assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{name:?}");
+      assert!(matches!(e, Error::Feed(_)), "{name:?}");
     }
   }
 
@@ -542,7 +539,7 @@ mod tests {
     let feed = Feed::new("http://example.com/update.txt", &[KEY]);
     for dev in ["0.1.0-5-gabc", "1.2.0-rc.1"] {
       let e = check(&feed, dev).unwrap_err();
-      assert_eq!(e.kind(), io::ErrorKind::Unsupported, "{dev}");
+      assert!(matches!(e, Error::Unsupported(_)), "{dev}");
       assert!(e.to_string().contains("dev build"), "{e}");
     }
   }
@@ -552,7 +549,7 @@ mod tests {
     let (r, parent) = (Release::test("2.0"), dir("test-release"));
     assert_eq!((r.version.as_str(), r.size, &r.notes), ("2.0", 0, &None));
     let e = fetch(&r, &parent, &mut |_, _| {}).unwrap_err();
-    assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{e}");
+    assert!(matches!(e, Error::Feed(_)), "{e}");
     assert!(download(&r, |_, _| {}).is_err(), "a build, and no file");
     assert_eq!(fs::read_dir(&parent).unwrap().count(), 0, "nothing fetched");
     fs::remove_dir(parent).unwrap();
@@ -560,6 +557,6 @@ mod tests {
 
   #[test]
   fn a_build_is_unsupported() {
-    assert_eq!(supported().unwrap_err().kind(), io::ErrorKind::Unsupported);
+    assert!(matches!(supported().unwrap_err(), Error::Unsupported(_)));
   }
 }

@@ -16,7 +16,9 @@ use std::process::{Child, Command};
 use std::sync::OnceLock;
 
 pub use super::unix::{alive, busy, wait_exit};
+use super::{Big, Progress};
 use crate::installer::NOTE;
+use crate::{Error, Result};
 
 // MARK: libcurl
 
@@ -124,12 +126,12 @@ unsafe extern "C" fn write(data: *const u8, size: usize, n: usize, out: P) -> us
 }
 
 /// The body of `url` into `to` by libcurl's easy API, its write callback into the file, redirects
-/// only to https (http too from loopback)
+/// only to https (http too from loopback), `big` the error past `max` bytes
 /// ([libcurl-easy](https://curl.se/libcurl/c/libcurl-easy.html), as of 2026-10).
-pub fn get(url: &str, to: &Path, max: u64, progress: &mut dyn FnMut(u64)) -> io::Result<()> {
-  let none = || io::Error::new(io::ErrorKind::Unsupported, "libcurl.so.4 is not installed");
+pub fn get(url: &str, to: &Path, max: u64, big: Big, progress: Progress) -> Result<()> {
+  let none = || Error::Unsupported("libcurl.so.4 is not installed".into());
   let c = curl().ok_or_else(none)?;
-  let c_url = CString::new(url).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, url))?;
+  let c_url = CString::new(url).map_err(|_| super::http(url, "not a URL"))?;
   let tell = &mut |left| progress(max - left);
   let mut out = Out { file: File::create(to)?, err: None, left: max, tell, panicked: None };
   let mut code: c_long = 0;
@@ -138,7 +140,7 @@ pub fn get(url: &str, to: &Path, max: u64, progress: &mut dyn FnMut(u64)) -> io:
   let done = unsafe {
     let h = (c.init)();
     if h.is_null() {
-      return Err(io::Error::other("curl_easy_init failed"));
+      return Err(super::http(url, "curl_easy_init failed"));
     }
 
     (c.setopt)(h, URL, c_url.as_ptr());
@@ -171,24 +173,25 @@ pub fn get(url: &str, to: &Path, max: u64, progress: &mut dyn FnMut(u64)) -> io:
     super::status(url, code as u32)?;
   }
 
-  let big = out.err.as_ref().is_some_and(|e| e.kind() == io::ErrorKind::InvalidData);
-  out.err.map_or(Ok(()), |e| Err(if big { super::too_big(url, max) } else { e }))?;
+  let too_big = out.err.as_ref().is_some_and(|e| e.kind() == io::ErrorKind::InvalidData);
+  out.err.map_or(Ok(()), |e| Err(if too_big { big() } else { e.into() }))?;
 
   if done != 0 {
     // SAFETY: curl's static message for its code.
     let why = unsafe { CStr::from_ptr((c.strerror)(done)) };
-    return Err(io::Error::other(format!("{url}: {}", why.to_string_lossy())));
+    return Err(super::http(url, why.to_string_lossy()));
   }
 
   super::status(url, code as u32)?;
-  out.file.sync_all()
+  Ok(out.file.sync_all()?)
 }
 
 // MARK: Install
 
 /// Makes the AppImage downloaded as `file` executable: the new app, for any target.
-pub fn unpack(file: &Path, _: &Path) -> io::Result<PathBuf> {
-  fs::set_permissions(file, fs::Permissions::from_mode(0o755)).map(|()| file.to_owned())
+pub fn unpack(file: &Path, _: &Path) -> Result<PathBuf> {
+  fs::set_permissions(file, fs::Permissions::from_mode(0o755))?;
+  Ok(file.to_owned())
 }
 
 /// Starts the AppImage `app` with `args` and `note` in its [NOTE] (none inherited), not waiting

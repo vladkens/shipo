@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{env, fs, io, thread};
 
 use crate::platform::imp;
-use crate::{OS, Os, error};
+use crate::{Error, OS, Os, Result};
 
 /// The argument that makes [crate::finish] the installer.
 pub const INSTALL: &str = "--shipo-install";
@@ -117,9 +117,12 @@ type Start<'a> = &'a dyn Fn(&Path, &[OsString], Option<&str>) -> io::Result<()>;
 fn apply(os: Os, job: &Job, s: &Seams) -> io::Result<()> {
   fs::write(job.dir.join(MARK), std::process::id().to_string())?;
   let done = match (s.wait)(QUIT) {
-    false => Err(error(io::ErrorKind::TimedOut, format!("the app didn't quit in {QUIT:?}"))),
+    false => {
+      Err(io::Error::new(io::ErrorKind::TimedOut, format!("the app didn't quit in {QUIT:?}")))
+    }
     true => put(os, job, s).map_err(|e| {
-      let e = error(e.kind(), format!("installing {}: {e}", job.target.display()));
+      // The note, which the app's `finish` gives as `Error::Install`.
+      let e = io::Error::new(e.kind(), format!("{}: {e}", job.target.display()));
       let _ = (s.start)(&job.target, &job.args, Some(&e.to_string()));
       e
     }),
@@ -192,17 +195,17 @@ fn also(e: io::Error, undone: io::Result<()>) -> io::Error {
 // MARK: Handshake
 
 /// Starts the installer with `spawn`, which gives what kills it, and waits up to `cap` for its
-/// [MARK] in `dir`; `TimedOut`, the installer killed, when none comes.
+/// [MARK] in `dir`; [Error::Install], the installer killed, when none comes.
 pub fn handshake<K: FnOnce()>(
   dir: &Path,
   cap: Duration,
   spawn: impl FnOnce() -> io::Result<K>,
-) -> io::Result<()> {
+) -> Result<()> {
   let (kill, deadline) = (spawn()?, Instant::now() + cap);
   while !dir.join(MARK).exists() {
     if Instant::now() > deadline {
       kill();
-      return Err(error(io::ErrorKind::TimedOut, format!("the installer gave no sign in {cap:?}")));
+      return Err(Error::Install(format!("the installer gave no sign in {cap:?}")));
     }
 
     thread::sleep(Duration::from_millis(20));
@@ -257,7 +260,9 @@ impl Folder {
     let mut made = fs::DirBuilder::new();
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut made, 0o700);
-    made.create(&dir).map_err(|e| error(e.kind(), format!("{}: {e}", parent.display())))?;
+    made
+      .create(&dir)
+      .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", parent.display())))?;
     Ok(Self(dir))
   }
 
@@ -590,7 +595,7 @@ mod tests {
   fn install_waits_for_the_installers_mark() {
     let (root, cap, killed) = (dir("mark"), Duration::from_millis(100), Cell::new(false));
     let e = handshake(&root, cap, || Ok(|| killed.set(true))).unwrap_err();
-    assert_eq!(e.kind(), io::ErrorKind::TimedOut);
+    assert!(matches!(e, Error::Install(_)), "{e}");
     assert!(killed.get() && root.exists(), "killed, the staging folder kept");
     killed.set(false);
     let mark = root.join(MARK);

@@ -22,36 +22,36 @@ use objc2_foundation::{
 use objc2_security::{SecCSFlags, SecCode, SecStaticCode, kSecCSCheckAllArchitectures};
 
 pub use super::unix::{alive, busy, detach, wait_exit};
-use crate::bad;
+use super::{Big, Progress};
 use crate::installer::NOTE;
+use crate::{Error, Result};
 
 // MARK: HTTP
 
 /// The body of `url` into `to` by a download task, its file moved into place by the completion
-/// handler, which runs on the session's queue while this waits. The shared session follows
-/// redirects by its defaults, to http too: the feed's signature and the file's hash guard what
-/// comes.
-pub fn get(url: &str, to: &Path, max: u64, progress: &mut dyn FnMut(u64)) -> io::Result<()> {
-  let not_url = || io::Error::new(io::ErrorKind::InvalidInput, format!("{url} is not a URL"));
-  let u = NSURL::URLWithString(&NSString::from_str(url)).ok_or_else(not_url)?;
+/// handler, which runs on the session's queue while this waits; `big` the error past `max` bytes.
+/// The shared session follows redirects by its defaults, to http too: the feed's signature and the
+/// file's hash guard what comes.
+pub fn get(url: &str, to: &Path, max: u64, big: Big, progress: Progress) -> Result<()> {
+  let u = NSURL::URLWithString(&NSString::from_str(url));
+  let u = u.ok_or_else(|| super::http(url, "not a URL"))?;
   let policy = NSURLRequestCachePolicy::ReloadIgnoringLocalCacheData;
   let request = NSURLRequest::requestWithURL_cachePolicy_timeoutInterval(&u, policy, 60.0);
   let (tx, rx) = mpsc::channel();
-  let (link, to) = (url.to_owned(), to.to_owned());
+  let (link, into) = (url.to_owned(), to.to_owned());
   let done = RcBlock::new(move |file: *mut NSURL, res: *mut NSURLResponse, err: *mut NSError| {
     // SAFETY: each is null or an object that lives through the call.
     let (file, res, err) = unsafe { (file.as_ref(), res.as_ref(), err.as_ref()) };
     let code =
       res.and_then(|r| r.downcast_ref::<NSHTTPURLResponse>()).map_or(0, |r| r.statusCode());
     let r = match (err, file.and_then(|f| f.path())) {
-      (Some(e), _) => Err(io::Error::other(format!("{link}: {}", e.localizedDescription()))),
-      (None, None) => Err(io::Error::other(format!("{link}: no file"))),
-      (None, Some(from)) => super::status(&link, code as u32).and_then(|_| {
-        // The task's file is removed once the handler returns; it may be on another volume.
+      (Some(e), _) => Err(super::http(&link, e.localizedDescription())),
+      (None, None) => Err(super::http(&link, "no file")),
+      // The task's file is removed once the handler returns; it may be on another volume. Its
+      // size is checked once it is in place.
+      (None, Some(from)) => super::status(&link, code as u32).and_then(|()| {
         let from = from.to_string();
-        let fits = fs::metadata(&from)?.len() <= max;
-        fits.then_some(()).ok_or_else(|| super::too_big(&link, max))?;
-        fs::rename(&from, &to).or_else(|_| fs::copy(&from, &to).map(drop))
+        Ok(fs::rename(&from, &into).or_else(|_| fs::copy(&from, &into).map(drop))?)
       }),
     };
 
@@ -63,27 +63,30 @@ pub fn get(url: &str, to: &Path, max: u64, progress: &mut dyn FnMut(u64)) -> io:
     NSURLSession::sharedSession().downloadTaskWithRequest_completionHandler(&request, &done)
   };
   task.resume();
-  // The bytes so far told and stopped once past `max`; the handler checks the file it got.
-  let never = || io::Error::other(format!("{url}: the task never ended"));
+  // The bytes so far told and stopped once past `max`; the file it got checked too.
+  let never = || super::http(url, "the task never ended");
   loop {
     match (rx.recv_timeout(Duration::from_millis(50)), task.countOfBytesReceived() as u64) {
-      (Ok(r), n) => return r.map(|()| progress(n)),
+      (Ok(r), n) => {
+        let fits = r.and_then(|()| Ok(fs::metadata(to)?.len() <= max))?;
+        return fits.then(|| progress(n)).ok_or_else(big);
+      }
       (Err(RecvTimeoutError::Timeout), n) if n <= max => progress(n),
       (Err(RecvTimeoutError::Timeout), _) => break task.cancel(),
       (Err(RecvTimeoutError::Disconnected), _) => return Err(never()),
     }
   }
 
-  Err(super::too_big(url, max))
+  Err(big())
 }
 
 // MARK: Image and signature
 
 /// Copies the one bundle at the top of the disk image `file` into `file`'s folder, as
 /// `<folder>/new/<name>.app`, once it [accepts] it in place of `app`: the image attached read-only
-/// at `<folder>/volume`, unseen by Finder, and detached again, forced if it must be. `InvalidData`
-/// for an image with more than one `.app` at its top, or none.
-pub fn unpack(file: &Path, app: &Path) -> io::Result<PathBuf> {
+/// at `<folder>/volume`, unseen by Finder, and detached again, forced if it must be.
+/// [Error::Bundle] for an image with more than one `.app` at its top, or none.
+pub fn unpack(file: &Path, app: &Path) -> Result<PathBuf> {
   let dir = file.parent().unwrap_or(file);
   let (volume, hdiutil) = (dir.join("volume"), || Command::new("/usr/bin/hdiutil"));
   let attach = ["attach", "-nobrowse", "-noautoopen", "-readonly", "-mountpoint"];
@@ -91,15 +94,17 @@ pub fn unpack(file: &Path, app: &Path) -> io::Result<PathBuf> {
   let new = copy(&volume, dir, app);
   let detach = |force: &[&str]| run(hdiutil().arg("detach").arg(&volume).args(force));
   let detached = detach(&[]).or_else(|_| detach(&["-force"]));
-  new.and_then(|new| detached.map(|()| new))
+  let new = new?;
+  detached?;
+  Ok(new)
 }
 
 /// The one bundle at the top of `volume`, accepted for `app` and copied into `dir` by `ditto`.
-fn copy(volume: &Path, dir: &Path, app: &Path) -> io::Result<PathBuf> {
+fn copy(volume: &Path, dir: &Path, app: &Path) -> Result<PathBuf> {
   let all = fs::read_dir(volume)?.flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_dir()));
   let mut apps = all.map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "app"));
   let (Some(one), None) = (apps.next(), apps.next()) else {
-    return Err(bad("the image holds more than one app, or none"));
+    return Err(Error::Bundle("the image holds more than one app, or none".into()));
   };
 
   accepts(&one, app)?;
@@ -111,14 +116,14 @@ fn copy(volume: &Path, dir: &Path, app: &Path) -> io::Result<PathBuf> {
 /// Whether the bundle `new` may replace the bundle `app`: the same bundle id, and signed so that
 /// it meets `app`'s designated requirement, checked for every architecture as Sparkle's
 /// `SUCodeSigningVerifier` does (an ad-hoc app's is its own cdhash, which no other build meets);
-/// `InvalidData` with Security's reason if not.
-pub fn accepts(new: &Path, app: &Path) -> io::Result<()> {
+/// [Error::Bundle] with Security's reason if not.
+pub fn accepts(new: &Path, app: &Path) -> Result<()> {
   let id = |p: &Path| {
     let bundle = NSBundle::bundleWithPath(&NSString::from_str(&p.to_string_lossy()));
     bundle?.bundleIdentifier().map(|id| id.to_string())
   };
   if id(new).is_none() || id(new) != id(app) {
-    return Err(bad(format!("{} is not the app of {}", new.display(), app.display())));
+    return Err(Error::Bundle(format!("{} is not the app of {}", new.display(), app.display())));
   }
 
   let (code, mut req, mut err) = (static_code(app)?, ptr::null_mut(), ptr::null_mut());
@@ -137,13 +142,14 @@ pub fn accepts(new: &Path, app: &Path) -> io::Result<()> {
   // SAFETY: an error the call made, ours to release.
   let why = NonNull::new(err).and_then(|e| unsafe { CFRetained::from_raw(e) }.description());
   let why = why.map_or(format!("status {status}"), |d| d.to_string());
-  Err(bad(format!("{} doesn't meet {}'s requirement: {why}", new.display(), app.display())))
+  let (new, app) = (new.display(), app.display());
+  Err(Error::Bundle(format!("{new} doesn't meet {app}'s requirement: {why}")))
 }
 
 /// The signed code of the bundle at `path`.
-fn static_code(path: &Path) -> io::Result<CFRetained<SecStaticCode>> {
+fn static_code(path: &Path) -> Result<CFRetained<SecStaticCode>> {
   let url = CFURL::from_directory_path(path);
-  let url = url.ok_or_else(|| bad(format!("{} is not a path", path.display())))?;
+  let url = url.ok_or_else(|| Error::Bundle(format!("{} is not a path", path.display())))?;
   let mut code = ptr::null();
   // SAFETY: the URL lives through the call, `code` an out pointer it sets on success.
   let status = unsafe {
@@ -152,12 +158,12 @@ fn static_code(path: &Path) -> io::Result<CFRetained<SecStaticCode>> {
   owned(path, status, code.cast_mut())
 }
 
-/// What a Security call of `status` made at `made`, ours to release; `InvalidData` if it failed.
-fn owned<T: Type>(path: &Path, status: i32, made: *mut T) -> io::Result<CFRetained<T>> {
+/// What a Security call of `status` made at `made`, ours to release; [Error::Bundle] if it failed.
+fn owned<T: Type>(path: &Path, status: i32, made: *mut T) -> Result<CFRetained<T>> {
   let made = NonNull::new(made).filter(|_| status == 0);
   // SAFETY: an object the call made with a retain count of one.
   let made = made.map(|m| unsafe { CFRetained::from_raw(m) });
-  made.ok_or_else(|| bad(format!("{}: Security's status {status}", path.display())))
+  made.ok_or_else(|| Error::Bundle(format!("{}: Security's status {status}", path.display())))
 }
 
 // MARK: Install
@@ -182,7 +188,7 @@ pub fn exchange(a: &Path, b: &Path) -> io::Result<()> {
 /// Opens the bundle `app` as a new instance with `args` and `note` in its [NOTE] without taking
 /// the focus, by `open -n -g`: started by launchd, it is its own responsible process for TCC and
 /// gets launchd's environment, not this process's, and `/` as its working directory.
-/// `InvalidData` with `open`'s error if LaunchServices fails.
+/// `open`'s error if LaunchServices fails.
 pub fn start(app: &Path, args: &[OsString], note: Option<&str>) -> io::Result<()> {
   let mut open = Command::new("/usr/bin/open");
   open.args(["-n", "-g"]);
@@ -193,14 +199,12 @@ pub fn start(app: &Path, args: &[OsString], note: Option<&str>) -> io::Result<()
   run(open.arg(app).arg("--args").args(args))
 }
 
-/// Runs `cmd` to its end; `InvalidData` with its stderr if it failed.
+/// Runs `cmd` to its end; an error with its stderr if it failed.
 fn run(cmd: &mut Command) -> io::Result<()> {
   let out = cmd.output()?;
   let program = cmd.get_program().to_string_lossy();
-  match out.status.success() {
-    true => Ok(()),
-    false => Err(bad(format!("{program}: {}", String::from_utf8_lossy(&out.stderr).trim()))),
-  }
+  let why = || format!("{program}: {}", String::from_utf8_lossy(&out.stderr).trim());
+  out.status.success().then_some(()).ok_or_else(|| io::Error::other(why()))
 }
 
 #[cfg(test)]
@@ -232,7 +236,7 @@ mod tests {
     bundle(&root.join("b/A.app"), "com.example.b", "1");
     for other in ["v2/A.app", "b/A.app"] {
       let e = accepts(&root.join(other), &app).unwrap_err();
-      assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{other}: {e}");
+      assert!(matches!(e, Error::Bundle(_)), "{other}: {e}");
     }
 
     // The exchange on the temp dir's APFS: each path holds the other's bundle.
@@ -273,14 +277,14 @@ mod tests {
     for (name, apps) in [("one", &[][..]), ("two", &["A.app", "B.app"]), ("none", &[])] {
       if name != "one" {
         let e = unpack(&image(name, apps), &app).unwrap_err();
-        assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{name}: {e}");
+        assert!(matches!(e, Error::Bundle(_)), "{name}: {e}");
       }
 
       assert!(!root.join(name).join("volume/readme").exists(), "{name}: detached");
     }
 
     let not_image = unpack(&app.join("Contents/Info.plist"), &app).unwrap_err();
-    assert_eq!(not_image.kind(), io::ErrorKind::InvalidData);
+    assert!(not_image.to_string().contains("hdiutil"), "{not_image}");
     fs::remove_dir_all(root).unwrap();
   }
 }

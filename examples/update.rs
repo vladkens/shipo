@@ -14,7 +14,7 @@
 //! `update --update <feed url> <key>...` updates, printing the download's percentage.
 
 use std::env;
-use std::io::{self, ErrorKind};
+use std::error::Error;
 use std::process::ExitCode;
 
 use shipo::Feed;
@@ -26,7 +26,7 @@ pub const VERSION: &str = match option_env!("UPDATE_VERSION") {
 const USAGE: &str = "usage: update [--check | --update <feed url> <key>...]";
 
 /// What the arguments ask: the version; the release the feed offers; that release installed.
-fn run(args: &[String]) -> io::Result<()> {
+fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
   let (update, url, keys) = match args {
     [] => {
       println!("{VERSION}");
@@ -34,7 +34,7 @@ fn run(args: &[String]) -> io::Result<()> {
     }
     [flag, url, keys @ ..] if !keys.is_empty() && flag == "--check" => (false, url, keys),
     [flag, url, keys @ ..] if !keys.is_empty() && flag == "--update" => (true, url, keys),
-    _ => return Err(io::Error::new(ErrorKind::InvalidInput, USAGE)),
+    _ => return Err(USAGE.into()),
   };
 
   let keys = keys.iter().map(String::as_str).collect::<Vec<_>>();
@@ -61,12 +61,11 @@ fn run(args: &[String]) -> io::Result<()> {
 fn main() -> ExitCode {
   // First, before the arguments: the installer runs here and exits.
   if let Some(e) = shipo::finish() {
-    eprintln!("{e}");
+    eprintln!("the update failed: {e}");
   }
 
   match run(&env::args().skip(1).collect::<Vec<_>>()) {
     Ok(()) => ExitCode::SUCCESS,
-    // The library's errors say they are the update's.
     Err(e) => {
       eprintln!("{e}");
       ExitCode::FAILURE

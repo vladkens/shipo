@@ -30,7 +30,9 @@ use windows_sys::Win32::System::Threading::{
 };
 use windows_sys::core::BOOL;
 
+use super::{Big, Progress};
 use crate::installer::NOTE;
+use crate::{Error, Result};
 
 // MARK: HTTP
 
@@ -44,12 +46,19 @@ impl Drop for Handle {
   }
 }
 
-fn handle(h: *mut c_void) -> io::Result<Handle> {
-  if h.is_null() { Err(io::Error::last_os_error()) } else { Ok(Handle(h)) }
+/// A handle a WinHTTP call for `url` gave; its error if none.
+fn handle(url: &str, h: *mut c_void) -> Result<Handle> {
+  if h.is_null() { Err(failed(url)) } else { Ok(Handle(h)) }
 }
 
-fn ok(done: BOOL) -> io::Result<()> {
-  if done == 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
+/// A WinHTTP call for `url` that returns whether it succeeded; its error if not.
+fn ok(url: &str, done: BOOL) -> Result<()> {
+  if done == 0 { Err(failed(url)) } else { Ok(()) }
+}
+
+/// The last WinHTTP call's error, as `url`'s.
+fn failed(url: &str) -> Error {
+  super::http(url, io::Error::last_os_error())
 }
 
 /// `s` as a NUL-terminated UTF-16 string, for the `W` calls.
@@ -58,8 +67,9 @@ fn wide(s: &str) -> Vec<u16> {
 }
 
 /// The body of `url` into `to` by WinHTTP with the system's proxy
-/// (`WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY`), which follows redirects but not from https to http.
-pub fn get(url: &str, to: &Path, max: u64, progress: &mut dyn FnMut(u64)) -> io::Result<()> {
+/// (`WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY`), which follows redirects but not from https to http;
+/// `big` the error past `max` bytes.
+pub fn get(url: &str, to: &Path, max: u64, big: Big, progress: Progress) -> Result<()> {
   let w = wide(url);
   let mut parts = URL_COMPONENTS {
     dwStructSize: size_of::<URL_COMPONENTS>() as u32,
@@ -69,7 +79,7 @@ pub fn get(url: &str, to: &Path, max: u64, progress: &mut dyn FnMut(u64)) -> io:
     ..Default::default()
   };
   // SAFETY: a NUL-terminated URL; the parts point into it, the query right after the path.
-  ok(unsafe { WinHttpCrackUrl(w.as_ptr(), 0, 0, &mut parts) })?;
+  ok(url, unsafe { WinHttpCrackUrl(w.as_ptr(), 0, 0, &mut parts) })?;
   let part = |p: *const u16, n: u32| {
     // SAFETY: a part WinHttpCrackUrl found in `w`, null when missing.
     let s =
@@ -85,33 +95,34 @@ pub fn get(url: &str, to: &Path, max: u64, progress: &mut dyn FnMut(u64)) -> io:
   // SAFETY: NUL-terminated strings, null for the defaults; a handle dropped after its children
   // (locals drop in reverse); the status into a u32 of its length.
   unsafe {
-    let session = handle(WinHttpOpen(agent.as_ptr(), proxy, null(), null(), 0))?;
-    let connect = handle(WinHttpConnect(session.0, host.as_ptr(), parts.nPort, 0))?;
+    let session = handle(url, WinHttpOpen(agent.as_ptr(), proxy, null(), null(), 0))?;
+    let connect = handle(url, WinHttpConnect(session.0, host.as_ptr(), parts.nPort, 0))?;
     let req =
       WinHttpOpenRequest(connect.0, verb.as_ptr(), path.as_ptr(), null(), null(), null(), secure);
-    let req = handle(req)?;
-    ok(WinHttpSendRequest(req.0, null(), 0, null(), 0, 0, 0))?;
-    ok(WinHttpReceiveResponse(req.0, null_mut()))?;
+    let req = handle(url, req)?;
+    ok(url, WinHttpSendRequest(req.0, null(), 0, null(), 0, 0, 0))?;
+    ok(url, WinHttpReceiveResponse(req.0, null_mut()))?;
     let query = WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER;
-    ok(WinHttpQueryHeaders(req.0, query, null(), (&raw mut code).cast(), &mut len, null_mut()))?;
+    let into = (&raw mut code).cast();
+    ok(url, WinHttpQueryHeaders(req.0, query, null(), into, &mut len, null_mut()))?;
     super::status(url, code)?;
-    read(&req, to, url, max, progress)
+    read(&req, to, url, max, big, progress)
   }
 }
 
-/// The body of the request `req` for `url` into a new file at `to`, up to `max` bytes, `tell`ing
-/// the bytes so far.
-fn read(req: &Handle, to: &Path, url: &str, max: u64, tell: &mut dyn FnMut(u64)) -> io::Result<()> {
+/// The body of the request `req` for `url` into a new file at `to`, up to `max` bytes (`big`'s
+/// error past them), `tell`ing the bytes so far.
+fn read(req: &Handle, to: &Path, url: &str, max: u64, big: Big, tell: Progress) -> Result<()> {
   let (mut file, mut buf, mut left) = (File::create(to)?, vec![0u8; 1 << 16], max);
   loop {
     let mut n = 0;
     // SAFETY: a buffer of its length.
-    ok(unsafe { WinHttpReadData(req.0, buf.as_mut_ptr().cast(), buf.len() as u32, &mut n) })?;
+    ok(url, unsafe { WinHttpReadData(req.0, buf.as_mut_ptr().cast(), buf.len() as u32, &mut n) })?;
     if n == 0 {
-      return file.sync_all();
+      return Ok(file.sync_all()?);
     }
 
-    left = left.checked_sub(n as u64).ok_or_else(|| super::too_big(url, max))?;
+    left = left.checked_sub(n as u64).ok_or_else(big)?;
     file.write_all(&buf[..n as usize])?;
     tell(max - left);
   }
@@ -120,7 +131,7 @@ fn read(req: &Handle, to: &Path, url: &str, max: u64, tell: &mut dyn FnMut(u64))
 // MARK: Install
 
 /// The setup downloaded as `file`, run as it came: the new app, for any target.
-pub fn unpack(file: &Path, _: &Path) -> io::Result<PathBuf> {
+pub fn unpack(file: &Path, _: &Path) -> Result<PathBuf> {
   Ok(file.to_owned())
 }
 

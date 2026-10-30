@@ -31,6 +31,7 @@ plist = { version = "1.10", optional = true }
 png = { version = "0.18.1", default-features = false, optional = true }
 serde = { version = "1.0.229", features = ["derive"], optional = true }
 tar = { version = "0.4.46", default-features = false, optional = true }
+thiserror = "2.0.21"
 toml = { version = "1.1.8", default-features = false, features = ["parse", "serde"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

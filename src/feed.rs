@@ -10,7 +10,7 @@ use std::path::Path;
 use ed25519_compact::sha512::Hash;
 use ed25519_compact::{PublicKey, Signature};
 
-use crate::{bad, error};
+use crate::{Error, Result};
 
 // MARK: Feed and release
 
@@ -36,22 +36,22 @@ impl<'a> Feed<'a> {
 
   /// The release the feed's bytes `text`, fetched by the app itself, offer this platform when it
   /// is newer than `current`; [crate::check] fetches and reads in one. Its `sig` line is checked
-  /// first (`InvalidData` if it is not the last line, comes twice or no key verifies it;
-  /// `InvalidInput` for no key or a malformed one), the feed read after; a version not newer, or
-  /// none for this platform, is `None`.
-  pub fn read(&self, text: &[u8], current: &str) -> io::Result<Option<Release>> {
+  /// first ([Error::Signature] if it is not the last line, comes twice or no key verifies it;
+  /// [Error::Keys] for no key or a malformed one), the feed read after ([Error::Feed]); a version
+  /// not newer, or none for this platform, is `None`.
+  pub fn read(&self, text: &[u8], current: &str) -> Result<Option<Release>> {
     let (data, sig) = signed(text)?;
     verify(&self.public_keys()?, data.as_bytes(), sig)?;
     release(data, current, &platform())
   }
 
-  /// The keys, each 64 hex digits of a valid Ed25519 public key; `InvalidInput`, whatever the
+  /// The keys, each 64 hex digits of a valid Ed25519 public key; [Error::Keys], whatever the
   /// feed, for none or a malformed one: the app's own mistake.
-  pub(crate) fn public_keys(&self) -> io::Result<Vec<PublicKey>> {
+  pub(crate) fn public_keys(&self) -> Result<Vec<PublicKey>> {
     let key = |k: &str| hex(k).map(PublicKey::new).filter(|k| k.validate().is_ok());
     let keys = self.keys.iter().map(|k| key(k)).collect::<Option<Vec<_>>>();
     let keys = keys.filter(|k| !k.is_empty());
-    keys.ok_or_else(|| error(io::ErrorKind::InvalidInput, "the app has no key, or a bad one"))
+    keys.ok_or(Error::Keys)
   }
 }
 
@@ -79,12 +79,14 @@ impl Release {
     Self { version: version.into(), notes: None, url: String::new(), size: 0, sha512: [0; 64] }
   }
 
-  /// Checks the file downloaded for the release against its size and SHA-512: `InvalidData` if
-  /// either differs.
-  pub(crate) fn verify(&self, file: &Path) -> io::Result<()> {
+  /// Checks the file downloaded for the release against its size and SHA-512: [Error::Mismatch]
+  /// if either differs.
+  pub(crate) fn verify(&self, file: &Path) -> Result<()> {
     match fs::metadata(file)?.len() == self.size && sha512(file)? == self.sha512 {
       true => Ok(()),
-      false => Err(bad(format!("{} is not the file of {}", file.display(), self.version))),
+      false => {
+        Err(Error::Mismatch(format!("{} is not the file of {}", file.display(), self.version)))
+      }
     }
   }
 }
@@ -100,26 +102,26 @@ pub fn platform() -> String {
 // MARK: Signature and hash
 
 /// The feed `text` split at its last line, `sig <signature>`: the text before that line and the
-/// signature's hex; `InvalidData` if it is not UTF-8, the last line is not that or another line is
-/// too.
-fn signed(text: &[u8]) -> io::Result<(&str, &str)> {
-  let text = std::str::from_utf8(text).map_err(|_| bad("the feed is not UTF-8"))?;
+/// signature's hex; [Error::Feed] if it is not UTF-8, [Error::Signature] if the last line is not
+/// that or another line is too.
+fn signed(text: &[u8]) -> Result<(&str, &str)> {
+  let text = std::str::from_utf8(text).map_err(|_| Error::Feed("not UTF-8".into()))?;
   let end = text.strip_suffix('\n').unwrap_or(text);
   let start = end.rfind('\n').map_or(0, |i| i + 1);
   let (data, last) = (&text[..start], &end[start..]);
   let sig = last.strip_suffix('\r').unwrap_or(last).strip_prefix("sig ");
   match sig.filter(|_| !data.lines().any(|l| l.split(' ').next() == Some("sig"))) {
     Some(sig) => Ok((data, sig)),
-    None => Err(bad("the feed's last line is not its one `sig` line")),
+    None => Err(Error::Signature("the last line is not the feed's one `sig` line".into())),
   }
 }
 
 /// Checks `sig`, the hex Ed25519 signature of `data`, by any of `keys`.
-fn verify(keys: &[PublicKey], data: &[u8], sig: &str) -> io::Result<()> {
+fn verify(keys: &[PublicKey], data: &[u8], sig: &str) -> Result<()> {
   let sig = hex(sig).map(Signature::new);
   match sig.is_some_and(|s| keys.iter().any(|k| k.verify(data, &s).is_ok())) {
     true => Ok(()),
-    false => Err(bad("the feed's signature is wrong")),
+    false => Err(Error::Signature("no key of the app verifies it".into())),
   }
 }
 
@@ -142,12 +144,13 @@ fn sha512(path: &Path) -> io::Result<[u8; 64]> {
 /// `version` of one word, at most one `notes` of one [secure] URL and one line of the platform's
 /// `<size> <sha512> <url>`, all checked before the versions are; a line of another first word
 /// skipped, repeated or not.
-pub fn release(text: &str, current: &str, platform: &str) -> io::Result<Option<Release>> {
+pub fn release(text: &str, current: &str, platform: &str) -> Result<Option<Release>> {
+  let bad = |what: String| Err(Error::Feed(what));
   let (mut version, mut notes, mut file) = (None, None, None);
   for line in text.lines() {
     let (word, rest) = line.split_once(' ').unwrap_or((line, ""));
     let slot = match word {
-      "" => return Err(bad(format!("the feed's line {line:?} has no first word"))),
+      "" => return bad(format!("line {line:?} has no first word")),
       "version" => &mut version,
       "notes" => &mut notes,
       _ if word == platform => &mut file,
@@ -156,19 +159,19 @@ pub fn release(text: &str, current: &str, platform: &str) -> io::Result<Option<R
     };
 
     if slot.replace(rest).is_some() {
-      return Err(bad(format!("the feed's {word} line is repeated")));
+      return bad(format!("its {word} line is repeated"));
     }
   }
 
   let version = version.filter(|v| !v.is_empty() && !v.contains(' '));
-  let version = version.ok_or_else(|| bad("the feed has no version, or a bad one"))?;
+  let Some(version) = version else { return bad("no version, or a bad one".into()) };
   if let Some(n) = notes.filter(|n| !secure(n)) {
-    return Err(bad(format!("the feed's notes {n:?} are not one https URL")));
+    return bad(format!("notes {n:?} are not one https URL"));
   }
 
   let file = file.map(|f| fields(f, platform)).transpose()?;
   match newer(version, current) {
-    None => return Err(bad(format!("versions {version} and {current} don't compare"))),
+    None => return bad(format!("versions {version} and {current} don't compare")),
     Some(false) => return Ok(None),
     Some(true) => {}
   }
@@ -179,14 +182,14 @@ pub fn release(text: &str, current: &str, platform: &str) -> io::Result<Option<R
 }
 
 /// A platform's `<size> <sha512> <url>`, of its line's `rest`.
-fn fields<'a>(rest: &'a str, platform: &str) -> io::Result<(u64, [u8; 64], &'a str)> {
-  let what = || bad(format!("the feed's {platform} line is not <size> <sha512> <url>"));
+fn fields<'a>(rest: &'a str, platform: &str) -> Result<(u64, [u8; 64], &'a str)> {
+  let what = || Error::Feed(format!("its {platform} line is not <size> <sha512> <url>"));
   let [size, sha512, url] = rest.split(' ').collect::<Vec<_>>()[..] else { return Err(what()) };
   let size = size.parse().ok().filter(|_| size.bytes().all(|b| b.is_ascii_digit()));
   let (Some(size), Some(sha512)) = (size, hex(sha512)) else { return Err(what()) };
   match secure(url) {
     true => Ok((size, sha512, url)),
-    false => Err(bad(format!("{url} is not https"))),
+    false => Err(Error::Feed(format!("{url:?} is not https"))),
   }
 }
 
@@ -285,7 +288,7 @@ mod tests {
     assert_eq!(r.notes.as_deref(), Some(page));
     for notes in ["", "http://example.com/v2", "file:///etc", "https://a b", "https://a\tb"] {
       let e = release(&feed(notes), "1", "p").unwrap_err();
-      assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{notes:?}: {e}");
+      assert!(matches!(e, Error::Feed(_)), "{notes:?}: {e}");
     }
 
     let twice = format!("{}notes {page}\n", feed(page));
@@ -324,7 +327,7 @@ mod tests {
       let feed = line(&file.replace("{ABC}", ABC));
       for current in ["1", "3"] {
         let e = release(&feed, current, "p").unwrap_err();
-        assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{file} over {current}: {e}");
+        assert!(matches!(e, Error::Feed(_)), "{file} over {current}: {e}");
       }
     }
 
@@ -400,7 +403,7 @@ mod tests {
   }
 
   /// [FEED] read with [KEY].
-  fn read_feed(text: &str) -> io::Result<Option<Release>> {
+  fn read_feed(text: &str) -> Result<Option<Release>> {
     Feed::new("https://example.com/update.txt", &[KEY]).read(text.as_bytes(), "1.0")
   }
 
@@ -435,7 +438,7 @@ mod tests {
     assert_eq!((r.version.as_str(), r.notes.as_deref()), ("2", Some("https://a/v2")));
     let working = Feed::new("https://a", &[KEY]);
     let e = working.read(feed.as_bytes(), "1").unwrap_err();
-    assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+    assert!(matches!(e, Error::Signature(_)), "{e}");
   }
 
   #[test]
@@ -444,11 +447,7 @@ mod tests {
     let zero = "00".repeat(32);
     for hex in [&["AAAA"][..], &[KEY, &KEY[2..]], &[KEY, &zero], &[]] {
       let feed = Feed::new("https://a", hex);
-      assert_eq!(
-        feed.read(FEED.as_bytes(), "1.0").unwrap_err().kind(),
-        io::ErrorKind::InvalidInput,
-        "{hex:?}"
-      );
+      assert!(matches!(feed.read(FEED.as_bytes(), "1.0").unwrap_err(), Error::Keys), "{hex:?}");
     }
   }
 
@@ -466,7 +465,7 @@ mod tests {
       format!("{data}sig {sig} \n"),
     ] {
       let e = read_feed(&feed).unwrap_err();
-      assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{feed:?}: {e}");
+      assert!(matches!(e, Error::Signature(_)), "{feed:?}: {e}");
     }
   }
 
@@ -478,16 +477,15 @@ mod tests {
       let mut feed = FEED.as_bytes().to_vec();
       feed[at] ^= 1;
       let read = Feed::new("https://a", &[KEY]).read(&feed, "1.0");
-      assert_eq!(read.unwrap_err().kind(), io::ErrorKind::InvalidData, "{at}");
+      assert!(matches!(read.unwrap_err(), Error::Signature(_)), "{at}");
     }
 
-    let kind = |r: io::Result<()>| r.unwrap_err().kind();
     let data = data.as_bytes();
-    assert_eq!(kind(verify(&keys(&[RFC_KEY]), data, sig)), io::ErrorKind::InvalidData);
-    assert_eq!(kind(verify(&keys(&[KEY]), data, "not hex!")), io::ErrorKind::InvalidData);
+    assert!(matches!(verify(&keys(&[RFC_KEY]), data, sig), Err(Error::Signature(_))));
+    assert!(matches!(verify(&keys(&[KEY]), data, "not hex!"), Err(Error::Signature(_))));
     // The signature is checked before the feed is read.
     let e = read_feed(&format!("{{\nsig {sig}\n")).unwrap_err();
-    assert!(e.to_string().contains("signature"), "{e}");
+    assert!(matches!(e, Error::Signature(_)), "{e}");
   }
 
   #[test]
@@ -497,7 +495,9 @@ mod tests {
     assert_eq!(sha512(&root.join("abc")).unwrap(), hex(ABC).unwrap());
     let r = release(FEED, "1.0", "linux-x86_64").unwrap().unwrap();
     r.verify(&root.join("abc")).unwrap();
-    assert_eq!(r.verify(&root.join("abd")).unwrap_err().kind(), io::ErrorKind::InvalidData);
+    let e = r.verify(&root.join("abd")).unwrap_err();
+    assert!(matches!(e, Error::Mismatch(_)), "{e}");
+    assert!(e.to_string().starts_with("the download doesn't match the feed: "), "{e}");
     fs::remove_dir_all(root).unwrap();
   }
 }
