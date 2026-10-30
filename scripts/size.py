@@ -42,7 +42,9 @@ PARTS = {
   # The .app bundle, its signing and the DMG with its HFS+ volume, written ourselves.
   "packer/macos": (1300, ("src/cli/{macos,sign,dmg,hfs}.rs",)),
   # The setup and the exe's resources.
-  "packer/windows": (700, ("src/cli/windows.rs",)),
+  "packer/windows": (600, ("src/cli/windows.rs",)),
+  # The setup stub, which installs and uninstalls the app on Windows, and its payload's format.
+  "setup": (500, ("src/setup/*.rs",)),
   # The AppImage with its squashfs, and the .deb.
   "packer/linux": (600, ("src/cli/linux.rs",)),
 }

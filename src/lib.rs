@@ -320,7 +320,7 @@ fn fetch(release: &Release, parent: &Path, progress: Progress) -> Result<(Folder
 /// The name the release's file at `url` is staged by. On Windows its own, the last part of the
 /// URL's path: a plain `<name>.exe` other than the running `exe`'s, whose copy, the installer,
 /// goes beside it ([Error::Feed] else). Windows loads compatibility shims into an exe named
-/// `setup.exe` (makensis' warning 9000), and the packer names none so.
+/// `setup.exe` (makensis' warning 9000 says so), and the packer names none so.
 fn stage_name<'a>(os: Os, url: &'a str, exe: &OsStr) -> Result<&'a str> {
   match os {
     Os::Mac => Ok("update.dmg"),

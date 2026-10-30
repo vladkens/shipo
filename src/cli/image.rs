@@ -1,6 +1,6 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/shipo
 //! The icon's images: a PNG read into RGBA and written back, resized and cropped, and the `.icns`
-//! and `.ico` made of them, with no `sips` or `iconutil`, so on any OS.
+//! and the exe's icon group made of them, with no `sips` or `iconutil`, so on any OS.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -10,7 +10,7 @@ use png::{BitDepth, ColorType, Transformations};
 
 use crate::{bad, tool};
 
-/// The sizes of the `.ico` and the exe's icon: Explorer's views and the taskbar at 100–200%.
+/// The sizes of the exe's icon: Explorer's views and the taskbar at 100–200%.
 pub const ICO: [usize; 6] = [16, 24, 32, 48, 64, 256];
 
 /// The `.icns` entries iconutil writes: 16, 32, 128, 256, 512 and each at 2x, all PNG but ic04 and
@@ -217,19 +217,6 @@ pub fn icns(images: &BTreeMap<usize, Image>) -> io::Result<Vec<u8>> {
   Ok(out)
 }
 
-/// The `.ico` of the PNGs by size (Windows Vista and later), each at most 256 px.
-pub fn ico(pngs: &BTreeMap<usize, Vec<u8>>) -> io::Result<Vec<u8>> {
-  let mut at = 6 + 16 * pngs.len() as u32;
-  let mut out = directory(pngs, |png| {
-    let end = at.to_le_bytes().to_vec();
-    at += png.len() as u32;
-    Ok(end)
-  })?;
-
-  pngs.values().for_each(|png| out.extend_from_slice(png));
-  Ok(out)
-}
-
 /// An exe's `RT_GROUP_ICON` of the PNGs by size, each at most 256 px: the PNGs are its `RT_ICON`s
 /// in order, their ids from `first_id` on.
 pub fn group_icon(pngs: &BTreeMap<usize, Vec<u8>>, first_id: u16) -> io::Result<Vec<u8>> {
@@ -241,8 +228,8 @@ pub fn group_icon(pngs: &BTreeMap<usize, Vec<u8>>, first_id: u16) -> io::Result<
   })
 }
 
-/// An icon directory of the PNGs by size, each entry ending in `end` of its PNG: in an `.ico` the
-/// PNG's offset, in an `RT_GROUP_ICON` its `RT_ICON`'s id.
+/// An icon directory of the PNGs by size, as an `.ico`'s, each entry ending in `end` of its PNG:
+/// in an `RT_GROUP_ICON` its `RT_ICON`'s id.
 fn directory(
   pngs: &BTreeMap<usize, Vec<u8>>,
   mut end: impl FnMut(&[u8]) -> io::Result<Vec<u8>>,
@@ -519,20 +506,9 @@ mod tests {
   }
 
   #[test]
-  fn ico_layout() {
-    let images = icons(&icon(400), &ICO, true).unwrap();
-    let pngs: BTreeMap<_, _> = images.iter().map(|(&n, x)| (n, x.encode().unwrap())).collect();
-    let entries = ico_entries(&ico(&pngs).unwrap());
-    assert_eq!(entries.len(), ICO.len());
-
-    for ((head, more, image), n) in entries.iter().zip(ICO) {
-      assert_eq!((*head, *more), ([(n % 256) as u8, (n % 256) as u8, 0, 0], [1, 32]));
-      assert_eq!(*image, images[&n], "{n} px");
-    }
-
+  fn icon_directory_limit() {
     let big = BTreeMap::from([(512, vec![])]);
     let err = "a 512 px icon, above the 256 px an icon directory holds";
-    assert_eq!(ico(&big).unwrap_err().to_string(), err);
     assert_eq!(group_icon(&big, 1).unwrap_err().to_string(), err);
   }
 
@@ -673,30 +649,5 @@ mod tests {
     });
 
     Image { w: n, h: n, px: px.collect() }
-  }
-
-  /// An `.ico`'s entries, the header's six fields and the image, checked that its offsets and
-  /// lengths fill the file in order.
-  fn ico_entries(data: &[u8]) -> Vec<([u8; 4], [u16; 2], Image)> {
-    let le16 = |at: usize| u16::from_le_bytes(data[at..at + 2].try_into().unwrap());
-    let le32 = |at: usize| u32::from_le_bytes(data[at..at + 4].try_into().unwrap()) as usize;
-    assert_eq!((le16(0), le16(2)), (0, 1));
-
-    let count = le16(4) as usize;
-    let mut next = 6 + 16 * count;
-    let mut out = vec![];
-    for i in 0..count {
-      let at = 6 + 16 * i;
-      let (len, offset) = (le32(at + 8), le32(at + 12));
-      assert_eq!(offset, next, "entry {i}");
-      next += len;
-      let head = data[at..at + 4].try_into().unwrap();
-      let image = Image::decode(&data[offset..offset + len]).unwrap();
-      assert_eq!((image.w % 256, image.h % 256), (data[at] as usize, data[at + 1] as usize));
-      out.push((head, [le16(at + 4), le16(at + 6)], image));
-    }
-
-    assert_eq!(next, data.len());
-    out
   }
 }

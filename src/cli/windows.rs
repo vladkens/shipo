@@ -1,22 +1,18 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/shipo
-//! The Windows setup: the app's exe given its icon, version and manifest, and the per-user NSIS
-//! setup of it that `makensis` builds, as spec.md's Windows section gives it.
+//! The Windows setup: the app's exe given its icon, version and manifest, and the per-user setup
+//! of it, our stub (src/setup/) with the app appended, as spec.md's Windows section gives it.
 
 use std::collections::BTreeMap;
-use std::ffi::{OsStr, OsString};
+use std::env;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::config::Config;
-use crate::image::{ICO, Image, group_icon, ico, icons};
-use crate::tool::{self, Temp, get, run};
+use crate::image::{ICO, Image, group_icon, icons};
+use crate::payload::{self, Info};
+use crate::tool::{self, get};
 use crate::{Arch, at, bad, wrap};
-
-const RUN: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-const APPROVED: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
-const UNINSTALL: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
 
 /// The exe's manifest: asInvoker, Common Controls 6, and Windows 10 and 11, which share one
 /// supportedOS id. The app sets its DPI awareness itself.
@@ -43,9 +39,13 @@ const MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?
 </assembly>
 "#;
 
+/// The setup stub of shipo's GitHub release `setup-v1` for each arch (`make setup`, CI), fetched
+/// pinned by SHA-256 as the AppImage's runtime is.
+const STUB: &str =
+  "https://github.com/vladkens/shipo/releases/download/setup-v1/shipo-setup-{arch}.exe";
+
 /// `<Name>-<label>-windows-<x64|arm64>-setup.exe` in `out_dir`, [named](crate::out) by `tag`: the
-/// per-user setup of `binary`, the app's exe for `arch`, built by `makensis`, which apt's nsis
-/// installs.
+/// per-user setup of `binary`, the app's exe for `arch`, our stub ([stub]) with the app appended.
 pub fn setup(
   cfg: &Config,
   binary: &Path,
@@ -53,17 +53,44 @@ pub fn setup(
   tag: Option<&str>,
   out_dir: &Path,
 ) -> io::Result<PathBuf> {
-  build(cfg, binary, arch, tag, out_dir, OsStr::new("makensis"))
+  build(cfg, binary, arch, tag, out_dir, &stub(cfg, arch)?)
 }
 
-/// [setup] by the program `makensis`.
+/// The setup stub for `arch`: the file `$SHIPO_SETUP_STUB_<X64|ARM64>` names (one `make setup`
+/// built, as CI does), else the release's, fetched into `<target>/tools` once.
+fn stub(cfg: &Config, arch: Arch) -> io::Result<Vec<u8>> {
+  let var = format!("SHIPO_SETUP_STUB_{}", arch.windows().to_ascii_uppercase());
+  if let Some(path) = env::var_os(&var) {
+    return tool::read(Path::new(&path));
+  }
+
+  // TODO: the SHA-256 of each once `setup-v1` is published; until then only the variable serves.
+  let sha256 = match arch {
+    Arch::X86_64 => "",
+    Arch::Aarch64 => "",
+  };
+
+  if sha256.is_empty() {
+    return Err(bad(format!(
+      "no setup stub is published yet: set {var} to one `make setup` built"
+    )));
+  }
+
+  let url = STUB.replace("{arch}", arch.windows());
+  let name = format!("shipo-setup-v1-{}.exe", arch.windows());
+  tool::read(&tool::fetch(&url, sha256, &cfg.target.join("tools").join(name))?)
+}
+
+/// [setup] of the stub `stub`: given the app's icon, its version as the setup's and [MANIFEST],
+/// the placeholder patched, the payload of the app's exe, `LICENSE.txt` when the app has a
+/// `LICENSE`, and the setup's [Info] appended (src/setup/payload.rs).
 fn build(
   cfg: &Config,
   binary: &Path,
   arch: Arch,
   tag: Option<&str>,
   out_dir: &Path,
-  makensis: &OsStr,
+  stub: &[u8],
 ) -> io::Result<PathBuf> {
   file_name(&cfg.name)?;
 
@@ -71,49 +98,35 @@ fn build(
   let pngs = icons(&Image::read(&cfg.icon)?, &ICO, true)?;
   let pngs = pngs.iter().map(|(&n, image)| Ok((n, image.encode()?)));
   let pngs = pngs.collect::<io::Result<BTreeMap<_, _>>>()?;
-  let exe = with_resources(&exe, arch.machine(), resources(cfg, &pngs)?).map_err(at(binary))?;
+  let exe =
+    with_resources(&exe, arch.machine(), resources(cfg, &pngs, false)?).map_err(at(binary))?;
 
-  // The files by fixed names beside the script, where makensis reads them: no path in it.
-  let tmp = Temp::new()?;
-  fs::write(tmp.join("app.exe"), &exe)?;
-  fs::write(tmp.join("app.ico"), ico(&pngs)?)?;
+  let mut files = vec![(format!("{}.exe", cfg.name), exe)];
   let license = cfg.root.join("LICENSE");
-  let licensed = license.is_file();
-  // Settings › Apps' size: the installed files', not the icon's.
-  let mut size = exe.len() as u64;
-  if licensed {
-    size += fs::copy(&license, tmp.join("LICENSE.txt"))?;
+  if license.is_file() {
+    files.push(("LICENSE.txt".into(), tool::read(&license)?));
   }
 
-  let script = nsi(cfg, arch, licensed, size.div_ceil(1024))?;
-  fs::write(tmp.join("setup.nsi"), script)?;
-  // makensis prints its warnings to stdout, which `run` drops: `-O` logs them with its errors.
-  let log = tmp.join("makensis.log");
-  let mut opt = OsString::from("-O");
-  opt.push(&log);
-  let mut cmd = Command::new(makensis);
-  cmd.args(["-V2", "-WX", "-INPUTCHARSET", "UTF8"]).arg(opt).arg(tmp.join("setup.nsi"));
-  if let Err(e) = run(&mut cmd) {
-    if e.kind() == io::ErrorKind::NotFound {
-      let tool = makensis.to_string_lossy();
-      return Err(wrap(
-        &e,
-        format!("{tool} not found: the setup needs it, `apt-get install nsis`"),
-      ));
-    }
+  let info = Info {
+    name: cfg.name.clone(),
+    version: cfg.version.clone(),
+    publisher: cfg.publisher.clone(),
+    id: cfg.id.clone(),
+    app_id: app_id(cfg)?,
+    comment: cfg.comment.clone(),
+  };
 
-    let said = fs::read_to_string(&log).unwrap_or_default();
-    let said = said.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with("Note: "));
-    let said: Vec<_> = said.collect();
-    return Err(match said.is_empty() {
-      true => e,
-      false => io::Error::other(format!("{e}: {}", said.join("\n"))),
-    });
-  }
+  let stubbed = |e: io::Error| wrap(&e, format!("the setup stub: {e}"));
+  let at = payload::find(stub).map_err(stubbed)?;
+  let setup = with_resources(stub, arch.machine(), resources(cfg, &pngs, true)?);
+  let mut setup = setup.map_err(stubbed)?;
+  let (end, payload) = (setup.len() as u64, payload::pack(&info, &files)?);
+  payload::patch(&mut setup, at, end, payload.len() as u64);
+  setup.extend(payload);
+  resum(&mut setup)?;
 
   fs::create_dir_all(out_dir)?;
   let out = crate::out(out_dir, &cfg.name, tag, &format!("windows-{}-setup.exe", arch.windows()));
-  let setup = tool::read(&tmp.join("out.exe"))?;
   tool::place(&out, |part| File::create_new(part)?.write_all(&setup))?;
   Ok(out)
 }
@@ -137,15 +150,15 @@ fn file_name(name: &str) -> io::Result<()> {
 
 // MARK: The exe's resources
 
-/// The exe's resources: its icon, the PNGs by size as `RT_ICON`s 1, 2, …, its version, and
-/// [MANIFEST].
-fn resources(cfg: &Config, pngs: &BTreeMap<usize, Vec<u8>>) -> io::Result<Resources> {
+/// The exe's resources, the app's or its `setup`'s: its icon, the PNGs by size as `RT_ICON`s 1, 2,
+/// …, its version, and [MANIFEST].
+fn resources(cfg: &Config, pngs: &BTreeMap<usize, Vec<u8>>, setup: bool) -> io::Result<Resources> {
   let one = |data: Vec<u8>| BTreeMap::from([(1, BTreeMap::from([(LANG, data)]))]);
   let icons = (1..).zip(pngs.values()).map(|(id, png)| (id, BTreeMap::from([(LANG, png.clone())])));
   Ok(Resources::from([
     (RT_ICON, icons.collect()),
     (RT_GROUP_ICON, one(group_icon(pngs, 1)?)),
-    (RT_VERSION, one(version_info(cfg)?)),
+    (RT_VERSION, one(version_info(cfg, setup)?)),
     (RT_MANIFEST, one(MANIFEST.as_bytes().to_vec())),
   ]))
 }
@@ -159,14 +172,14 @@ enum Val<'a> {
 
 /// The exe's RT_VERSION: the version as numbers ([quad]) and [version_strings], in en-US and
 /// Unicode as the translation says.
-fn version_info(cfg: &Config) -> io::Result<Vec<u8>> {
+fn version_info(cfg: &Config, setup: bool) -> io::Result<Vec<u8>> {
   let [a, b, c, d] = quad(cfg)?.map(u32::from);
   let (ms, ls) = (a << 16 | b, c << 16 | d);
   // VS_FIXEDFILEINFO: its signature and version, the file's and the product's version, no flags
   // of the 0x3F mask, VOS_NT_WINDOWS32, VFT_APP, no subtype and no date.
   let fixed = [0xFEEF04BD, 0x10000, ms, ls, ms, ls, 0x3F, 0, 0x40004, 1, 0, 0, 0u32];
   let fixed: Vec<u8> = fixed.iter().flat_map(|x| x.to_le_bytes()).collect();
-  let strings = version_strings(cfg)?;
+  let strings = version_strings(cfg, setup)?;
   let strings: Vec<_> = strings.iter().map(|(k, v)| node(k, Val::Text(v), &[])).collect();
   let table = node(&format!("{LANG:04X}04B0"), Val::Empty, &strings);
   let translation: Vec<u8> = [LANG, 1200].iter().flat_map(|x| x.to_le_bytes()).collect();
@@ -211,14 +224,15 @@ fn pad4(data: &mut Vec<u8>) {
   data.resize(data.len().next_multiple_of(4), 0);
 }
 
-/// The exe's version strings: the app's name its FileDescription, which Task Manager shows,
-/// `windows.copyright` its LegalCopyright, else "© <publisher>".
-fn version_strings(cfg: &Config) -> io::Result<[(&'static str, String); 8]> {
+/// The exe's version strings: the app's name its FileDescription, which Task Manager shows, "<name>
+/// Setup" the `setup`'s; `windows.copyright` its LegalCopyright, else "© <publisher>".
+fn version_strings(cfg: &Config, setup: bool) -> io::Result<[(&'static str, String); 8]> {
   let copyright = cfg.windows.copyright.clone();
   let copyright = copyright.unwrap_or_else(|| format!("© {}", cfg.publisher));
+  let description = if setup { format!("{} Setup", cfg.name) } else { cfg.name.clone() };
   Ok([
     ("CompanyName", cfg.publisher.clone()),
-    ("FileDescription", cfg.name.clone()),
+    ("FileDescription", description),
     ("FileVersion", cfg.version.clone()),
     ("InternalName", cfg.bin.clone()),
     ("LegalCopyright", copyright),
@@ -240,13 +254,7 @@ fn quad(cfg: &Config) -> io::Result<[u16; 4]> {
   Ok(nums)
 }
 
-// MARK: The setup's script
-
-/// `s` in an NSIS string: `$` doubled (a define's `${` too), a quote `$\"`, line breaks a space.
-fn nsis(s: &str) -> String {
-  let s = s.replace('$', "$$").replace('"', r#"$\""#);
-  s.split(['\r', '\n']).filter(|line| !line.is_empty()).collect::<Vec<_>>().join(" ").trim().into()
-}
+// MARK: The setup's ids
 
 /// The setup's AppId, the same in every version, so a newer setup replaces the install:
 /// `windows.app-id`, else the UUID v5 of the app's id in the DNS namespace. Never changed.
@@ -331,158 +339,6 @@ fn sha1(data: &[u8]) -> [u8; 20] {
   }
 
   out
-}
-
-/// The setup's script. It packs `app.exe`, `app.ico` and, with `license`, `LICENSE.txt` from its
-/// folder and writes the setup there as `out.exe`: an ASCII name, which makensis opens in any
-/// locale, and never `setup.exe`, which makensis -WX refuses (warning 9000). Its `.onInit` exits 2
-/// on a Windows of another arch; the stub is x86, so that runs on both, and an x64 setup runs on
-/// arm64 too. Settings › Apps shows `kib`. The uninstaller removes only what is its own, the files
-/// a setup writes and the updater's staging, which its installer couldn't remove, then the folder
-/// if empty, as a `/D=` may share it; then the shortcut and the launch at login, which would start
-/// a removed exe. It keeps the app's data.
-fn nsi(cfg: &Config, arch: Arch, license: bool, kib: u64) -> io::Result<String> {
-  let win = arch.windows();
-  let name = nsis(&cfg.name);
-  let exe = format!(r"$INSTDIR\{name}.exe");
-  let key = format!(r"{UNINSTALL}\{}", app_id(cfg)?);
-  let id = format!(r#""{}""#, nsis(&cfg.id));
-  let version = quad(cfg)?.map(|n| n.to_string()).join(".");
-  let check: &[&str] = match arch {
-    Arch::X86_64 => &["${IfNot} ${IsNativeAMD64}", "${AndIfNot} ${IsNativeARM64}"],
-    Arch::Aarch64 => &["${IfNot} ${IsNativeARM64}"],
-  };
-
-  let mut strings = version_strings(cfg)?;
-  for (key, value) in &mut strings {
-    if *key == "FileDescription" {
-      *value = format!("{} Setup", cfg.name);
-    }
-  }
-
-  let keys = ["ProductName", "ProductVersion", "FileVersion", "FileDescription"];
-  let keys = keys.into_iter().chain(["CompanyName", "LegalCopyright"]);
-  let strings = keys.map(|k| {
-    let value = strings.iter().find(|(key, _)| *key == k).map_or("", |(_, v)| v);
-    format!(r#"VIAddVersionKey /LANG=${{LANG_ENGLISH}} "{k}" "{}""#, nsis(value))
-  });
-
-  let entries = [
-    ("DisplayName", name.clone()),
-    ("DisplayVersion", nsis(&cfg.version)),
-    ("Publisher", nsis(&cfg.publisher)),
-    ("DisplayIcon", exe.clone()),
-    ("InstallLocation", "$INSTDIR".into()),
-    ("UninstallString", r#"$\"$INSTDIR\Uninstall.exe$\""#.into()),
-    ("QuietUninstallString", r#"$\"$INSTDIR\Uninstall.exe$\" /S"#.into()),
-  ];
-
-  let mut lines = vec![
-    "Unicode true".to_string(),
-    "ManifestDPIAware true".into(),
-    "RequestExecutionLevel user".into(),
-    "SetCompressor /SOLID lzma".into(),
-    format!(r#"Name "{name}" "{}""#, name.replace('&', "&&")),
-    r#"OutFile "out.exe""#.into(),
-    format!(r#"InstallDir "$LOCALAPPDATA\Programs\{name}""#),
-    // An update, `/S` with no `/D=`, goes where the app is.
-    format!(r#"InstallDirRegKey HKCU "{key}" "InstallLocation""#),
-    // A file it can't write fails the setup, never skipped with an exit code of 0.
-    "AllowSkipFiles off".into(),
-    String::new(),
-    "!include MUI2.nsh".into(),
-    "!include x64.nsh".into(),
-    String::new(),
-    r#"!define MUI_ICON "app.ico""#.into(),
-    r#"!define MUI_UNICON "app.ico""#.into(),
-    // The finish page's "Run": a silent install, the updater's, shows no page and starts nothing.
-    format!(r#"!define MUI_FINISHPAGE_RUN "{exe}""#),
-    "!insertmacro MUI_PAGE_INSTFILES".into(),
-    "!insertmacro MUI_PAGE_FINISH".into(),
-    "!insertmacro MUI_UNPAGE_CONFIRM".into(),
-    "!insertmacro MUI_UNPAGE_INSTFILES".into(),
-    r#"!insertmacro MUI_LANGUAGE "English""#.into(),
-    String::new(),
-    format!("VIProductVersion {version}"),
-    format!("VIFileVersion {version}"),
-  ];
-
-  lines.extend(strings);
-  lines.extend([String::new(), "Function .onInit".into()]);
-  lines.extend(check.iter().map(|line| format!("  {line}")));
-  lines.extend([
-    format!(r#"    MessageBox MB_ICONSTOP "This setup of {name} is for {win} Windows." /SD IDOK"#),
-    "    SetErrorLevel 2".into(),
-    "    Abort".into(),
-    "  ${EndIf}".into(),
-    "FunctionEnd".into(),
-    String::new(),
-    "Section".into(),
-    r#"  SetOutPath "$INSTDIR""#.into(),
-  ]);
-
-  // The app that just quit may hold its exe a moment longer: tried for 5 s, then the setup fails.
-  // `SetOverwrite try` sets the error flag where `on` would ask or abort.
-  lines.extend([
-    "  StrCpy $R0 0".to_string(),
-    "  SetOverwrite try".into(),
-    "  ${Do}".into(),
-    "    ClearErrors".into(),
-    format!(r#"    File "/oname={name}.exe" "app.exe""#),
-    "    ${IfNot} ${Errors}".into(),
-    "      ${ExitDo}".into(),
-    "    ${EndIf}".into(),
-    "    IntOp $R0 $R0 + 1".into(),
-    "    ${If} $R0 >= 10".into(),
-    format!(r#"      MessageBox MB_ICONSTOP "{exe} is in use: close {name} and run this setup again." /SD IDOK"#),
-    "      SetErrorLevel 2".into(),
-    "      Abort".into(),
-    "    ${EndIf}".into(),
-    "    Sleep 500".into(),
-    "  ${Loop}".into(),
-    "  SetOverwrite on".into(),
-  ]);
-
-  if license {
-    lines.push(r#"  File "/oname=LICENSE.txt" "LICENSE.txt""#.into());
-  }
-
-  lines.push(r#"  WriteUninstaller "$INSTDIR\Uninstall.exe""#.into());
-  lines.push(format!(
-    r#"  CreateShortcut "$SMPROGRAMS\{name}.lnk" "{exe}" "" "{exe}" 0 SW_SHOWNORMAL "" "{}""#,
-    nsis(&cfg.comment)
-  ));
-
-  lines.extend(entries.iter().map(|(k, v)| format!(r#"  WriteRegStr HKCU "{key}" "{k}" "{v}""#)));
-  lines.extend([
-    format!(r#"  WriteRegDWORD HKCU "{key}" "NoModify" 1"#),
-    format!(r#"  WriteRegDWORD HKCU "{key}" "NoRepair" 1"#),
-    format!(r#"  WriteRegDWORD HKCU "{key}" "EstimatedSize" {kib}"#),
-    "SectionEnd".into(),
-    String::new(),
-    r#"Section "Uninstall""#.into(),
-  ]);
-
-  // LICENSE.txt whether or not this setup has one: an older one may have written it.
-  lines.extend([
-    format!(r#"  Delete "{exe}""#),
-    r#"  Delete "$INSTDIR\LICENSE.txt""#.into(),
-    r#"  Delete "$INSTDIR\Uninstall.exe""#.into(),
-    r#"  FindFirst $0 $1 "$INSTDIR\.shipo-update-*""#.into(),
-    r#"  ${DoWhile} $1 != """#.into(),
-    r#"    RMDir /r "$INSTDIR\$1""#.into(),
-    "    FindNext $0 $1".into(),
-    "  ${Loop}".into(),
-    "  FindClose $0".into(),
-    r#"  RMDir "$INSTDIR""#.into(),
-    format!(r#"  Delete "$SMPROGRAMS\{name}.lnk""#),
-    format!(r#"  DeleteRegValue HKCU "{RUN}" {id}"#),
-    format!(r#"  DeleteRegValue HKCU "{APPROVED}" {id}"#),
-    format!(r#"  DeleteRegKey HKCU "{key}""#),
-    "SectionEnd".into(),
-  ]);
-
-  Ok(lines.join("\n") + "\n")
 }
 
 // MARK: PE resources
@@ -734,10 +590,17 @@ fn with_resources(data: &[u8], machine: u16, ours: Resources) -> io::Result<Vec<
   put(&mut out, pe.opt + 56, &(image as u32).to_le_bytes());
   put(&mut out, pe.opt + DIRS + 16, &(va as u32).to_le_bytes());
   put(&mut out, pe.opt + DIRS + 20, &(blob.len() as u32).to_le_bytes());
-  put(&mut out, pe.opt + 64, &[0; 4]);
-  let sum = checksum(&out);
-  put(&mut out, pe.opt + 64, &sum.to_le_bytes());
+  resum(&mut out)?;
   Ok(out)
+}
+
+/// Sets the PE checksum of `data` again, of all its bytes, a payload appended among them.
+fn resum(data: &mut [u8]) -> io::Result<()> {
+  let opt = Pe::read(data)?.opt;
+  put(data, opt + 64, &[0; 4]);
+  let sum = checksum(data);
+  put(data, opt + 64, &sum.to_le_bytes());
+  Ok(())
 }
 
 /// The resource section of `tree` at `rva`: the root, a directory per type, one per id (its
@@ -824,8 +687,8 @@ fn u32_at(data: &[u8], at: usize) -> io::Result<u32> {
 
 #[cfg(test)]
 pub(crate) mod tests {
-
   use super::*;
+  use crate::tool::Temp;
 
   /// The resources of the PE32+ file `data`.
   fn read_resources(data: &[u8]) -> io::Result<Resources> {
@@ -851,149 +714,6 @@ pub(crate) mod tests {
       root: dir.to_path_buf(),
       workspace: dir.to_path_buf(),
       target: dir.join("target"),
-    }
-  }
-
-  const NSI: &str = r#"Unicode true
-ManifestDPIAware true
-RequestExecutionLevel user
-SetCompressor /SOLID lzma
-Name "Hello" "Hello"
-OutFile "out.exe"
-InstallDir "$LOCALAPPDATA\Programs\Hello"
-InstallDirRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\{a90596b0-07fa-55a1-9740-d4470c5cef1c}" "InstallLocation"
-AllowSkipFiles off
-
-!include MUI2.nsh
-!include x64.nsh
-
-!define MUI_ICON "app.ico"
-!define MUI_UNICON "app.ico"
-!define MUI_FINISHPAGE_RUN "$INSTDIR\Hello.exe"
-!insertmacro MUI_PAGE_INSTFILES
-!insertmacro MUI_PAGE_FINISH
-!insertmacro MUI_UNPAGE_CONFIRM
-!insertmacro MUI_UNPAGE_INSTFILES
-!insertmacro MUI_LANGUAGE "English"
-
-VIProductVersion 1.2.0.0
-VIFileVersion 1.2.0.0
-VIAddVersionKey /LANG=${LANG_ENGLISH} "ProductName" "Hello"
-VIAddVersionKey /LANG=${LANG_ENGLISH} "ProductVersion" "1.2.0-beta.1"
-VIAddVersionKey /LANG=${LANG_ENGLISH} "FileVersion" "1.2.0-beta.1"
-VIAddVersionKey /LANG=${LANG_ENGLISH} "FileDescription" "Hello Setup"
-VIAddVersionKey /LANG=${LANG_ENGLISH} "CompanyName" "example"
-VIAddVersionKey /LANG=${LANG_ENGLISH} "LegalCopyright" "© example"
-
-Function .onInit
-  ${IfNot} ${IsNativeAMD64}
-  ${AndIfNot} ${IsNativeARM64}
-    MessageBox MB_ICONSTOP "This setup of Hello is for x64 Windows." /SD IDOK
-    SetErrorLevel 2
-    Abort
-  ${EndIf}
-FunctionEnd
-
-Section
-  SetOutPath "$INSTDIR"
-  StrCpy $R0 0
-  SetOverwrite try
-  ${Do}
-    ClearErrors
-    File "/oname=Hello.exe" "app.exe"
-    ${IfNot} ${Errors}
-      ${ExitDo}
-    ${EndIf}
-    IntOp $R0 $R0 + 1
-    ${If} $R0 >= 10
-      MessageBox MB_ICONSTOP "$INSTDIR\Hello.exe is in use: close Hello and run this setup again." /SD IDOK
-      SetErrorLevel 2
-      Abort
-    ${EndIf}
-    Sleep 500
-  ${Loop}
-  SetOverwrite on
-  File "/oname=LICENSE.txt" "LICENSE.txt"
-  WriteUninstaller "$INSTDIR\Uninstall.exe"
-  CreateShortcut "$SMPROGRAMS\Hello.lnk" "$INSTDIR\Hello.exe" "" "$INSTDIR\Hello.exe" 0 SW_SHOWNORMAL "" "Says hello"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\{a90596b0-07fa-55a1-9740-d4470c5cef1c}" "DisplayName" "Hello"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\{a90596b0-07fa-55a1-9740-d4470c5cef1c}" "DisplayVersion" "1.2.0-beta.1"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\{a90596b0-07fa-55a1-9740-d4470c5cef1c}" "Publisher" "example"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\{a90596b0-07fa-55a1-9740-d4470c5cef1c}" "DisplayIcon" "$INSTDIR\Hello.exe"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\{a90596b0-07fa-55a1-9740-d4470c5cef1c}" "InstallLocation" "$INSTDIR"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\{a90596b0-07fa-55a1-9740-d4470c5cef1c}" "UninstallString" "$\"$INSTDIR\Uninstall.exe$\""
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\{a90596b0-07fa-55a1-9740-d4470c5cef1c}" "QuietUninstallString" "$\"$INSTDIR\Uninstall.exe$\" /S"
-  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\{a90596b0-07fa-55a1-9740-d4470c5cef1c}" "NoModify" 1
-  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\{a90596b0-07fa-55a1-9740-d4470c5cef1c}" "NoRepair" 1
-  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\{a90596b0-07fa-55a1-9740-d4470c5cef1c}" "EstimatedSize" 42
-SectionEnd
-
-Section "Uninstall"
-  Delete "$INSTDIR\Hello.exe"
-  Delete "$INSTDIR\LICENSE.txt"
-  Delete "$INSTDIR\Uninstall.exe"
-  FindFirst $0 $1 "$INSTDIR\.shipo-update-*"
-  ${DoWhile} $1 != ""
-    RMDir /r "$INSTDIR\$1"
-    FindNext $0 $1
-  ${Loop}
-  FindClose $0
-  RMDir "$INSTDIR"
-  Delete "$SMPROGRAMS\Hello.lnk"
-  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "com.example.hello"
-  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" "com.example.hello"
-  DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\{a90596b0-07fa-55a1-9740-d4470c5cef1c}"
-SectionEnd
-"#;
-
-  #[test]
-  fn script() {
-    let cfg = config(Path::new("/app"), "");
-    assert_eq!(nsi(&cfg, Arch::X86_64, true, 42).unwrap(), NSI);
-
-    let arm = nsi(&cfg, Arch::Aarch64, false, 42).unwrap();
-    assert!(arm.contains("  ${IfNot} ${IsNativeARM64}\n    MessageBox"), "{arm}");
-    assert!(arm.contains("is for arm64 Windows."), "{arm}");
-    assert!(!arm.contains(r#"File "/oname=LICENSE.txt""#), "{arm}");
-    assert!(arm.contains(r#"Delete "$INSTDIR\LICENSE.txt""#), "{arm}");
-  }
-
-  #[test]
-  fn script_escaped() {
-    let mut cfg = config(Path::new("/app"), "copyright = \"(c) ${A} \\\"B\\\"\"");
-    cfg.name = "My $App & Co".into();
-    cfg.id = "com.example.$x".into();
-    cfg.publisher = "Ann \"A\" $B".into();
-    cfg.comment = "Says\r\nhello \"there\"\n".into();
-    let text = nsi(&cfg, Arch::X86_64, false, 1).unwrap();
-    let want = [
-      r#"Name "My $$App & Co" "My $$App && Co""#,
-      r#"InstallDir "$LOCALAPPDATA\Programs\My $$App & Co""#,
-      r#"File "/oname=My $$App & Co.exe" "app.exe""#,
-      r#"Delete "$INSTDIR\My $$App & Co.exe""#,
-      r#""" "Says hello $\"there$\"""#,
-      r#""Publisher" "Ann $\"A$\" $$B""#,
-      r#""LegalCopyright" "(c) $${A} $\"B$\"""#,
-      r#"\Run" "com.example.$$x""#,
-      r#"Delete "$SMPROGRAMS\My $$App & Co.lnk""#,
-    ];
-
-    for line in want {
-      assert!(text.contains(line), "{line} in\n{text}");
-    }
-  }
-
-  #[test]
-  fn escaping() {
-    let cases = [
-      ("plain", "plain"),
-      (r#"a "$b" ${c}"#, r#"a $\"$$b$\" $${c}"#),
-      ("one\ntwo\r\nthree\n", "one two three"),
-      ("$\\", "$$\\"),
-    ];
-
-    for (s, want) in cases {
-      assert_eq!(nsis(s), want, "{s}");
     }
   }
 
@@ -1104,7 +824,7 @@ SectionEnd
   #[test]
   fn version() {
     let cfg = config(Path::new("/app"), "");
-    let info = parse(&version_info(&cfg).unwrap());
+    let info = parse(&version_info(&cfg, false).unwrap());
     assert_eq!((info.key.as_str(), info.text, info.value.len()), ("VS_VERSION_INFO", false, 52));
     let fixed: Vec<u32> =
       info.value.chunks(4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
@@ -1119,7 +839,7 @@ SectionEnd
     let [table] = &strings.children[..] else { panic!("{strings:?}") };
     assert_eq!(table.key, "040904B0");
     let got: Vec<_> = table.children.iter().map(|n| (n.key.as_str(), text(&n.value))).collect();
-    let want = version_strings(&cfg).unwrap();
+    let want = version_strings(&cfg, false).unwrap();
     let want: Vec<_> = want.iter().map(|(k, v)| (*k, v.clone())).collect();
     assert_eq!(got, want);
     assert!(table.children.iter().all(|n| n.text));
@@ -1149,7 +869,7 @@ SectionEnd
     let pngs = icons(&Image::read(&cfg.icon).unwrap(), &ICO, true).unwrap();
     let pngs: BTreeMap<_, _> =
       pngs.iter().map(|(&n, image)| (n, image.encode().unwrap())).collect();
-    let out = with_resources(&exe(AMD64), AMD64, resources(&cfg, &pngs).unwrap()).unwrap();
+    let out = with_resources(&exe(AMD64), AMD64, resources(&cfg, &pngs, false).unwrap()).unwrap();
     consistent(&out);
 
     let tree = read_resources(&out).unwrap();
@@ -1173,7 +893,7 @@ SectionEnd
       assert_eq!(u16::from_le_bytes([e[12], e[13]]), icons[i].0);
     }
 
-    assert_eq!(tree[&RT_VERSION][&1][&LANG], version_info(&cfg).unwrap());
+    assert_eq!(tree[&RT_VERSION][&1][&LANG], version_info(&cfg, false).unwrap());
     assert_eq!(tree[&RT_MANIFEST][&1][&LANG], MANIFEST.as_bytes());
   }
 
@@ -1186,54 +906,80 @@ SectionEnd
     let bin = tmp.join("hello.exe");
     fs::write(&bin, exe(AMD64)).unwrap();
     let out = tmp.join("out");
+    // A stub as the linker lays it out, its placeholder in its data.
+    let mut stub = exe(AMD64);
+    put(&mut stub, 0x210, &payload::placeholder());
 
-    let e =
-      build(&cfg, &bin, Arch::X86_64, None, &out, OsStr::new("shipo-no-makensis")).unwrap_err();
-    assert_eq!(
-      e.to_string(),
-      "shipo-no-makensis not found: the setup needs it, `apt-get install nsis`"
-    );
-    assert!(!out.exists());
-    #[cfg(unix)]
-    {
-      // A makensis that fails as the real one does on a warning, its log as `-O` names it.
-      let fake = tmp.join("fake-makensis");
-      let log = "warning 6001: Variable \"x\" not referenced\nError: warning treated as error\n\n\
-                 Note: you may have one or two (large) stale temporary file(s) left\n";
-      let script = format!(
-        "#!/bin/sh\nfor a; do case $a in -O*) printf '{log}' > \"${{a#-O}}\";; esac; done\nexit 1\n"
-      );
-      fs::write(&fake, script).unwrap();
-      crate::tool::set_mode(&fake, 0o755).unwrap();
-      let e =
-        build(&cfg, &bin, Arch::X86_64, None, &out, fake.as_os_str()).unwrap_err().to_string();
-      let want = "failed (exit status: 1): warning 6001: Variable \"x\" not referenced\nError: warning treated as error";
-      assert!(e.ends_with(want), "{e}");
-    }
-
-    let e = setup(&cfg, &bin, Arch::Aarch64, None, &out).unwrap_err();
+    let e = build(&cfg, &bin, Arch::X86_64, None, &out, &exe(AMD64)).unwrap_err().to_string();
+    assert_eq!(e, "the setup stub: the setup's payload: the setup stub has no placeholder");
+    let e = build(&cfg, &bin, Arch::Aarch64, None, &out, &stub).unwrap_err();
     assert_eq!(e.to_string(), format!("{}: the exe is for x64, not arm64", bin.display()));
     cfg.name = "A/B".into();
-    assert!(
-      setup(&cfg, &bin, Arch::X86_64, None, &out)
-        .unwrap_err()
-        .to_string()
-        .contains("no Windows file name")
-    );
+    let e = build(&cfg, &bin, Arch::X86_64, None, &out, &stub).unwrap_err().to_string();
+    assert!(e.contains("no Windows file name"), "{e}");
     cfg.name = "Hello".into();
+    assert!(!out.exists());
 
-    // The setup itself where makensis is, as on the release host.
-    let found = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-      .any(|d| d.join("makensis").is_file());
-    if !found {
-      return;
+    let made = build(&cfg, &bin, Arch::X86_64, Some("v1.2.0"), &out, &stub).unwrap();
+    assert_eq!(made, out.join("Hello-v1.2.0-windows-x64-setup.exe"));
+    assert_eq!(fs::read_dir(&out).unwrap().count(), 1);
+    checked(&fs::read(&made).unwrap(), &cfg, &[("Hello.exe", None), ("LICENSE.txt", Some(b"MIT"))]);
+  }
+
+  /// Checks the setup `data` of `cfg`: its headers, its resources the setup's, its payload where
+  /// its placeholder says, holding `files`, each with its bytes if given.
+  fn checked(data: &[u8], cfg: &Config, files: &[(&str, Option<&[u8]>)]) {
+    let at = payload::find(data).unwrap();
+    let found: [u8; payload::PLACEHOLDER] = data[at..at + payload::PLACEHOLDER].try_into().unwrap();
+    let [own, offset, len] = payload::fields(&found);
+    assert_eq!((own as usize, (offset + len) as usize), (at, data.len()));
+    // The checksum is of the whole file, the payload in it.
+    consistent(data);
+
+    let tree = read_resources(data).unwrap();
+    assert_eq!(tree[&RT_VERSION][&1][&LANG], version_info(cfg, true).unwrap());
+    assert_eq!(tree[&RT_MANIFEST][&1][&LANG], MANIFEST.as_bytes());
+
+    let (info, got) = payload::unpack(&data[offset as usize..]).unwrap();
+    let app_id = app_id(cfg).unwrap();
+    assert_eq!(
+      (info.name.as_str(), info.id.as_str(), info.app_id),
+      (cfg.name.as_str(), cfg.id.as_str(), app_id)
+    );
+    assert_eq!(
+      got.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+      files.iter().map(|(n, _)| *n).collect::<Vec<_>>()
+    );
+    for ((_, data), (_, want)) in got.iter().zip(files) {
+      if let Some(want) = want {
+        assert_eq!(data, want);
+      }
     }
 
-    let made = setup(&cfg, &bin, Arch::X86_64, Some("v1.2.0"), &out).unwrap();
-    assert_eq!(made, out.join("Hello-v1.2.0-windows-x64-setup.exe"));
-    let data = fs::read(&made).unwrap();
-    assert!(data.starts_with(b"MZ") && data.len() > 30_000, "{}", data.len());
-    assert_eq!(fs::read_dir(&out).unwrap().count(), 1);
+    let exe = &got[0].1;
+    let tree = read_resources(exe).unwrap();
+    assert_eq!(tree[&RT_VERSION][&1][&LANG], version_info(cfg, false).unwrap());
+  }
+
+  /// The setup of the real stub `$SHIPO_SETUP_STUB_X64`, `make setup`'s, and of
+  /// `$SHIPO_TEST_EXE`, else a stand-in exe; left in `$SHIPO_TEST_OUT` when it is set.
+  #[test]
+  #[ignore = "needs the stub of `make setup` in $SHIPO_SETUP_STUB_X64"]
+  fn setup_of_the_stub() {
+    let tmp = Temp::new().unwrap();
+    icon(&tmp.join("icon.png"));
+    let cfg = config(&tmp, "");
+    let bin = env::var_os("SHIPO_TEST_EXE").map_or_else(
+      || {
+        fs::write(tmp.join("hello.exe"), exe(AMD64)).unwrap();
+        tmp.join("hello.exe")
+      },
+      PathBuf::from,
+    );
+
+    let out = env::var_os("SHIPO_TEST_OUT").map_or_else(|| tmp.join("out"), PathBuf::from);
+    let made = setup(&cfg, &bin, Arch::X86_64, None, &out).unwrap();
+    checked(&fs::read(&made).unwrap(), &cfg, &[("Hello.exe", None)]);
   }
 
   /// A PE32+ exe for `machine` as a linker lays it out: 0x400 bytes, the headers in the first

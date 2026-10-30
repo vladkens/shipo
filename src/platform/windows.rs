@@ -135,8 +135,8 @@ pub fn unpack(file: &Path, _: &Path) -> Result<PathBuf> {
   Ok(file.to_owned())
 }
 
-/// Runs the per-user NSIS `exe` silently (`/S`, into `%LOCALAPPDATA%\Programs\<name>`) with
-/// no window, to its end; its exit code (NSIS': 0 installed, 1 cancelled, 2 aborted by the script).
+/// Runs the per-user setup `exe` silently (`/S`, into the app's folder) with no window, to its end;
+/// its exit code (0 installed, 2 not).
 pub fn setup(exe: &Path) -> io::Result<i32> {
   let done = Command::new(exe).arg("/S").creation_flags(CREATE_NO_WINDOW).status()?;
   Ok(done.code().unwrap_or(-1))
