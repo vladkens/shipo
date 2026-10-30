@@ -37,14 +37,14 @@ PARTS = {
   "library": (800, ("src/*.rs",)),
   # The library's OS code: each OS, the shared Unix code and the dispatch.
   "library/platform": (500, ("src/platform/*.rs",)),
-  # The packer's commands, config, tool fetching, the app tree, the feed and the icons.
-  "packer": (1300, ("cli/src/{main,config,tool,tree,feed,image}.rs",)),
-  # The .app bundle and the DMG with its HFS+ volume, written ourselves.
-  "packer/macos": (1600, ("cli/src/{macos,plist,ds_store,dmg,hfs,btree,udif}.rs",)),
-  # The setup and the PE resources.
-  "packer/windows": (700, ("cli/src/{windows,pe}.rs",)),
+  # The packer's commands, config, tools, feed and icons.
+  "packer": (1300, ("cli/src/{main,config,tool,feed,image}.rs",)),
+  # The .app bundle, its signing and the DMG with its HFS+ volume, written ourselves.
+  "packer/macos": (1300, ("cli/src/{macos,sign,dmg,hfs}.rs",)),
+  # The setup and the exe's resources.
+  "packer/windows": (700, ("cli/src/windows.rs",)),
   # The AppImage with its squashfs, and the .deb.
-  "packer/linux": (600, ("cli/src/{linux,deb,squashfs}.rs",)),
+  "packer/linux": (600, ("cli/src/linux.rs",)),
 }
 # Files a script writes (scripts/hfs-unicode.py: the HFS+ decomposition tables): no budget.
 GENERATED = ("cli/src/unicode.rs",)
@@ -55,7 +55,7 @@ def matches(pattern: str, path: str) -> bool:
 
   >>> [matches("src/*.rs", p) for p in ("src/lib.rs", "src/platform/macos.rs", "cli/src/main.rs")]
   [True, False, False]
-  >>> [matches("cli/src/{pe,windows}.rs", p) for p in ("cli/src/pe.rs", "cli/src/windows.rs", "cli/src/pex.rs")]
+  >>> [matches("cli/src/{dmg,hfs}.rs", p) for p in ("cli/src/dmg.rs", "cli/src/hfs.rs", "cli/src/hfsx.rs")]
   [True, True, False]
   """
   rx = re.escape(pattern).replace(r"\*", "[^/]*")
@@ -68,7 +68,7 @@ def part(path: str) -> str | None:
 
   >>> [part(p) for p in ("src/lib.rs", "src/platform/unix.rs", "cli/src/main.rs", "cli/src/hfs.rs")]
   ['library', 'library/platform', 'packer', 'packer/macos']
-  >>> [part(p) for p in ("cli/src/pe.rs", "cli/src/deb.rs", "cli/src/unicode.rs", "cli/src/new.rs")]
+  >>> [part(p) for p in ("cli/src/windows.rs", "cli/src/linux.rs", "cli/src/unicode.rs", "cli/src/new.rs")]
   ['packer/windows', 'packer/linux', None, None]
   """
   for name, (_, patterns) in PARTS.items():

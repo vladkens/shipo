@@ -2,22 +2,15 @@
 //! The shipo packer: an app's binaries into signed installers and a signed update feed. This file
 //! is its command line; [USAGE] is its documentation.
 
-mod btree;
 mod config;
-mod deb;
 mod dmg;
-mod ds_store;
 mod feed;
 mod hfs;
 mod image;
 mod linux;
 mod macos;
-mod pe;
-mod plist;
-mod squashfs;
+mod sign;
 mod tool;
-mod tree;
-mod udif;
 mod unicode;
 mod windows;
 
@@ -200,10 +193,75 @@ fn app(cfg: &Config, bin: &Path) -> io::Result<()> {
   Ok(())
 }
 
-/// The OSes `release` takes binaries for, as their target triples end, in the feed's order.
-const OSES: [&str; 3] = ["apple-darwin", "pc-windows-msvc", "unknown-linux-gnu"];
-/// The archs `release` takes binaries for, as their target triples start.
-const ARCHS: [&str; 2] = ["x86_64", "aarch64"];
+/// An OS `release` takes binaries for, in the feed's order.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Os {
+  Macos,
+  Windows,
+  Linux,
+}
+
+impl Os {
+  const ALL: [Self; 3] = [Self::Macos, Self::Windows, Self::Linux];
+
+  /// The end of its target triples.
+  fn triple(self) -> &'static str {
+    match self {
+      Self::Macos => "apple-darwin",
+      Self::Windows => "pc-windows-msvc",
+      Self::Linux => "unknown-linux-gnu",
+    }
+  }
+}
+
+/// An arch `release` takes binaries for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Arch {
+  X86_64,
+  Aarch64,
+}
+
+impl Arch {
+  const ALL: [Self; 2] = [Self::X86_64, Self::Aarch64];
+
+  /// Rust's name, which starts its target triples and ends the macOS and Linux files' names.
+  pub fn name(self) -> &'static str {
+    match self {
+      Self::X86_64 => "x86_64",
+      Self::Aarch64 => "aarch64",
+    }
+  }
+
+  /// Windows' name, in the setup's file name.
+  pub fn windows(self) -> &'static str {
+    match self {
+      Self::X86_64 => "x64",
+      Self::Aarch64 => "arm64",
+    }
+  }
+
+  /// Debian's name.
+  pub fn deb(self) -> &'static str {
+    match self {
+      Self::X86_64 => "amd64",
+      Self::Aarch64 => "arm64",
+    }
+  }
+
+  /// The machine of an exe's COFF header.
+  pub fn machine(self) -> u16 {
+    match self {
+      Self::X86_64 => windows::AMD64,
+      Self::Aarch64 => windows::ARM64,
+    }
+  }
+}
+
+impl fmt::Display for Arch {
+  fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    f.write_str(self.name())
+  }
+}
 
 /// The installers of the binaries in `dir`, `<Name>-dev-…` at its top level, each path printed;
 /// with `tag` also update.txt there, signed by `key`, of the files as the GitHub release serves
@@ -226,13 +284,13 @@ fn release(cfg: &Config, dir: &Path, tag: Option<&str>, key: Option<&Path>) -> i
   let mut files = vec![];
   for (os, arch, bin) in binaries {
     let made = match os {
-      "apple-darwin" => {
-        let notarize = macos::secrets(&dmg::NOTARY, tag)?;
+      Os::Macos => {
+        let notarize = sign::secrets(&sign::NOTARY, tag)?;
         let (app, _) = macos::app(cfg, &bin, tag)?;
         vec![dmg::dmg(cfg, &app, arch, tag, notarize, dir)?]
       }
-      "pc-windows-msvc" => vec![windows::setup(cfg, &bin, arch, dir)?],
-      _ => vec![
+      Os::Windows => vec![windows::setup(cfg, &bin, arch, dir)?],
+      Os::Linux => vec![
         linux::appimage(cfg, &bin, arch, dir)?,
         linux::deb(cfg, &bin, arch, tag.is_none(), dir)?,
       ],
@@ -300,21 +358,22 @@ fn clean(dir: &Path, name: &str) -> io::Result<()> {
   Ok(())
 }
 
-/// The binaries in `dir`, `<triple>/<bin>[.exe]` of [OSES] and [ARCHS], each with its OS and
+/// The binaries in `dir`, `<triple>/<bin>[.exe]` of each [Os] and [Arch], each with its OS and
 /// arch, in the feed's order; an error when there is none.
-fn binaries(dir: &Path, bin: &str) -> io::Result<Vec<(&'static str, &'static str, PathBuf)>> {
-  let all = OSES.iter().flat_map(|os| ARCHS.iter().map(move |arch| (*os, *arch)));
+fn binaries(dir: &Path, bin: &str) -> io::Result<Vec<(Os, Arch, PathBuf)>> {
+  let all = Os::ALL.into_iter().flat_map(|os| Arch::ALL.map(|arch| (os, arch)));
+  let triple = |os: Os, arch: Arch| format!("{arch}-{}", os.triple());
   let found: Vec<_> = all
+    .clone()
     .map(|(os, arch)| {
-      let exe = if os == "pc-windows-msvc" { ".exe" } else { "" };
-      (os, arch, dir.join(format!("{arch}-{os}")).join(format!("{bin}{exe}")))
+      let exe = if os == Os::Windows { ".exe" } else { "" };
+      (os, arch, dir.join(triple(os, arch)).join(format!("{bin}{exe}")))
     })
     .filter(|(_, _, path)| path.is_file())
     .collect();
 
   if found.is_empty() {
-    let triples: Vec<_> =
-      OSES.iter().flat_map(|os| ARCHS.map(|arch| format!("{arch}-{os}"))).collect();
+    let triples: Vec<_> = all.map(|(os, arch)| triple(os, arch)).collect();
     return Err(bad(format!(
       "{} holds no <triple>/{bin}[.exe], of {}",
       dir.display(),
@@ -368,6 +427,16 @@ fn public(file: &Path) -> io::Result<()> {
 /// An error in what the user gave, `what` its message.
 fn bad(what: impl fmt::Display) -> io::Error {
   io::Error::new(io::ErrorKind::InvalidData, what.to_string())
+}
+
+/// The error `e` of `path`, which it names: `<path>: <e>`.
+fn at(path: &Path) -> impl Fn(io::Error) -> io::Error + '_ {
+  move |e| wrap(&e, format!("{}: {e}", path.display()))
+}
+
+/// The error `e` said as `msg`, its kind kept.
+fn wrap(e: &io::Error, msg: impl fmt::Display) -> io::Error {
+  io::Error::new(e.kind(), msg.to_string())
 }
 
 #[cfg(test)]
@@ -496,9 +565,9 @@ mod tests {
     fs::create_dir_all(tmp.join("aarch64-apple-darwin/hello")).unwrap();
     let found = binaries(&tmp, "hello").unwrap();
     let want = [
-      ("apple-darwin", "x86_64", "x86_64-apple-darwin/hello"),
-      ("pc-windows-msvc", "x86_64", "x86_64-pc-windows-msvc/hello.exe"),
-      ("unknown-linux-gnu", "aarch64", "aarch64-unknown-linux-gnu/hello"),
+      (Os::Macos, Arch::X86_64, "x86_64-apple-darwin/hello"),
+      (Os::Windows, Arch::X86_64, "x86_64-pc-windows-msvc/hello.exe"),
+      (Os::Linux, Arch::Aarch64, "aarch64-unknown-linux-gnu/hello"),
     ];
 
     let want: Vec<_> = want.map(|(os, arch, file)| (os, arch, tmp.join(file))).into();

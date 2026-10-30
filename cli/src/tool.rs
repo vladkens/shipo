@@ -1,11 +1,11 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/shipo
 //! The programs the packer runs: a command whose failure is an error with what it printed, the
 //! pinned tools it fetches by the system's `curl`, checked by their SHA-256 and unpacked from their
-//! tarballs, and the temporary folders and private files their secrets go through.
+//! tarballs; and the files the packer writes: put in place whole, private for secrets, in
+//! temporary folders.
 
-use std::fmt::Write;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,7 +14,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use flate2::read::MultiGzDecoder;
 
-use crate::bad;
+use crate::{at, bad, wrap};
 
 /// The secrets a release job holds, kept from every program the packer runs: one that needs a
 /// value gets it under a name of its own.
@@ -99,8 +99,8 @@ fn program(cmd: &Command) -> String {
 
 fn spawn_error(cmd: &Command, e: io::Error) -> io::Error {
   match e.kind() {
-    io::ErrorKind::NotFound => io::Error::new(e.kind(), format!("{} not found", program(cmd))),
-    _ => io::Error::new(e.kind(), format!("{}: {e}", program(cmd))),
+    io::ErrorKind::NotFound => wrap(&e, format!("{} not found", program(cmd))),
+    _ => wrap(&e, format!("{}: {e}", program(cmd))),
   }
 }
 
@@ -118,9 +118,8 @@ fn failed(cmd: &Command, status: &str, stderr: &[u8]) -> io::Error {
 // MARK: Pinned tools
 
 /// `url` into `path`, downloaded once by `curl`, the file checked against `sha256` (hex) each
-/// time. One of another hash is removed and an error; a download goes to `<path>.part` first, so a
-/// broken one never stays at `path`. A stalled connection fails, and any error is tried again
-/// three times.
+/// time. One of another hash is removed and an error; a download is [place]d, so a broken one
+/// never stays at `path`. A stalled connection fails, and any error is tried again three times.
 pub fn fetch(url: &str, sha256: &str, path: &Path) -> io::Result<PathBuf> {
   let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
   if path.exists() {
@@ -136,19 +135,15 @@ pub fn fetch(url: &str, sha256: &str, path: &Path) -> io::Result<PathBuf> {
     fs::create_dir_all(dir)?;
   }
 
-  let part = path.with_file_name(format!("{name}.part"));
-  let _ = fs::remove_file(&part);
   let mut curl = Command::new("curl");
   curl.args(["-fsSL", "--connect-timeout", "30", "--speed-limit", "1024", "--speed-time", "60"]);
   curl.args(["--retry", "3", "--retry-all-errors", "-o"]);
-  let got = run(curl.arg(&part).arg(url));
-  let got = got.and_then(|_| check(&part, sha256, &name));
-  if let Err(e) = got {
-    let _ = fs::remove_file(&part);
-    return Err(io::Error::new(e.kind(), format!("{url}: {e}")));
-  }
+  let got = place(path, |part| {
+    run(curl.arg(part).arg(url))?;
+    check(part, sha256, &name)
+  });
 
-  fs::rename(&part, path)?;
+  got.map_err(|e| wrap(&e, format!("{url}: {e}")))?;
   Ok(path.to_path_buf())
 }
 
@@ -162,41 +157,22 @@ fn check(path: &Path, want: &str, name: &str) -> io::Result<()> {
 }
 
 /// The SHA-256 of the file at `path`, in hex.
-pub fn sha256(path: &Path) -> io::Result<String> {
-  let mut file = File::open(path)?;
-  let (mut hash, mut buf) = (hmac_sha256::Hash::new(), vec![0; 1 << 16]);
-  loop {
-    let n = file.read(&mut buf)?;
-    if n == 0 {
-      break;
-    }
-
-    hash.update(&buf[..n]);
-  }
-
-  let mut hex = String::new();
-  for b in hash.finalize() {
-    let _ = write!(hex, "{b:02x}");
-  }
-
-  Ok(hex)
+fn sha256(path: &Path) -> io::Result<String> {
+  Ok(hex(&hmac_sha256::Hash::hash(&read(path)?)))
 }
 
-/// The file `member` of the gzipped tarball `tarball` at `path` (0755): written beside it and
-/// renamed over it, so a copy that runs is never rewritten.
+/// The file `member` of the gzipped tarball `tarball` at `path` (0755), [place]d: renamed over
+/// it, so a copy that runs is never rewritten.
 pub fn untar(tarball: &Path, member: &str, path: &Path) -> io::Result<PathBuf> {
-  let at = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", tarball.display()));
-  let files = tar_files(&fs::read(tarball).map_err(at)?).map_err(at)?;
+  let files = tar_files(&read(tarball)?).map_err(at(tarball))?;
   let Some((_, data)) = files.into_iter().find(|(name, _)| name == member) else {
     return Err(bad(format!("{}: no {member}", tarball.display())));
   };
 
-  let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-  let part = path.with_file_name(format!("{name}.part"));
-  let _ = fs::remove_file(&part);
-  fs::write(&part, data)?;
-  set_mode(&part, 0o755)?;
-  fs::rename(&part, path)?;
+  place(path, |part| {
+    File::create_new(part)?.write_all(&data)?;
+    set_mode(part, 0o755)
+  })?;
   Ok(path.to_path_buf())
 }
 
@@ -246,6 +222,19 @@ fn in_folder(name: &str) -> io::Result<String> {
 pub struct Temp(PathBuf);
 
 impl Temp {
+  /// A new folder of `files`, each `(path, text)`, its folders made.
+  #[cfg(test)]
+  pub fn files(files: &[(&str, &str)]) -> Self {
+    let dir = Self::new().unwrap();
+    for (path, text) in files {
+      let path = dir.join(path);
+      fs::create_dir_all(path.parent().unwrap()).unwrap();
+      fs::write(path, text).unwrap();
+    }
+
+    dir
+  }
+
   pub fn new() -> io::Result<Self> {
     static COUNT: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
@@ -273,14 +262,46 @@ impl Drop for Temp {
   }
 }
 
-/// `data` in a new file at `path` only its owner reads: a key, a certificate.
+/// `data` in a new file at `path` only its owner reads: a key, a certificate. A file there is an
+/// error, never written over; one this fails to write is removed.
 pub fn private(path: &Path, data: &[u8]) -> io::Result<PathBuf> {
   let mut opts = OpenOptions::new();
   opts.write(true).create_new(true);
   #[cfg(unix)]
   std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
-  io::Write::write_all(&mut opts.open(path)?, data)?;
+  let mut file = opts.open(path)?;
+  if let Err(e) = file.write_all(data) {
+    let _ = fs::remove_file(path);
+    return Err(at(path)(e));
+  }
+
   Ok(path.to_path_buf())
+}
+
+/// The file `out`, made by `make` at `<out>.part` and renamed into place. A part there before, or
+/// a link there, is removed first, so `make` makes a new file (`create_new`), never one written
+/// through; on any error the part is removed, so no folder a release uploads or the apps fetch
+/// from holds half a file.
+pub fn place(out: &Path, make: impl FnOnce(&Path) -> io::Result<()>) -> io::Result<()> {
+  let mut name = out.file_name().unwrap_or_default().to_os_string();
+  name.push(".part");
+  let part = out.with_file_name(name);
+  match fs::remove_file(&part) {
+    Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(at(&part)(e)),
+    _ => {}
+  }
+
+  let made = make(&part).and_then(|()| fs::rename(&part, out).map_err(at(out)));
+  if made.is_err() {
+    let _ = fs::remove_file(&part);
+  }
+
+  made
+}
+
+/// The bytes of the file at `path`, an error naming it.
+pub fn read(path: &Path) -> io::Result<Vec<u8>> {
+  fs::read(path).map_err(at(path))
 }
 
 /// Sets the Unix mode of `path`; nothing elsewhere.
@@ -298,10 +319,21 @@ pub fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
   }
 }
 
+// MARK: Bytes
+
+/// `bytes` in lowercase hex.
+pub fn hex(bytes: &[u8]) -> String {
+  bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The `N` bytes of `data` at `at`, if it holds them; a number's `from_le_bytes` or
+/// `from_be_bytes` reads them.
+pub fn get<const N: usize>(data: &[u8], at: usize) -> Option<[u8; N]> {
+  data.get(at..at.checked_add(N)?)?.try_into().ok()
+}
+
 #[cfg(test)]
 mod tests {
-  use std::io::Write as _;
-
   use flate2::Compression;
   use flate2::write::GzEncoder;
 
@@ -439,6 +471,37 @@ mod tests {
     env.env("APPLE_CERTIFICATE", "c").env("SHIPO_UPDATE_KEY", "k").env("SHIPO_P12_PASSWORD", "p");
     assert_eq!(run(&mut env).unwrap(), b"none none p\n");
     assert_eq!(run_until(&mut env, long).unwrap(), b"none none p\n");
+  }
+
+  #[test]
+  fn placed() {
+    let tmp = Temp::new().unwrap();
+    let out = tmp.join("App.deb");
+    let listed = || {
+      let mut names: Vec<_> = fs::read_dir(&*tmp)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+      names.sort();
+      names
+    };
+
+    // Half written, then failed: no part is left, nor the file.
+    let e = place(&out, |part| {
+      fs::write(part, "half")?;
+      Err(io::Error::other("disk full"))
+    });
+    assert_eq!(e.unwrap_err().to_string(), "disk full");
+    assert!(listed().is_empty());
+
+    place(&out, |part| fs::write(part, "whole")).unwrap();
+    assert_eq!(listed(), ["App.deb"]);
+    assert_eq!(fs::read_to_string(&out).unwrap(), "whole");
+
+    // A failed one leaves the one before as it was.
+    assert!(place(&out, |part| fs::write(part, "half").and(Err(io::Error::other("no")))).is_err());
+    assert_eq!(listed(), ["App.deb"]);
+    assert_eq!(fs::read_to_string(&out).unwrap(), "whole");
   }
 
   #[cfg(unix)]

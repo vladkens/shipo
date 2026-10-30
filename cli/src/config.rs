@@ -7,9 +7,10 @@ use std::ffi::OsString;
 use std::path::{self, Component, Path, PathBuf};
 use std::{fs, io};
 
+use serde::Deserialize;
 use toml::{Table, Value};
 
-use crate::bad;
+use crate::{at, bad};
 
 /// The app as its `[package.metadata.shipo]` and its package give it.
 #[derive(Debug)]
@@ -25,13 +26,11 @@ pub struct Config {
   pub version: String,
   /// The binary's name, without `.exe`.
   pub bin: String,
-  /// `[package.metadata.shipo.macos]` as it is; empty if none.
-  pub macos: Table,
-  /// `[package.metadata.shipo.windows]` as it is; empty if none.
-  pub windows: Table,
-  /// `[package.metadata.shipo.linux]` as it is; empty if none.
-  pub linux: Table,
-  /// The config's, else the first author without ` <mail>`; empty if neither.
+  pub macos: Macos,
+  pub windows: Windows,
+  pub linux: Linux,
+  /// The config's, else the first author without ` <mail>`, else the id's owner (`me` of
+  /// `me.vladkens.x`, `me` of `me.x`).
   pub publisher: String,
   pub authors: Vec<String>,
   /// The package's repository without a trailing `/` and `.git`; empty if none.
@@ -50,12 +49,58 @@ struct Workspace {
   package: Table,
 }
 
-/// The keys of `[package.metadata.shipo]` and of its tables, so a typo is an error; `plist`'s keys
-/// are the app's own.
-const KEYS: &[&str] = &["id", "name", "icon", "comment", "publisher", "macos", "windows", "linux"];
-const MACOS: &[&str] = &["accessory", "entitlements", "plist"];
-const WINDOWS: &[&str] = &["app-id", "copyright"];
-const LINUX: &[&str] = &["categories", "deb-package", "deb-depends", "deb-recommends"];
+/// `[package.metadata.shipo]`: a key it doesn't know, a typo, is an error.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Shipo {
+  id: String,
+  name: String,
+  icon: PathBuf,
+  #[serde(default)]
+  comment: String,
+  #[serde(default)]
+  publisher: String,
+  #[serde(default)]
+  macos: Macos,
+  #[serde(default)]
+  windows: Windows,
+  #[serde(default)]
+  linux: Linux,
+}
+
+/// `[package.metadata.shipo.macos]`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct Macos {
+  /// A tray app: no Dock icon, never ended by macOS on its own.
+  pub accessory: bool,
+  /// The entitlements' plist, from the manifest's folder.
+  pub entitlements: Option<PathBuf>,
+  /// Keys over the Info.plist's, usage strings among them: the app's own.
+  pub plist: Table,
+}
+
+/// `[package.metadata.shipo.windows]`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct Windows {
+  /// The setup's AppId, a GUID.
+  pub app_id: Option<String>,
+  /// The exe's LegalCopyright.
+  pub copyright: Option<String>,
+}
+
+/// `[package.metadata.shipo.linux]`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct Linux {
+  /// The `.desktop`'s categories.
+  pub categories: Vec<String>,
+  /// The `.deb`'s package name.
+  pub deb_package: Option<String>,
+  pub deb_depends: Vec<String>,
+  pub deb_recommends: Vec<String>,
+}
 
 /// What reads an environment variable: [std::env::var_os], or a test's.
 type Env<'a> = &'a dyn Fn(&str) -> Option<OsString>;
@@ -78,16 +123,13 @@ impl Config {
 
     let shipo = pkg.get("metadata").and_then(|m| m.get("shipo")).and_then(Value::as_table);
     let shipo = shipo.ok_or_else(|| no("[package.metadata.shipo]"))?;
-    known(shipo, "[package.metadata.shipo]", KEYS)?;
-    let required = |key: &str| shipo.get(key).and_then(Value::as_str);
-    let (Some(id), Some(name), Some(icon)) = (required("id"), required("name"), required("icon"))
-    else {
-      let missing = ["id", "name", "icon"].into_iter().filter(|k| required(k).is_none());
-      let missing: Vec<_> = missing.collect();
-      return Err(bad(format!("[package.metadata.shipo] needs {}", missing.join(", "))));
-    };
+    // toml names the key on a line of its own.
+    let said = |e: toml::de::Error| e.to_string().trim_end().replace('\n', " ");
+    let mut shipo: Shipo = Value::Table(shipo.clone())
+      .try_into()
+      .map_err(|e| bad(format!("[package.metadata.shipo] {}", said(e))))?;
 
-    let meta = |key: &str| text(shipo.get(key), &format!("[package.metadata.shipo] {key}"));
+    shipo.macos.entitlements = shipo.macos.entitlements.map(|path| root.join(path));
     let ws = workspace(&root, &toml, pkg)?;
     let field = |key: &str| inherit(pkg, ws.as_ref(), key);
 
@@ -104,7 +146,17 @@ impl Config {
     let authors = authors.ok_or_else(|| bad("package.authors is not a list of strings"))?;
 
     let author = authors.first().map_or("", |a| a.split(" <").next().unwrap_or(a));
-    let publisher = meta("publisher")?.filter(|p| !p.is_empty()).unwrap_or_else(|| author.into());
+    let owner = || {
+      let parts: Vec<_> = shipo.id.split('.').collect();
+      parts[if parts.len() > 2 { 1 } else { 0 }].to_string()
+    };
+
+    let publisher = match (shipo.publisher.as_str(), author) {
+      ("", "") => owner(),
+      ("", author) => author.into(),
+      (publisher, _) => publisher.into(),
+    };
+
     let repository = text(field("repository")?, "package.repository")?.unwrap_or_default();
     let repository = repository.trim_end_matches('/');
     let repository = repository.strip_suffix(".git").unwrap_or(repository).to_string();
@@ -117,15 +169,15 @@ impl Config {
     let workspace = ws.as_ref().map_or_else(|| root.clone(), |w| w.dir.clone());
     let target = target(env, &workspace)?;
     Ok(Self {
-      id: id.into(),
-      name: name.into(),
-      icon: root.join(icon),
-      comment: meta("comment")?.unwrap_or_default(),
+      icon: root.join(&shipo.icon),
+      id: shipo.id,
+      name: shipo.name,
+      comment: shipo.comment,
       version,
       bin,
-      macos: subtable(shipo, "macos", MACOS)?,
-      windows: subtable(shipo, "windows", WINDOWS)?,
-      linux: subtable(shipo, "linux", LINUX)?,
+      macos: shipo.macos,
+      windows: shipo.windows,
+      linux: shipo.linux,
       publisher,
       authors,
       repository,
@@ -136,10 +188,29 @@ impl Config {
   }
 }
 
+impl Config {
+  /// The version's leading numbers, `\d+(\.\d+)*`, as macOS and Windows take it: 1.2.0 of
+  /// 1.2.0-beta.1; an error if it starts with none.
+  pub fn numeric(&self) -> io::Result<&str> {
+    let b = self.version.as_bytes();
+    let digits =
+      |at: usize| b.get(at..).map_or(0, |s| s.iter().take_while(|c| c.is_ascii_digit()).count());
+    let mut end = digits(0);
+    if end == 0 {
+      return Err(bad(format!("the version {} starts with no number", self.version)));
+    }
+
+    while b.get(end) == Some(&b'.') && digits(end + 1) > 0 {
+      end += 1 + digits(end + 1);
+    }
+
+    Ok(&self.version[..end])
+  }
+}
+
 /// The TOML file at `path`, its name in the errors.
 fn table(path: &Path) -> io::Result<Table> {
-  let text = fs::read_to_string(path);
-  let text = text.map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
+  let text = fs::read_to_string(path).map_err(at(path))?;
   text.parse().map_err(|e: toml::de::Error| bad(format!("{}: {e}", path.display())))
 }
 
@@ -149,25 +220,6 @@ fn text(value: Option<&Value>, what: &str) -> io::Result<Option<String>> {
     None => Ok(None),
     Some(Value::String(s)) => Ok(Some(s.clone())),
     Some(_) => Err(bad(format!("{what} is not a string"))),
-  }
-}
-
-/// Checks that `table`, `what` in the error, has no key but `keys`.
-fn known(table: &Table, what: &str, keys: &[&str]) -> io::Result<()> {
-  let unknown: Vec<_> = table.keys().map(String::as_str).filter(|k| !keys.contains(k)).collect();
-  match unknown.is_empty() {
-    true => Ok(()),
-    false => Err(bad(format!("{what} takes {}, not {}", keys.join(", "), unknown.join(", ")))),
-  }
-}
-
-/// `[package.metadata.shipo.<key>]` of the keys `keys`, empty if there is none.
-fn subtable(shipo: &Table, key: &str, keys: &[&str]) -> io::Result<Table> {
-  let what = format!("[package.metadata.shipo.{key}]");
-  match shipo.get(key) {
-    None => Ok(Table::new()),
-    Some(Value::Table(t)) => known(t, &what, keys).map(|_| t.clone()),
-    Some(_) => Err(bad(format!("{what} is not a table"))),
   }
 }
 
@@ -330,40 +382,8 @@ fn target(env: Env, ws: &Path) -> io::Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-  use std::ops::Deref;
-
   use super::*;
-
-  /// A new folder in the temp dir with `(path, text)` files, removed on drop.
-  struct Dir(PathBuf);
-
-  impl Dir {
-    fn new(name: &str, files: &[(&str, &str)]) -> Self {
-      let dir = std::env::temp_dir().join(format!("shipo-cli-{}-{name}", std::process::id()));
-      let _ = fs::remove_dir_all(&dir);
-      for (path, text) in files {
-        let path = dir.join(path);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, text).unwrap();
-      }
-
-      fs::create_dir_all(&dir).unwrap();
-      Self(dir)
-    }
-  }
-
-  impl Deref for Dir {
-    type Target = Path;
-    fn deref(&self) -> &Path {
-      &self.0
-    }
-  }
-
-  impl Drop for Dir {
-    fn drop(&mut self) {
-      let _ = fs::remove_dir_all(&self.0);
-    }
-  }
+  use crate::tool::Temp;
 
   /// The smallest config, its `[package]` ending at the top so a test can add to it.
   const APP: &str = concat!(
@@ -387,77 +407,114 @@ mod tests {
     None
   }
 
-  fn load(name: &str, files: &[(&str, &str)], manifest: &str) -> io::Result<Config> {
-    let dir = Dir::new(name, files);
+  fn load(files: &[(&str, &str)], manifest: &str) -> io::Result<Config> {
+    let dir = Temp::files(files);
     Config::read(&dir.join(manifest), &none)
   }
 
-  fn error(name: &str, files: &[(&str, &str)], manifest: &str) -> String {
-    load(name, files, manifest).unwrap_err().to_string()
+  fn error(files: &[(&str, &str)], manifest: &str) -> String {
+    load(files, manifest).unwrap_err().to_string()
   }
 
   #[test]
   fn minimal() {
-    let dir = Dir::new("minimal", &[("Cargo.toml", APP)]);
+    let dir = Temp::files(&[("Cargo.toml", APP)]);
     let c = Config::read(&dir.join("Cargo.toml"), &none).unwrap();
     assert_eq!((c.id.as_str(), c.name.as_str(), c.version.as_str()), ("me.app", "App", "1.2.0"));
     assert_eq!((c.icon, c.root), (dir.join("icon.png"), dir.to_path_buf()));
-    assert_eq!((c.bin.as_str(), c.comment.as_str(), c.publisher.as_str()), ("app", "", ""));
-    assert!(c.macos.is_empty() && c.windows.is_empty() && c.linux.is_empty());
+    assert_eq!((c.bin.as_str(), c.comment.as_str(), c.publisher.as_str()), ("app", "", "me"));
+    assert!(!c.macos.accessory && c.macos.entitlements.is_none() && c.macos.plist.is_empty());
+    assert!(c.windows.app_id.is_none() && c.linux.categories.is_empty());
     assert_eq!((c.authors, c.repository), (vec![], String::new()));
     assert_eq!((c.workspace, c.target), (dir.to_path_buf(), dir.join("target")));
   }
 
   #[test]
   fn required() {
-    let none = error("none", &[], "Cargo.toml");
+    let none = error(&[], "Cargo.toml");
     assert!(none.contains("Cargo.toml: "), "{none}");
 
-    let ws = error("no-package", &[("Cargo.toml", "[workspace]\n")], "Cargo.toml");
+    let ws = error(&[("Cargo.toml", "[workspace]\n")], "Cargo.toml");
     assert!(ws.ends_with("Cargo.toml is no package"), "{ws}");
 
     let plain = "[package]\nname = \"app\"\nversion = \"1.2.0\"\n";
-    let plain = error("no-shipo", &[("Cargo.toml", plain)], "Cargo.toml");
+    let plain = error(&[("Cargo.toml", plain)], "Cargo.toml");
     assert!(plain.ends_with("Cargo.toml has no [package.metadata.shipo]"), "{plain}");
 
-    let some = APP.replace("id = \"me.app\"\n", "").replace("icon = \"icon.png\"", "icon = 1");
-    let some = error("some", &[("Cargo.toml", &some)], "Cargo.toml");
-    assert_eq!(some, "[package.metadata.shipo] needs id, icon");
+    let some = APP.replace("id = \"me.app\"\n", "");
+    let some = error(&[("Cargo.toml", &some)], "Cargo.toml");
+    assert_eq!(some, "[package.metadata.shipo] missing field `id`");
 
     let version = APP.replace("version = \"1.2.0\"", "");
-    let version = error("no-version", &[("Cargo.toml", &version)], "Cargo.toml");
+    let version = error(&[("Cargo.toml", &version)], "Cargo.toml");
     assert!(version.ends_with("Cargo.toml has no version"), "{version}");
 
     let comment = app("", "comment = 1\n");
-    let comment = error("comment", &[("Cargo.toml", &comment)], "Cargo.toml");
-    assert_eq!(comment, "[package.metadata.shipo] comment is not a string");
+    let comment = error(&[("Cargo.toml", &comment)], "Cargo.toml");
+    let want = "[package.metadata.shipo] invalid type: integer `1`, expected a string in `comment`";
+    assert_eq!(comment, want);
 
     let macos = app("", "macos = \"yes\"\n");
-    let macos = error("macos", &[("Cargo.toml", &macos)], "Cargo.toml");
-    assert_eq!(macos, "[package.metadata.shipo.macos] is not a table");
+    let macos = error(&[("Cargo.toml", &macos)], "Cargo.toml");
+    let want = "invalid type: string \"yes\", expected struct Macos in `macos`";
+    assert_eq!(macos, format!("[package.metadata.shipo] {want}"));
 
     let typo = app("", "nmae = \"App\"\npublisher = \"Me\"\nlinx = {}\n");
-    let typo = error("typo", &[("Cargo.toml", &typo)], "Cargo.toml");
-    let keys = "id, name, icon, comment, publisher, macos, windows, linux";
-    assert_eq!(typo, format!("[package.metadata.shipo] takes {keys}, not linx, nmae"));
-
-    let typo = app("", "[package.metadata.shipo.linux]\ndeb-recomends = []\n");
-    let typo = error("typo-linux", &[("Cargo.toml", &typo)], "Cargo.toml");
-    let keys = "categories, deb-package, deb-depends, deb-recommends";
-    assert_eq!(typo, format!("[package.metadata.shipo.linux] takes {keys}, not deb-recomends"));
-
-    let typo = app("", "[package.metadata.shipo.macos]\nplist.Anything = 1\nicon = \"x\"\n");
-    let typo = error("typo-macos", &[("Cargo.toml", &typo)], "Cargo.toml");
+    let typo = error(&[("Cargo.toml", &typo)], "Cargo.toml");
+    let keys = "`id`, `name`, `icon`, `comment`, `publisher`, `macos`, `windows`, `linux`";
     assert_eq!(
       typo,
-      "[package.metadata.shipo.macos] takes accessory, entitlements, plist, not icon"
+      format!("[package.metadata.shipo] unknown field `linx`, expected one of {keys}")
     );
 
-    let typo = app("", "[package.metadata.shipo.windows]\ncopyright = \"x\"\nappid = \"x\"\n");
-    let typo = error("typo-windows", &[("Cargo.toml", &typo)], "Cargo.toml");
-    assert_eq!(typo, "[package.metadata.shipo.windows] takes app-id, copyright, not appid");
+    let typo = app("", "[package.metadata.shipo.linux]\ndeb-recomends = []\n");
+    let typo = error(&[("Cargo.toml", &typo)], "Cargo.toml");
+    let keys = "`categories`, `deb-package`, `deb-depends`, `deb-recommends`";
+    let want = format!("unknown field `deb-recomends`, expected one of {keys} in `linux`");
+    assert_eq!(typo, format!("[package.metadata.shipo] {want}"));
 
-    let bad = error("bad-toml", &[("Cargo.toml", "[package\n")], "Cargo.toml");
+    let typo = app("", "[package.metadata.shipo.macos]\nplist.Anything = 1\nicon = \"x\"\n");
+    let typo = error(&[("Cargo.toml", &typo)], "Cargo.toml");
+    let want =
+      "unknown field `icon`, expected one of `accessory`, `entitlements`, `plist` in `macos`";
+    assert_eq!(typo, format!("[package.metadata.shipo] {want}"));
+
+    let typo = app("", "[package.metadata.shipo.windows]\ncopyright = \"x\"\nappid = \"x\"\n");
+    let typo = error(&[("Cargo.toml", &typo)], "Cargo.toml");
+    let want = "unknown field `appid`, expected `app-id` or `copyright` in `windows`";
+    assert_eq!(typo, format!("[package.metadata.shipo] {want}"));
+
+    // Each value of the platform tables is of its type.
+    let tables = [
+      ("macos", "accessory = 1", "integer `1`, expected a boolean in `macos.accessory`"),
+      (
+        "macos",
+        "entitlements = true",
+        "boolean `true`, expected path string in `macos.entitlements`",
+      ),
+      ("macos", "plist = \"x\"", "string \"x\", expected a map in `macos.plist`"),
+      ("windows", "app-id = 1", "integer `1`, expected a string in `windows.app-id`"),
+      ("windows", "copyright = 1", "integer `1`, expected a string in `windows.copyright`"),
+      (
+        "linux",
+        "categories = \"Utility\"",
+        "string \"Utility\", expected a sequence in `linux.categories`",
+      ),
+      ("linux", "deb-package = 1", "integer `1`, expected a string in `linux.deb-package`"),
+      (
+        "linux",
+        "deb-depends = [\"libc6\", 1]",
+        "integer `1`, expected a string in `linux.deb-depends`",
+      ),
+    ];
+
+    for (table, value, want) in tables {
+      let manifest = app("", &format!("[package.metadata.shipo.{table}]\n{value}\n"));
+      let e = error(&[("Cargo.toml", &manifest)], "Cargo.toml");
+      assert_eq!(e, format!("[package.metadata.shipo] invalid type: {want}"), "{table} {value}");
+    }
+
+    let bad = error(&[("Cargo.toml", "[package\n")], "Cargo.toml");
     assert!(bad.contains("Cargo.toml: TOML parse error"), "{bad}");
   }
 
@@ -469,7 +526,7 @@ mod tests {
       "authors = [\"Jane Doe <jane@example.com>\"]\nrepository = \"https://github.com/me/app/\"\n",
     );
     let manifest = app(package, "").replace("version = \"1.2.0\"\n", "");
-    let dir = Dir::new("inherited", &[("Cargo.toml", root), ("app/Cargo.toml", &manifest)]);
+    let dir = Temp::files(&[("Cargo.toml", root), ("app/Cargo.toml", &manifest)]);
     let c = Config::read(&dir.join("app/Cargo.toml"), &none).unwrap();
     assert_eq!((c.version.as_str(), c.repository.as_str()), ("2.0.0", "https://github.com/me/app"));
     assert_eq!(
@@ -482,7 +539,7 @@ mod tests {
     // The package's own manifest is the workspace's root.
     let own = app(package, "[workspace]\n[workspace.package]\nversion = \"3.0.0\"\nauthors = []\n");
     let own = own.replace("version = \"1.2.0\"\n", "").replace("repository.workspace = true", "");
-    let dir = Dir::new("own", &[("Cargo.toml", "[workspace]\n"), ("app/Cargo.toml", &own)]);
+    let dir = Temp::files(&[("Cargo.toml", "[workspace]\n"), ("app/Cargo.toml", &own)]);
     let c = Config::read(&dir.join("app/Cargo.toml"), &none).unwrap();
     assert_eq!((c.version.as_str(), c.target), ("3.0.0", dir.join("app/target")));
 
@@ -491,7 +548,7 @@ mod tests {
     let far = far.replace("version = \"1.2.0\"\n", "");
     let real = "[workspace]\n[workspace.package]\nversion = \"4.0.0\"\n";
     let files = [("Cargo.toml", root), ("app/Cargo.toml", far.as_str()), ("real/Cargo.toml", real)];
-    let dir = Dir::new("far", &files);
+    let dir = Temp::files(&files);
     let c = Config::read(&dir.join("app/Cargo.toml"), &none).unwrap();
     assert_eq!((c.version.as_str(), c.target), ("4.0.0", dir.join("real/target")));
     assert_eq!(c.workspace, dir.join("real"));
@@ -501,31 +558,27 @@ mod tests {
     assert_eq!((c.root, c.target), (dir.join("app"), dir.join("real/target")));
 
     let files = [("app/Cargo.toml", far.as_str()), ("real/Cargo.toml", "[package]\n")];
-    let e = error("far-none", &files, "app/Cargo.toml");
+    let e = error(&files, "app/Cargo.toml");
     assert!(e.ends_with("real/Cargo.toml has no [workspace]"), "{e}");
   }
 
   #[test]
   fn excluded() {
     let root = "[workspace]\nexclude = [\"./app\"]\n[workspace.package]\nversion = \"9.9.9\"\n";
-    let dir = Dir::new("excluded", &[("Cargo.toml", root), ("app/Cargo.toml", APP)]);
+    let dir = Temp::files(&[("Cargo.toml", root), ("app/Cargo.toml", APP)]);
     let c = Config::read(&dir.join("app/Cargo.toml"), &none).unwrap();
     assert_eq!((c.version.as_str(), c.target), ("1.2.0", dir.join("app/target")));
     assert_eq!(c.workspace, dir.join("app"));
 
     let manifest = app("version.workspace = true", "").replace("version = \"1.2.0\"\n", "");
-    let e = error(
-      "excluded-inherit",
-      &[("Cargo.toml", root), ("app/Cargo.toml", &manifest)],
-      "app/Cargo.toml",
-    );
+    let e = error(&[("Cargo.toml", root), ("app/Cargo.toml", &manifest)], "app/Cargo.toml");
     assert_eq!(e, "package.version is the workspace's, but the package is in none");
 
     // A member listed by its path is in, under an excluded folder too; an outer root is passed by.
     let root = "[workspace]\nmembers = [\"app/inner\"]\nexclude = [\"app\"]\n";
     let files =
       [("Cargo.toml", root), ("app/inner/Cargo.toml", APP), ("app/other/Cargo.toml", APP)];
-    let dir = Dir::new("member", &files);
+    let dir = Temp::files(&files);
     let c = Config::read(&dir.join("app/inner/Cargo.toml"), &none).unwrap();
     assert_eq!(c.target, dir.join("target"));
     let c = Config::read(&dir.join("app/other/Cargo.toml"), &none).unwrap();
@@ -536,13 +589,12 @@ mod tests {
   fn inherited_missing() {
     let manifest = app("repository.workspace = true", "");
     let root = "[workspace]\n[workspace.package]\nversion = \"2.0.0\"\n";
-    let e =
-      error("missing", &[("Cargo.toml", root), ("app/Cargo.toml", &manifest)], "app/Cargo.toml");
+    let e = error(&[("Cargo.toml", root), ("app/Cargo.toml", &manifest)], "app/Cargo.toml");
     assert!(e.starts_with("package.repository is the workspace's, but "), "{e}");
     assert!(e.ends_with("Cargo.toml's [workspace.package] has no repository"), "{e}");
 
     let manifest = app("authors = { workspace = true }", "");
-    let e = error("no-workspace", &[("app/Cargo.toml", &manifest)], "app/Cargo.toml");
+    let e = error(&[("app/Cargo.toml", &manifest)], "app/Cargo.toml");
     assert_eq!(e, "package.authors is the workspace's, but the package is in none");
   }
 
@@ -577,31 +629,49 @@ mod tests {
       ("edition = \"2015\"", "", vec![a], "a"),
     ];
 
-    for (i, (package, rest, sources, bin)) in cases.into_iter().enumerate() {
+    for (package, rest, sources, bin) in cases {
       let manifest = app(package, rest);
       let mut files: Vec<_> = sources.iter().map(|path| (*path, "")).collect();
       files.push(("Cargo.toml", manifest.as_str()));
-      let c = load(&format!("bin-{i}"), &files, "Cargo.toml").unwrap();
+      let c = load(&files, "Cargo.toml").unwrap();
       assert_eq!(c.bin, bin, "{package:?} {rest:?} {sources:?}");
     }
 
     // No edition is 2015.
     let old =
       APP.replace("edition = \"2021\"\n", "") + "[[bin]]\nname = \"x\"\npath = \"src/x.rs\"\n";
-    let c = load("bin-2015", &[("Cargo.toml", &old), (main, "")], "Cargo.toml").unwrap();
+    let c = load(&[("Cargo.toml", &old), (main, "")], "Cargo.toml").unwrap();
     assert_eq!(c.bin, "x");
 
     let nameless = app("", "[[bin]]\npath = \"src/x.rs\"\n");
-    assert_eq!(
-      error("nameless", &[("Cargo.toml", &nameless)], "Cargo.toml"),
-      "a [[bin]] has no name"
-    );
+    assert_eq!(error(&[("Cargo.toml", &nameless)], "Cargo.toml"), "a [[bin]] has no name");
+  }
+
+  #[test]
+  fn versions() {
+    let cases = [
+      ("1.2.0", Some("1.2.0")),
+      ("1.2.0-beta.1", Some("1.2.0")),
+      ("10.4+build.5", Some("10.4")),
+      ("1..2", Some("1")),
+      ("1.2.", Some("1.2")),
+      ("7", Some("7")),
+      ("x1", None),
+      ("", None),
+    ];
+
+    let dir = Temp::files(&[("Cargo.toml", APP)]);
+    let mut c = Config::read(&dir.join("Cargo.toml"), &none).unwrap();
+    for (version, want) in cases {
+      c.version = version.into();
+      assert_eq!(c.numeric().ok(), want, "{version}");
+    }
   }
 
   #[test]
   fn publisher() {
     let cases = [
-      ("", "", ""),
+      ("", "", "me"),
       ("authors = [\"Jane Doe <jane@example.com>\", \"Joe\"]", "", "Jane Doe"),
       ("authors = [\"Jane\"]", "", "Jane"),
       ("authors = [\"Jane\"]", "publisher = \"Acme\"\n", "Acme"),
@@ -609,14 +679,19 @@ mod tests {
       ("", "publisher = \"Acme\"\n", "Acme"),
     ];
 
-    for (i, (package, rest, publisher)) in cases.into_iter().enumerate() {
+    for (package, rest, publisher) in cases {
       let manifest = app(package, rest);
-      let c = load(&format!("publisher-{i}"), &[("Cargo.toml", &manifest)], "Cargo.toml").unwrap();
+      let c = load(&[("Cargo.toml", &manifest)], "Cargo.toml").unwrap();
       assert_eq!(c.publisher, publisher, "{package:?} {rest:?}");
     }
 
+    // The id's owner, with no publisher and no author.
+    let manifest = APP.replace("me.app", "me.vladkens.app");
+    let c = load(&[("Cargo.toml", &manifest)], "Cargo.toml").unwrap();
+    assert_eq!(c.publisher, "vladkens");
+
     let manifest = app("authors = \"Jane\"", "");
-    let e = error("authors", &[("Cargo.toml", &manifest)], "Cargo.toml");
+    let e = error(&[("Cargo.toml", &manifest)], "Cargo.toml");
     assert_eq!(e, "package.authors is not a list of strings");
   }
 
@@ -631,9 +706,9 @@ mod tests {
       ("https://github.com/me/app.git.git", "https://github.com/me/app.git"),
     ];
 
-    for (i, (repository, want)) in cases.into_iter().enumerate() {
+    for (repository, want) in cases {
       let manifest = app(&format!("repository = \"{repository}\""), "");
-      let c = load(&format!("repository-{i}"), &[("Cargo.toml", &manifest)], "Cargo.toml").unwrap();
+      let c = load(&[("Cargo.toml", &manifest)], "Cargo.toml").unwrap();
       assert_eq!(c.repository, want, "{repository}");
     }
   }
@@ -659,7 +734,7 @@ mod tests {
       assert_eq!(target(&env, &ws).unwrap(), want, "{target_dir:?} {build_target_dir:?}");
     }
 
-    let dir = Dir::new("target", &[("Cargo.toml", APP)]);
+    let dir = Temp::files(&[("Cargo.toml", APP)]);
     let env = |name: &str| (name == "CARGO_TARGET_DIR").then(|| abs.clone().into());
     let c = Config::read(&dir.join("Cargo.toml"), &env).unwrap();
     assert_eq!(c.target, abs);
@@ -697,7 +772,7 @@ anyhow = "1"
 
   #[test]
   fn full() {
-    let dir = Dir::new("full", &[("Cargo.toml", FULL), ("src/main.rs", "")]);
+    let dir = Temp::files(&[("Cargo.toml", FULL), ("src/main.rs", "")]);
     let c = Config::read(&dir.join("Cargo.toml"), &none).unwrap();
     assert_eq!(
       (c.id.as_str(), c.name.as_str(), c.bin.as_str()),
@@ -712,14 +787,16 @@ anyhow = "1"
     assert_eq!(c.icon, dir.join("assets/icon.png"));
     assert_eq!((c.root, c.target), (dir.to_path_buf(), dir.join("target")));
 
-    assert_eq!(c.macos["accessory"].as_bool(), Some(true));
-    assert_eq!(c.macos["entitlements"].as_str(), Some("assets/hello.entitlements"));
-    assert_eq!(c.macos["plist"]["LSEnvironment"]["HELLO_MODE"].as_str(), Some("quiet"));
-    assert_eq!(c.windows["app-id"].as_str(), Some("00000000-1111-0000-1111-000000000000"));
-    assert_eq!(c.windows["copyright"].as_str(), Some("(c) Jane Doe"));
-    assert_eq!(c.linux["categories"][0].as_str(), Some("Utility"));
-    assert_eq!(c.linux["deb-package"].as_str(), Some("hello"));
-    assert_eq!(c.linux["deb-depends"][0].as_str(), Some("libc6"));
-    assert_eq!(c.linux["deb-recommends"][0].as_str(), Some("libasound2"));
+    assert!(c.macos.accessory);
+    assert_eq!(c.macos.entitlements, Some(dir.join("assets/hello.entitlements")));
+    assert_eq!(c.macos.plist["LSEnvironment"]["HELLO_MODE"].as_str(), Some("quiet"));
+    assert_eq!(c.windows.app_id.as_deref(), Some("00000000-1111-0000-1111-000000000000"));
+    assert_eq!(c.windows.copyright.as_deref(), Some("(c) Jane Doe"));
+    assert_eq!(c.linux.categories, ["Utility"]);
+    assert_eq!(c.linux.deb_package.as_deref(), Some("hello"));
+    assert_eq!(
+      (c.linux.deb_depends, c.linux.deb_recommends),
+      (vec!["libc6".into()], vec!["libasound2".into()])
+    );
   }
 }

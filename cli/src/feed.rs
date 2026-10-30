@@ -4,21 +4,22 @@
 
 use std::ffi::OsString;
 use std::fmt::Write as _;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Read, Write as _};
 use std::path::{Path, PathBuf};
 
 use ed25519_compact::sha512::Hash;
 use ed25519_compact::{KeyPair, Seed};
 
-use crate::bad;
+use crate::tool::{self, hex};
+use crate::{at, bad};
 
 /// The most bytes a feed may be (`spec.md`).
-pub const MAX: usize = 1 << 20;
+const MAX: usize = 1 << 20;
 
 /// The feed's platforms in the order it lists them, each with the end of its file's name; a
 /// `.deb` is apt's, so not among them.
-pub const PLATFORMS: [(&str, &str); 6] = [
+const PLATFORMS: [(&str, &str); 6] = [
   ("macos-x86_64", "-macos-x86_64.dmg"),
   ("macos-aarch64", "-macos-aarch64.dmg"),
   ("windows-x86_64", "-windows-x64-setup.exe"),
@@ -70,7 +71,7 @@ impl Key {
 }
 
 /// The index in [PLATFORMS] of the file named `name`, `<Name>-<label>-<platform>.<ext>`.
-pub fn platform(name: &str) -> Option<usize> {
+fn platform(name: &str) -> Option<usize> {
   PLATFORMS.iter().position(|(_, end)| name.len() > end.len() && name.ends_with(end))
 }
 
@@ -127,8 +128,8 @@ pub fn body(
 
   for ((platform, _), file) in PLATFORMS.iter().zip(found) {
     let Some((path, url)) = file else { continue };
-    let (size, sha512) = sha512(path)?;
-    writeln!(text, "{platform} {size} {} {url}", hex(&sha512)).unwrap();
+    let data = tool::read(path)?;
+    writeln!(text, "{platform} {} {} {url}", data.len(), hex(&Hash::hash(&data))).unwrap();
   }
 
   Ok(text)
@@ -143,16 +144,10 @@ pub fn write(key: &Key, body: &str, dir: &Path) -> io::Result<PathBuf> {
   }
 
   fs::create_dir_all(dir)?;
-  let (path, part) = (dir.join("update.txt"), dir.join("update.txt.part"));
-  // A stale part, or a link there, is replaced, never written through.
-  match fs::remove_file(&part) {
-    Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(at(&part)(e)),
-    _ => {}
-  }
-
-  let mut out = OpenOptions::new().write(true).create_new(true).open(&part).map_err(at(&part))?;
-  out.write_all(text.as_bytes()).map_err(at(&part))?;
-  fs::rename(&part, &path).map_err(at(&path))?;
+  let path = dir.join("update.txt");
+  tool::place(&path, |part| {
+    File::create_new(part).and_then(|mut out| out.write_all(text.as_bytes())).map_err(at(part))
+  })?;
   Ok(path)
 }
 
@@ -171,43 +166,18 @@ pub fn keygen(files: &[PathBuf]) -> io::Result<Vec<String>> {
     random.read_exact(seed).map_err(at(urandom))?;
   }
 
-  let mut made = vec![];
-  let keys = write_keys(files, &seeds, &mut made);
-  if keys.is_err() {
-    for file in made {
-      let _ = fs::remove_file(file);
-    }
-  }
-
-  keys
-}
-
-/// Writes each of `seeds` to its file of `files`, every file made first, `made` the files made.
-fn write_keys<'a>(
-  files: &'a [PathBuf],
-  seeds: &[[u8; 32]],
-  made: &mut Vec<&'a Path>,
-) -> io::Result<Vec<String>> {
-  let mut outs = vec![];
-  for file in files {
-    let mut opts = OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
-    let out = opts.open(file).map_err(|e| match e.kind() {
-      io::ErrorKind::AlreadyExists => {
-        bad(format!("{} is there: a key is never written over a file", file.display()))
-      }
-      _ => at(file)(e),
-    })?;
-
-    made.push(file);
-    outs.push(out);
-  }
-
   let mut keys = vec![];
-  for ((file, mut out), seed) in files.iter().zip(outs).zip(seeds) {
-    out.write_all(format!("{}\n", hex(seed)).as_bytes()).map_err(at(file))?;
+  for (i, (file, seed)) in files.iter().zip(&seeds).enumerate() {
+    if let Err(e) = tool::private(file, format!("{}\n", hex(seed)).as_bytes()) {
+      files[..i].iter().for_each(|made| drop(fs::remove_file(made)));
+      return Err(match e.kind() {
+        io::ErrorKind::AlreadyExists => {
+          bad(format!("{} is there: a key is never written over a file", file.display()))
+        }
+        _ => at(file)(e),
+      });
+    }
+
     keys.push(Key(KeyPair::from_seed(Seed::new(*seed))).public());
   }
 
@@ -249,33 +219,6 @@ fn secure(url: &str) -> bool {
   to && url.bytes().all(|b| b.is_ascii_graphic())
 }
 
-/// The size and SHA-512 of the file at `path`, read in chunks.
-fn sha512(path: &Path) -> io::Result<(u64, [u8; 64])> {
-  let mut file = File::open(path).map_err(at(path))?;
-  let (mut hash, mut buf, mut size) = (Hash::new(), vec![0; 1 << 16], 0);
-  loop {
-    match file.read(&mut buf) {
-      Ok(0) => return Ok((size, hash.finalize())),
-      Ok(n) => {
-        hash.update(&buf[..n]);
-        size += n as u64;
-      }
-      Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-      Err(e) => return Err(at(path)(e)),
-    }
-  }
-}
-
-/// The error `e` of `path`, which it names.
-fn at(path: &Path) -> impl Fn(io::Error) -> io::Error + '_ {
-  move |e| io::Error::new(e.kind(), format!("{}: {e}", path.display()))
-}
-
-/// `bytes` in lowercase hex.
-fn hex(bytes: &[u8]) -> String {
-  bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 /// `N` bytes from exactly `2 * N` hex digits, of either case.
 fn unhex<const N: usize>(s: &str) -> Option<[u8; N]> {
   if s.len() != 2 * N || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -288,9 +231,8 @@ fn unhex<const N: usize>(s: &str) -> Option<[u8; N]> {
 
 #[cfg(test)]
 mod tests {
-  use std::ops::Deref;
-
   use super::*;
+  use crate::tool::Temp;
 
   /// RFC 8032's test 1: the seed and its public key.
   const SEED: &str = "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60";
@@ -299,44 +241,15 @@ mod tests {
   const ABC: &str = "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f";
   const EMPTY: &str = "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e";
 
-  /// A new folder in the temp dir with `(name, text)` files, removed on drop.
-  struct Dir(PathBuf);
-
-  impl Dir {
-    fn new(name: &str, files: &[(&str, &str)]) -> Self {
-      let dir = std::env::temp_dir().join(format!("shipo-cli-{}-feed-{name}", std::process::id()));
-      let _ = fs::remove_dir_all(&dir);
-      fs::create_dir_all(&dir).unwrap();
-      for (name, text) in files {
-        fs::write(dir.join(name), text).unwrap();
-      }
-
-      Self(dir)
-    }
-
-    /// The paths of `names` in it.
-    fn paths(&self, names: &[&str]) -> Vec<PathBuf> {
-      names.iter().map(|n| self.join(n)).collect()
-    }
-  }
-
-  impl Deref for Dir {
-    type Target = Path;
-    fn deref(&self) -> &Path {
-      &self.0
-    }
-  }
-
-  impl Drop for Dir {
-    fn drop(&mut self) {
-      let _ = fs::remove_dir_all(&self.0);
-    }
+  /// The paths of `names` in `dir`.
+  fn paths(dir: &Path, names: &[&str]) -> Vec<PathBuf> {
+    names.iter().map(|n| dir.join(n)).collect()
   }
 
   /// A file per platform, `App-dev-…`, each `abc`, and the folder holding them.
-  fn release(name: &str) -> (Dir, Vec<PathBuf>) {
+  fn release() -> (Temp, Vec<PathBuf>) {
     let names = PLATFORMS.map(|(_, end)| format!("App-dev{end}"));
-    let dir = Dir::new(name, &names.each_ref().map(|n| (n.as_str(), "abc")));
+    let dir = Temp::files(&names.each_ref().map(|n| (n.as_str(), "abc")));
     let files = names.iter().map(|n| dir.join(n)).collect();
     (dir, files)
   }
@@ -352,10 +265,10 @@ mod tests {
       "App-dev-windows-x64-setup.exe",
       "App-dev-macos-aarch64.dmg",
     ];
-    let dir = Dir::new("bytes", &[(names[0], "abc"), (names[1], ""), (names[2], "abc")]);
+    let dir = Temp::files(&[(names[0], "abc"), (names[1], ""), (names[2], "abc")]);
     let notes = "https://github.com/me/app/releases/tag/v1.2.0";
     let url = "https://github.com/me/app/releases/download/v{version}/";
-    let text = body("1.2.0", Some(notes), url, &dir.paths(&names), str::to_owned).unwrap();
+    let text = body("1.2.0", Some(notes), url, &names.map(|n| dir.join(n)), str::to_owned).unwrap();
     let path = write(&key(), &text, &dir.join("distrib")).unwrap();
     assert_eq!(path, dir.join("distrib/update.txt"));
     assert!(!dir.join("distrib/update.txt.part").exists());
@@ -404,7 +317,7 @@ mod tests {
 
   #[test]
   fn version_in_the_url_and_the_release_names() {
-    let (_dir, files) = release("names");
+    let (_dir, files) = release();
     let rename = |n: &str| n.replace("App-dev-", "App-v2.0.0-");
     let text = body("2.0.0", None, "https://h/{version}/x/{version}", &files, rename).unwrap();
     let line = text.lines().find(|l| l.starts_with("linux-aarch64 ")).unwrap();
@@ -417,7 +330,7 @@ mod tests {
   #[test]
   fn errors() {
     let (dmg, deb) = ("App-dev-macos-aarch64.dmg", "App-dev-linux-x86_64.deb");
-    let dir = Dir::new("errors", &[(dmg, "a"), (deb, "b")]);
+    let dir = Temp::files(&[(dmg, "a"), (deb, "b")]);
     let ok = "https://h";
     let cases = [
       ("1.0", None, ok, &[deb][..], "not a file of the feed"),
@@ -434,11 +347,11 @@ mod tests {
     ];
 
     for (version, notes, url, names, want) in cases {
-      let e = body(version, notes, url, &dir.paths(names), str::to_owned).unwrap_err();
+      let e = body(version, notes, url, &paths(&dir, names), str::to_owned).unwrap_err();
       assert!(e.to_string().contains(want), "{version} {notes:?} {url} {names:?}: {e}");
     }
 
-    let text = body("1.0", None, "http://127.0.0.1:8000/", &dir.paths(&[dmg]), str::to_owned);
+    let text = body("1.0", None, "http://127.0.0.1:8000/", &paths(&dir, &[dmg]), str::to_owned);
     assert!(text.unwrap().contains(" http://127.0.0.1:8000/App-dev-macos-aarch64.dmg\n"));
   }
 
@@ -456,7 +369,7 @@ mod tests {
       assert_eq!(e, "k is not a private key: its seed in 64 hex digits");
     }
 
-    let dir = Dir::new("keys", &[("a.key", SEED), ("bad.key", secret)]);
+    let dir = Temp::files(&[("a.key", SEED), ("bad.key", secret)]);
     let env = || Some(OsString::from(SEED));
     assert_eq!(Key::load(Some(&dir.join("a.key")), None).unwrap().public(), PUBLIC);
     assert_eq!(Key::load(None, env()).unwrap().public(), PUBLIC);
@@ -488,7 +401,7 @@ mod tests {
 
   #[test]
   fn the_library_reads_the_feed() {
-    let (dir, files) = release("library");
+    let (dir, files) = release();
     let notes = "https://h/releases/tag/v1.2.0";
     let text = body("1.2.0", Some(notes), "https://h/{version}", &files, str::to_owned).unwrap();
     let feed = fs::read(write(&key(), &text, &dir).unwrap()).unwrap();
@@ -580,12 +493,12 @@ mod tests {
     assert_eq!(encode("a+b%c/d?#"), "a%2Bb%25c%2Fd%3F%23");
     let Some((_, end)) = PLATFORMS.iter().find(|(p, _)| *p == host()) else { return };
     let (space, other) = (format!("My App-dev{end}"), format!("Wavö-dev{end}"));
-    let dir = Dir::new("encoded", &[(&space, "abc"), (&other, "abc")]);
+    let dir = Temp::files(&[(&space, "abc"), (&other, "abc")]);
     let reader = shipo::Feed::new("https://h/update.txt", &[PUBLIC]);
     for (name, want) in
       [(space, format!("My%20App-dev{end}")), (other, format!("Wav%C3%B6-dev{end}"))]
     {
-      let text = body("1.0", None, "https://h/", &dir.paths(&[&name]), str::to_owned).unwrap();
+      let text = body("1.0", None, "https://h/", &paths(&dir, &[&name]), str::to_owned).unwrap();
       let feed = fs::read(write(&key(), &text, &dir.join("out")).unwrap()).unwrap();
       let r = reader.read(&feed, "0.0.0").unwrap().unwrap();
       assert_eq!(r.url, format!("https://h/{want}"));
@@ -594,7 +507,7 @@ mod tests {
 
   #[test]
   fn writes_a_feed_alone() {
-    let dir = Dir::new("write", &[("target", "old")]);
+    let dir = Temp::files(&[("target", "old")]);
     let out = dir.join("out");
     let e = write(&key(), &"x".repeat(MAX), &out).unwrap_err();
     assert!(e.to_string().contains("over the 1 MiB"), "{e}");
@@ -622,8 +535,8 @@ mod tests {
   fn keygen_writes_new_keys_alone() {
     use std::os::unix::fs::PermissionsExt;
 
-    let dir = Dir::new("keygen", &[("there.key", "x")]);
-    let files = dir.paths(&["a.key", "b.key"]);
+    let dir = Temp::files(&[("there.key", "x")]);
+    let files = paths(&dir, &["a.key", "b.key"]);
     let keys = keygen(&files).unwrap();
     assert_eq!(keys.len(), 2);
     assert_ne!(keys[0], keys[1]);
@@ -644,7 +557,7 @@ mod tests {
     ];
 
     for (names, want) in cases {
-      let e = keygen(&dir.paths(names)).unwrap_err();
+      let e = keygen(&paths(&dir, names)).unwrap_err();
       assert!(e.to_string().contains(want), "{names:?}: {e}");
       for name in ["c.key", "d.key"] {
         assert!(!dir.join(name).exists(), "{names:?}: {name} left");

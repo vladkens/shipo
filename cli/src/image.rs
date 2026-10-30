@@ -3,12 +3,12 @@
 //! and `.ico` made of them, with no `sips` or `iconutil`, so on any OS.
 
 use std::collections::BTreeMap;
+use std::io;
 use std::path::Path;
-use std::{fs, io};
 
 use png::{BitDepth, ColorType, Transformations};
 
-use crate::bad;
+use crate::{bad, tool};
 
 /// The sizes of the `.ico` and the exe's icon: Explorer's views and the taskbar at 100–200%.
 pub const ICO: [usize; 6] = [16, 24, 32, 48, 64, 256];
@@ -40,7 +40,7 @@ pub struct Image {
 impl Image {
   /// The PNG at `path`.
   pub fn read(path: &Path) -> io::Result<Self> {
-    let data = fs::read(path).map_err(|e| bad(format!("{}: {e}", path.display())))?;
+    let data = tool::read(path)?;
     Self::decode(&data).map_err(|e| bad(format!("{}: {e}", path.display())))
   }
 
@@ -270,7 +270,10 @@ fn directory(
 
 #[cfg(test)]
 mod tests {
+  use std::fs;
+
   use super::*;
+  use crate::tool::Temp;
 
   /// A case of [Image::decode]: a PNG's colour type and depth, its row of two pixels and its
   /// `tRNS` (none if empty), and the RGBA it gives. A palette's `PLTE` is `abcdef`.
@@ -355,12 +358,12 @@ mod tests {
 
   #[test]
   fn read() {
-    let dir = Temp::new("read");
-    let (path, image) = (dir.0.join("a.png"), Image { w: 3, h: 1, px: (0..12).collect() });
+    let dir = Temp::new().unwrap();
+    let (path, image) = (dir.join("a.png"), Image { w: 3, h: 1, px: (0..12).collect() });
     fs::write(&path, image.encode().unwrap()).unwrap();
     assert_eq!(Image::read(&path).unwrap(), image);
 
-    let missing = dir.0.join("missing.png");
+    let missing = dir.join("missing.png");
     let err = Image::read(&missing).unwrap_err().to_string();
     assert!(err.starts_with(&format!("{}: ", missing.display())), "{err}");
   }
@@ -559,13 +562,13 @@ mod tests {
   #[test]
   #[cfg(target_os = "macos")]
   fn iconutil() {
-    let dir = Temp::new("iconutil");
+    let dir = Temp::new().unwrap();
     let images = icons(&icon(1024), &ICNS.map(|(_, n)| n), false).unwrap();
-    fs::write(dir.0.join("icon.icns"), icns(&images).unwrap()).unwrap();
-    let set = dir.0.join("icon.iconset");
+    fs::write(dir.join("icon.icns"), icns(&images).unwrap()).unwrap();
+    let set = dir.join("icon.iconset");
     let out = std::process::Command::new("iconutil")
       .args(["-c", "iconset", "-o"])
-      .args([&set, &dir.0.join("icon.icns")])
+      .args([&set, &dir.join("icon.icns")])
       .output()
       .unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -585,24 +588,6 @@ mod tests {
   }
 
   // MARK: Helpers
-
-  /// A new folder in the temp dir, removed on drop.
-  struct Temp(std::path::PathBuf);
-
-  impl Temp {
-    fn new(name: &str) -> Self {
-      let dir = std::env::temp_dir().join(format!("shipo-cli-{}-image-{name}", std::process::id()));
-      let _ = fs::remove_dir_all(&dir);
-      fs::create_dir_all(&dir).unwrap();
-      Self(dir)
-    }
-  }
-
-  impl Drop for Temp {
-    fn drop(&mut self) {
-      let _ = fs::remove_dir_all(&self.0);
-    }
-  }
 
   /// Checks `ours` is the image `want`, its alpha exact, its colours exact where opaque and close
   /// where not: a colour premultiplied by alpha keeps `c·a/255` rounded, so read back straight it

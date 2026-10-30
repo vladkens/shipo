@@ -22,6 +22,8 @@ Why each crate is in, and why the packer writes some formats itself. A crate com
 | `flate2` | zlib and gzip (DMG, .deb, squashfs, tarballs) | already in the tree through `png`; adds nothing |
 | `hmac-sha256` | SHA-256 of the pinned tools | no dependencies; `sha2` is 10 crates |
 | `tar` (no default features) | tarballs read and written | 3 crates (`tar`, `filetime`, `libc`); replaced ~340 lines of our own ustar code |
+| `serde` (`derive`) | the config's `macos`, `windows` and `linux` tables | 6 crates (`serde_derive` and its proc-macro crates; `serde_core` came with `toml`); the derive replaced the key lists and hand type checks, and its errors name the key |
+| `plist` | the Info.plist, the `.DS_Store`'s binary plists, the DMG's resource fork | 12 crates (`quick-xml`, `time`, `indexmap`, `base64`, …); replaced ~300 lines of our own XML and binary plist writer and a base64 encoder |
 
 ## Packer: written ourselves instead
 
@@ -29,12 +31,12 @@ Why each crate is in, and why the packer writes some formats itself. A crate com
 |---|---|---|
 | the config | `cargo metadata` + a JSON crate | needs cargo on the host; `toml` serves `shipo.toml` too |
 | SHA-256 | `sha2` | 10 crates for what `hmac-sha256` does with none |
-| .deb | `cargo-deb` (65 crates), `ar` (last release 2021) | an `ar` of two tarballs: ~100 lines (`deb.rs`); deb(5) |
-| squashfs (AppImage) | `backhand` (36–54 crates, zstd and xz in C) | ~470 lines of gzip blocks (`squashfs.rs`), which the type2 runtime reads; the kernel's format docs. zstd later through a pure-Rust encoder if the size matters |
+| .deb | `cargo-deb` (65 crates), `ar` (last release 2021) | an `ar` of two tarballs: ~100 lines (`linux.rs`); deb(5) |
+| squashfs (AppImage) | `backhand` (36–54 crates, zstd and xz in C) | ~470 lines of gzip blocks (`linux.rs`), which the type2 runtime reads; the kernel's format docs. zstd later through a pure-Rust encoder if the size matters |
 | HFS+ (DMG) | `fstool` (one author, first release 2026-10, 48 crates), `hfsplus` and `dmgwiz` (read only) | no mature crate writes HFS+; written from Apple's TN1150 |
-| UDIF (DMG) | `apple-dmg` (46 crates, FAT32 inside, not HFS+) | ~140 lines (`udif.rs`) |
+| UDIF (DMG) | `apple-dmg` (46 crates, FAT32 inside, not HFS+) | ~140 lines (`dmg.rs`) |
 | the Mach-O minimum macOS | — | a few load commands |
-| PE resources (icon, version, manifest) | — | one `.rsrc` section (`pe.rs`) |
+| PE resources (icon, version, manifest) | — | one `.rsrc` section (`windows.rs`) |
 | HTTP fetch | `ureq` (27 crates), `minreq` (12), both with `ring` in C and assembly | the system's `curl`, on macOS, Windows 10+ and Ubuntu |
 | .p12 to PEM | `p12-keystore` (79 crates), `pkcs12` (parses only) | rcodesign reads the .p12 itself (`--p12-file`); a modern AES .p12 needs a `-legacy` export |
 | Apple code signing | `apple-codesign` (395 crates, MPL-2.0) | rcodesign's release binary, pinned by SHA-256 |
