@@ -184,6 +184,50 @@ jobs:
           path: e2e
       - run: uv run scripts/e2e-update.py run e2e
 
+  # An install of the NSIS setup before ours updated by ours: 1.0.0 packed by main's last packer
+  # with NSIS (cbceb52) and apt's nsis, installed, then updated to the 2.0.0 this branch packed.
+  e2e-nsis:
+    needs: e2e-pack
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - run: sudo apt-get update && sudo apt-get install -y nsis
+      - run: git worktree add old cbceb52 && cargo build --release --bin shipo --manifest-path old/Cargo.toml
+      - uses: actions/download-artifact@v8
+        with:
+          name: e2e-packed-Linux
+          path: e2e
+      - run: |
+          mkdir -p nsis/1.0.0/x86_64-pc-windows-msvc
+          cp e2e/1.0.0/x86_64-pc-windows-msvc/hello.exe nsis/1.0.0/x86_64-pc-windows-msvc/
+          cp e2e/1.0.0/Cargo.toml e2e/1.0.0/LICENSE nsis/1.0.0/ && cp e2e/icon.png nsis/
+          old/target/release/shipo release nsis/1.0.0 --manifest nsis/1.0.0/Cargo.toml
+      - uses: actions/upload-artifact@v7
+        with:
+          name: e2e-nsis
+          path: nsis/1.0.0/Hello-dev-windows-x64-setup.exe
+          if-no-files-found: error
+
+  e2e-migrate:
+    needs: e2e-nsis
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - uses: actions/download-artifact@v8
+        with:
+          name: e2e-packed-Linux
+          path: e2e
+      - uses: actions/download-artifact@v8
+        with:
+          name: e2e-nsis
+          path: nsis
+      - run: uv run scripts/e2e-update.py run e2e --v1 nsis/Hello-dev-windows-x64-setup.exe
+
   # The DMGs packed off a Mac, signed ad hoc: read by hdiutil, the app run from the image.
   e2e-dmg:
     needs: e2e-pack
@@ -219,7 +263,7 @@ jobs:
 
   publish:
     if: github.ref == 'refs/heads/main' # write rights only for main's own workflow
-    needs: [test, packages, e2e, e2e-pack, e2e-dmg, build]
+    needs: [test, packages, e2e, e2e-pack, e2e-dmg, e2e-migrate, build]
     runs-on: ubuntu-latest # no build here, and Linux runners start faster
     permissions:
       attestations: write

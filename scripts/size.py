@@ -44,7 +44,7 @@ PARTS = {
   # The setup and the exe's resources.
   "packer/windows": (600, ("src/cli/windows.rs",)),
   # The setup stub, which installs and uninstalls the app on Windows, and its payload's format.
-  "setup": (500, ("setup/src/*.rs", "src/cli/payload.rs")),
+  "setup": (700, ("setup/src/*.rs", "src/cli/payload.rs")),
   # The AppImage with its squashfs, and the .deb.
   "packer/linux": (600, ("src/cli/linux.rs",)),
 }

@@ -30,10 +30,10 @@ use payload::{Files, Info, PLACEHOLDER};
 #[used]
 static PLACEHOLDER_DATA: [u8; PLACEHOLDER] = payload::placeholder();
 
-/// The uninstaller's name in the install folder.
+/// The uninstaller's name in the install folder, as NSIS setups name theirs, so an install over
+/// one of those replaces it.
 const UNINSTALLER: &str = "Uninstall.exe";
-/// The licence's name in the install folder; the uninstaller removes it whether its setup wrote
-/// one or not, as an older one may have.
+/// The licence's name in the install folder.
 const LICENSE: &str = "LICENSE.txt";
 /// How long a file in use is tried again: the app that just quit may hold its exe a moment.
 const RETRY: Duration = Duration::from_secs(5);
@@ -61,25 +61,39 @@ fn placeholder() -> [u8; PLACEHOLDER] {
 struct Args {
   /// `/S`: no message, the app not started.
   silent: bool,
-  /// `/D=<folder>`, the last argument, its spaces kept unquoted, as NSIS setups take it.
-  dir: Option<PathBuf>,
+  /// `/D=<folder>`: the rest of the raw command line, unquoted, its spaces kept, as NSIS setups
+  /// take it.
+  dir: Option<String>,
 }
 
 impl Args {
-  fn parse(args: impl IntoIterator<Item = OsString>) -> Self {
-    let mut out = Self::default();
-    let mut args = args.into_iter().map(|a| a.to_string_lossy().into_owned());
-    while let Some(arg) = args.next() {
-      if arg.eq_ignore_ascii_case("/S") {
-        out.silent = true;
-      } else if let Some(dir) = arg.strip_prefix("/D=") {
-        let rest: Vec<_> = [dir.to_string()].into_iter().chain(args.by_ref()).collect();
-        out.dir = Some(rest.join(" ").into());
-      }
-    }
-
-    out
+  /// The arguments `args`, the program's not among them, and `/D=` from the command line `raw`.
+  fn parse(args: impl IntoIterator<Item = OsString>, raw: &str) -> Self {
+    let silent = args.into_iter().any(|a| a.to_string_lossy().eq_ignore_ascii_case("/S"));
+    let at = raw.match_indices("/D=").map(|(i, _)| i);
+    let at = at.filter(|&i| i == 0 || raw[..i].ends_with([' ', '\t'])).last();
+    let dir = at.map(|i| raw[i + 3..].trim_end().to_string());
+    Self { silent, dir }
   }
+
+  /// The folder of `/D=`, which must be absolute: a drive's (`C:\…`) or a share's (`\\…`).
+  fn folder(&self) -> io::Result<Option<PathBuf>> {
+    let Some(dir) = &self.dir else { return Ok(None) };
+    let b = dir.as_bytes();
+    let drive =
+      b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/');
+    match drive || dir.starts_with(r"\\") && dir.len() > 2 {
+      true => Ok(Some(dir.into())),
+      false => Err(io::Error::other(format!("/D= takes an absolute folder, not {dir:?}"))),
+    }
+  }
+}
+
+/// Whether `id` is a GUID in braces, as the packer writes the Uninstall key's name.
+fn guid(id: &str) -> bool {
+  let Some(hex) = id.strip_prefix('{').and_then(|s| s.strip_suffix('}')) else { return false };
+  let parts: Vec<_> = hex.split('-').map(str::len).collect();
+  parts == [8, 4, 4, 4, 12] && hex.bytes().all(|b| b == b'-' || b.is_ascii_hexdigit())
 }
 
 /// This exe's payload by the placeholder's fields: its [Info], its files, and the stub's bytes
@@ -97,15 +111,45 @@ fn own(exe: &[u8], fields: [u64; 3]) -> io::Result<(Info, Files, &[u8])> {
 }
 
 /// The uninstaller of `info`: the stub's bytes `stub`, its placeholder at `at` pointing at a
-/// payload of `info` alone.
+/// payload of `info` alone. A signature the setup had covers bytes it no longer has, so its PE
+/// security directory is zeroed and the checksum set again.
 fn uninstaller(stub: &[u8], at: u64, info: &Info) -> io::Result<Vec<u8>> {
   let data = payload::pack(info, &[])?;
   let mut out = stub.to_vec();
-  let at = usize::try_from(at).ok().filter(|&at| at + PLACEHOLDER <= out.len());
-  let at = at.ok_or_else(|| io::Error::other("this setup's placeholder is outside it"))?;
+  let end = usize::try_from(at).ok().and_then(|at| at.checked_add(PLACEHOLDER));
+  let Some(at) = end.filter(|&end| end <= out.len()).map(|end| end - PLACEHOLDER) else {
+    return Err(io::Error::other("this setup's placeholder is outside it"));
+  };
+
   payload::patch(&mut out, at, stub.len() as u64, data.len() as u64);
   out.extend(data);
+  unsigned(&mut out);
   Ok(out)
+}
+
+/// `exe`, a PE32+ file, with no security directory and its checksum set again; anything else as it
+/// is.
+fn unsigned(exe: &mut [u8]) {
+  let u32_at =
+    |exe: &[u8], at: usize| exe.get(at..at + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
+  let Some(opt) = u32_at(exe, 0x3C).map(|pe| pe as usize + 24) else { return };
+  let pe32 =
+    exe.get(opt - 24..opt - 20) == Some(b"PE\0\0") && exe.get(opt..opt + 2) == Some(&[0x0B, 0x02]);
+  // The checksum at 64, the security directory, the fifth, at 112 + 8 * 4.
+  if !pe32 || exe.len() < opt + 152 || !exe.starts_with(b"MZ") {
+    return;
+  }
+
+  exe[opt + 144..opt + 152].fill(0);
+  exe[opt + 64..opt + 68].fill(0);
+  let mut sum = 0u32;
+  for w in exe.chunks(2) {
+    sum += u16::from_le_bytes([w[0], w.get(1).copied().unwrap_or(0)]) as u32;
+    sum = (sum & 0xFFFF) + (sum >> 16);
+  }
+
+  let sum = ((sum + (sum >> 16)) & 0xFFFF).wrapping_add(exe.len() as u32);
+  exe[opt + 64..opt + 68].copy_from_slice(&sum.to_le_bytes());
 }
 
 /// `op` until it succeeds, tried again for [RETRY]; its last error then.
@@ -130,7 +174,11 @@ fn put(dir: &Path, files: &[(String, Vec<u8>)]) -> io::Result<u64> {
   for (name, data) in files {
     let part = dir.join(format!(".{name}.shipo-new-{}", std::process::id()));
     let path = dir.join(name);
-    fs::File::create_new(&part)?.write_all(data)?;
+    if let Err(e) = fs::File::create_new(&part).and_then(|mut f| f.write_all(data)) {
+      let _ = fs::remove_file(&part);
+      return Err(e);
+    }
+
     if let Err(e) = retry(|| fs::rename(&part, &path)) {
       let _ = fs::remove_file(&part);
       return Err(in_use(&path, e));
@@ -142,33 +190,100 @@ fn put(dir: &Path, files: &[(String, Vec<u8>)]) -> io::Result<u64> {
   Ok(size)
 }
 
-/// Removes the files the setups of `name` write from `dir`, the app's exe first, an error then
-/// leaving all as it was; the updater's staging folders, then `dir` if it is empty (a `/D=` may
-/// share it), each tried however the others went, the first error given. The uninstaller, running,
-/// is moved out before, if `moved` can; else it stays, and so does the folder.
-fn remove(dir: &Path, name: &str, moved: impl FnOnce() -> bool) -> io::Result<()> {
-  let exe = dir.join(format!("{name}.exe"));
+/// Whether the install in `dir` before this one of `info` may have written `LICENSE.txt`; none
+/// when there was none. Its uninstaller tells: ours of this app (its payload's [Info], found by
+/// `magic`, the placeholder's start), or another's (an NSIS setup's) where the Uninstall key put
+/// this app (`location`). One of another app, or another's elsewhere, is an error: `dir` is
+/// shared, and its `Uninstall.exe` not ours to replace.
+fn previous(
+  dir: &Path,
+  info: &Info,
+  location: Option<&str>,
+  magic: &[u8],
+) -> io::Result<Option<bool>> {
+  let path = dir.join(UNINSTALLER);
+  let data = match fs::read(&path) {
+    Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+    data => data?,
+  };
+
+  let at = data.windows(magic.len()).position(|w| w == magic);
+  let theirs = at.and_then(|at| {
+    let found = data.get(at..at.checked_add(PLACEHOLDER)?)?.try_into().ok()?;
+    own(&data, payload::fields(found)).ok().map(|(info, ..)| info)
+  });
+
+  let ours = |l: &str| {
+    Path::new(l.trim_end_matches(['\\', '/'])).as_os_str().eq_ignore_ascii_case(dir.as_os_str())
+  };
+  match theirs {
+    Some(theirs) if theirs.app_id == info.app_id => Ok(Some(theirs.license)),
+    None if location.is_some_and(ours) => Ok(Some(true)),
+    Some(theirs) => Err(io::Error::other(format!("{} is {}'s", path.display(), theirs.name))),
+    None => Err(io::Error::other(format!("{} is another app's", path.display()))),
+  }
+}
+
+/// Writes `files` into `dir` by [put], `LICENSE.txt` removed when the install before wrote one
+/// (`licensed`) and this one doesn't; then the Uninstall key by `key` of their size: an install
+/// that fails before it leaves no key, one with its files always has one. The shortcut last, by
+/// `shortcut`, its failure (a folder past MAX_PATH) not the install's.
+fn install(
+  dir: &Path,
+  files: &[(String, Vec<u8>)],
+  licensed: bool,
+  key: impl FnOnce(u64) -> io::Result<()>,
+  shortcut: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+  let size = put(dir, files)?;
+  let license = dir.join(LICENSE);
+  if licensed && !files.iter().any(|(n, _)| n == LICENSE) && license.is_file() {
+    retry(|| fs::remove_file(&license))?;
+  }
+
+  key(size)?;
+  let _ = shortcut();
+  Ok(())
+}
+
+/// Removes from `dir` the files the setup of `info` wrote, the app's exe first, an error then
+/// leaving all as it was; `LICENSE.txt` if it wrote one; the updater's staging folders; then `dir`
+/// if it is empty (a `/D=` may share it), each tried however the others went, the first error
+/// given. The uninstaller, running, is moved out after the exe, if `moved` can; else it stays, and
+/// so does the folder. A named file is only ever a file: a folder of that name stays.
+fn remove(dir: &Path, info: &Info, moved: impl FnOnce() -> bool) -> io::Result<()> {
+  let exe = dir.join(format!("{}.exe", info.name));
   match retry(|| fs::remove_file(&exe)) {
     Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(in_use(&exe, e)),
     _ => {}
   }
 
-  let names: &[&str] = if moved() { &[LICENSE, UNINSTALLER] } else { &[LICENSE] };
-  let mut paths: Vec<_> = names.iter().map(|n| dir.join(n)).collect();
+  let mut files = vec![];
+  if moved() {
+    files.push(dir.join(UNINSTALLER));
+  }
+
+  if info.license {
+    files.push(dir.join(LICENSE));
+  }
+
+  let mut folders = vec![];
   for entry in fs::read_dir(dir)?.flatten() {
-    if entry.file_name().to_string_lossy().starts_with(".shipo-update-") {
-      paths.push(entry.path());
+    let staging = entry.file_name().to_string_lossy().starts_with(".shipo-update-");
+    match entry.file_type() {
+      Ok(t) if staging && t.is_dir() => folders.push(entry.path()),
+      Ok(_) if staging => files.push(entry.path()),
+      _ => {}
     }
   }
 
+  // A folder of a named file's name is not the setup's.
+  files.retain(|f| !fs::symlink_metadata(f).is_ok_and(|m| m.is_dir()));
+  let removed = files.iter().map(|f| retry(|| fs::remove_file(f)));
+  let removed = removed.chain(folders.iter().map(|f| retry(|| fs::remove_dir_all(f))));
   let mut done = Ok(());
-  for path in paths {
-    let removed = match path.is_dir() {
-      true => retry(|| fs::remove_dir_all(&path)),
-      false => retry(|| fs::remove_file(&path)),
-    };
-
-    match removed {
+  for result in removed {
+    match result {
       Err(e) if e.kind() != io::ErrorKind::NotFound => done = done.and(Err(e)),
       _ => {}
     }
@@ -237,12 +352,119 @@ mod tests {
 
   #[test]
   fn args() {
-    let parse = |args: &[&str]| Args::parse(args.iter().map(OsString::from));
-    assert_eq!(parse(&[]), Args::default());
-    assert_eq!(parse(&["/S"]), Args { silent: true, dir: None });
-    assert_eq!(parse(&["/s", "/x"]), Args { silent: true, dir: None });
-    let dir = Some(PathBuf::from(r"C:\My Apps\Hello"));
-    assert_eq!(parse(&["/S", r"/D=C:\My", r"Apps\Hello"]), Args { silent: true, dir });
+    let parse = |args: &[&str], raw: &str| Args::parse(args.iter().map(OsString::from), raw);
+    assert_eq!(parse(&[], r"C:\x\setup.exe"), Args::default());
+    assert_eq!(parse(&["/S"], "setup.exe /S"), Args { silent: true, dir: None });
+    assert_eq!(parse(&["/s", "/x"], "setup.exe /s /x"), Args { silent: true, dir: None });
+
+    // The rest of the raw line, two spaces kept, however the arguments split it.
+    let raw = r#""C:\a b\setup.exe" /S /D=C:\My  Apps\Hello "#;
+    let dir = Some(r"C:\My  Apps\Hello".to_string());
+    assert_eq!(parse(&["/S", r"/D=C:\My", r"Apps\Hello"], raw), Args { silent: true, dir });
+    assert_eq!(parse(&[], r"C:\x/D=y\setup.exe").dir, None);
+
+    let folder = |dir: &str| Args { dir: Some(dir.into()), ..Args::default() }.folder();
+    for ok in [r"C:\Apps", "d:/apps", r"\\server\share\Apps"] {
+      assert_eq!(folder(ok).unwrap(), Some(PathBuf::from(ok)), "{ok}");
+    }
+
+    for no in ["", "Hello", r"Apps\Hello", "C:", "C:Apps", r"\Apps", r"\\"] {
+      let e = folder(no).unwrap_err().to_string();
+      assert_eq!(e, format!("/D= takes an absolute folder, not {no:?}"));
+    }
+  }
+
+  #[test]
+  fn guids() {
+    assert!(guid("{a90596b0-07fa-55a1-9740-d4470c5cef1c}"));
+    for no in [
+      "",
+      "{}",
+      "a90596b0-07fa-55a1-9740-d4470c5cef1c",
+      "{a90596b0-07fa-55a1-9740-d4470c5cef1g}",
+      r"{a90596b0-07fa-55a1-9740-d4470c5c\..}",
+    ] {
+      assert!(!guid(no), "{no}");
+    }
+  }
+
+  #[test]
+  fn uninstaller_before() {
+    let dir = tmp();
+    let magic = &payload::placeholder()[..payload::MAGIC.len()];
+    let licensed = Info { license: true, ..info() };
+    let other = Info {
+      name: "Other".into(),
+      app_id: "{00000000-07fa-55a1-9740-d4470c5cef1c}".into(),
+      ..info()
+    };
+    let ours = |info: &Info| {
+      let stub = [b"MZ".to_vec(), vec![0; 20], payload::placeholder().to_vec()].concat();
+      uninstaller(&stub, 22, info).unwrap()
+    };
+
+    let location = dir.display().to_string();
+    let before = |data: Option<Vec<u8>>, location: Option<&str>| {
+      let _ = fs::remove_file(dir.join(UNINSTALLER));
+      if let Some(data) = data {
+        fs::write(dir.join(UNINSTALLER), data).unwrap();
+      }
+
+      previous(&dir, &info(), location, magic).map_err(|e| e.to_string())
+    };
+
+    assert_eq!(before(None, None), Ok(None));
+    assert_eq!(before(Some(ours(&licensed)), None), Ok(Some(true)));
+    assert_eq!(before(Some(ours(&info())), None), Ok(Some(false)));
+    assert!(before(Some(ours(&other)), Some(&location)).unwrap_err().ends_with("is Other's"));
+    // An NSIS setup's, where the key put this app, a trailing slash or another case its own.
+    let nsis = Some(b"MZ nsis".to_vec());
+    assert_eq!(
+      before(nsis.clone(), Some(&format!("{}\\", location.to_uppercase()))),
+      Ok(Some(true))
+    );
+    assert!(before(nsis.clone(), Some(r"C:\Elsewhere")).unwrap_err().ends_with("is another app's"));
+    assert!(before(nsis, None).is_err());
+  }
+
+  #[test]
+  fn install_order() {
+    let dir = tmp().join("Hello");
+    let files = vec![("Hello.exe".to_string(), b"v1".to_vec())];
+    let steps = std::cell::RefCell::new(vec![]);
+    let key = |size| {
+      steps.borrow_mut().push(format!("key {size} {}", dir.join("Hello.exe").exists()));
+      Ok(())
+    };
+
+    // A shortcut that fails leaves the install whole.
+    let lnk = || {
+      steps.borrow_mut().push("shortcut".into());
+      Err(io::Error::other("past MAX_PATH"))
+    };
+
+    install(&dir, &files, false, key, lnk).unwrap();
+    assert_eq!(*steps.borrow(), ["key 2 true", "shortcut"]);
+
+    // An install before wrote a licence this one doesn't: it goes; a folder of its name stays.
+    fs::write(dir.join(LICENSE), "MIT").unwrap();
+    install(&dir, &files, true, |_| Ok(()), || Ok(())).unwrap();
+    assert_eq!(listed(&dir), ["Hello.exe"]);
+    fs::create_dir(dir.join(LICENSE)).unwrap();
+    install(&dir, &files, true, |_| Ok(()), || Ok(())).unwrap();
+    assert_eq!(listed(&dir), ["Hello.exe", LICENSE]);
+
+    // A key that fails fails the install, before the shortcut.
+    steps.borrow_mut().clear();
+    let no_key = |_| Err(io::Error::other("no key"));
+    let e = install(&dir, &files, false, no_key, || panic!("shortcut"));
+    assert_eq!(e.unwrap_err().to_string(), "no key");
+
+    // Files that can't be written make no key.
+    let file = tmp().join("file");
+    fs::write(&file, "").unwrap();
+    let e = install(&file.join("x"), &files, false, |_| panic!("key"), || panic!("lnk"));
+    assert!(e.is_err());
   }
 
   #[test]
@@ -270,11 +492,41 @@ mod tests {
     assert!(own(&exe, [22, stub_len, data.len() as u64 + 1]).is_err());
     assert!(own(&exe, [22, u64::MAX, 2]).is_err());
     assert!(uninstaller(stub, stub_len, &info()).is_err());
+    assert!(uninstaller(stub, u64::MAX, &info()).is_err());
+  }
+
+  #[test]
+  fn uninstaller_unsigned() {
+    // A PE32+ header at 0x40, its optional header at 0x58, a security directory and a checksum.
+    let mut stub = vec![0; 0x200];
+    stub[..2].copy_from_slice(b"MZ");
+    stub[0x3C] = 0x40;
+    stub[0x40..0x44].copy_from_slice(b"PE\0\0");
+    stub[0x58..0x5A].copy_from_slice(&[0x0B, 0x02]);
+    stub[0x58 + 144..0x58 + 152].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+    stub[0x58 + 64..0x58 + 68].copy_from_slice(&[9; 4]);
+    stub[0x100..0x100 + PLACEHOLDER].copy_from_slice(&payload::placeholder());
+
+    let un = uninstaller(&stub, 0x100, &info()).unwrap();
+    assert_eq!(un[0x58 + 144..0x58 + 152], [0; 8]);
+    let mut zeroed = un.clone();
+    zeroed[0x58 + 64..0x58 + 68].fill(0);
+    let sum = u32::from_le_bytes(un[0x58 + 64..0x58 + 68].try_into().unwrap());
+    let mut again = zeroed.clone();
+    unsigned(&mut again);
+    assert_eq!(u32::from_le_bytes(again[0x58 + 64..0x58 + 68].try_into().unwrap()), sum);
+    assert_ne!(sum, 0x0909_0909);
+
+    // Anything but a PE32+ file stays as it is.
+    let mut other = b"MZ not a pe".to_vec();
+    unsigned(&mut other);
+    assert_eq!(other, b"MZ not a pe");
   }
 
   #[test]
   fn files_put_and_removed() {
     let dir = tmp().join("Hello");
+    let licensed = Info { license: true, ..info() };
     let files = [("Hello.exe", "v1"), (LICENSE, "MIT"), (UNINSTALLER, "un")];
     let files: Vec<_> = files.iter().map(|(n, d)| (n.to_string(), d.as_bytes().to_vec())).collect();
     assert_eq!(put(&dir, &files).unwrap(), 7);
@@ -285,22 +537,32 @@ mod tests {
     // The staging folders go, the app's data and what a `/D=` shares stay.
     fs::create_dir_all(dir.join(".shipo-update-1-2/x")).unwrap();
     fs::write(dir.join("data.txt"), "kept").unwrap();
-    remove(&dir, "Hello", || true).unwrap();
+    remove(&dir, &licensed, || true).unwrap();
     assert_eq!(listed(&dir), ["data.txt"]);
 
     // An uninstaller that can't move out stays, with its folder.
     fs::remove_file(dir.join("data.txt")).unwrap();
     put(&dir, &files).unwrap();
-    remove(&dir, "Hello", || false).unwrap();
+    remove(&dir, &licensed, || false).unwrap();
     assert_eq!(listed(&dir), [UNINSTALLER]);
-    remove(&dir, "Hello", || true).unwrap();
+    remove(&dir, &licensed, || true).unwrap();
     assert!(!dir.exists());
+
+    // A folder shared by `/D=`: another app's licence and uninstaller, and a folder named as a
+    // file, stay; a staging file goes as a file.
+    put(&dir, &files[..1]).unwrap();
+    fs::write(dir.join(LICENSE), "theirs").unwrap();
+    fs::create_dir_all(dir.join("Uninstall.exe/kept")).unwrap();
+    fs::write(dir.join(".shipo-update-file"), "").unwrap();
+    remove(&dir, &info(), || true).unwrap();
+    assert_eq!(listed(&dir), [LICENSE, UNINSTALLER]);
+    fs::remove_dir_all(&dir).unwrap();
 
     // An exe in use stops it before anything changed (a folder stands for one here).
     put(&dir, &files).unwrap();
     fs::remove_file(dir.join("Hello.exe")).unwrap();
     fs::create_dir_all(dir.join("Hello.exe/x")).unwrap();
-    assert!(remove(&dir, "Hello", || panic!("moved")).is_err());
+    assert!(remove(&dir, &licensed, || panic!("moved")).is_err());
     assert_eq!(listed(&dir), ["Hello.exe", LICENSE, UNINSTALLER]);
   }
 

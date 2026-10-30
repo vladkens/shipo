@@ -114,6 +114,7 @@ fn build(
     id: cfg.id.clone(),
     app_id: app_id(cfg)?,
     comment: cfg.comment.clone(),
+    license: files.len() > 1,
   };
 
   let stubbed = |e: io::Error| wrap(&e, format!("the setup stub: {e}"));
@@ -139,12 +140,10 @@ fn file_name(name: &str) -> io::Result<()> {
   let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
     || numbered && (stem.starts_with("COM") || stem.starts_with("LPT"));
   let chars = name.chars().any(|c| c.is_control() || r#"<>:"/\|?*"#.contains(c));
-  // The setup's own uninstaller is `Uninstall.exe`, beside `<name>.exe`.
-  let taken = name.eq_ignore_ascii_case("Uninstall");
-  match name.is_empty() || chars || device || taken || name.ends_with(['.', ' ']) {
+  match name.is_empty() || chars || device || name.ends_with(['.', ' ']) {
     true => Err(bad(format!(
       "the name {name:?} makes no Windows file name: none of <>:\"/\\|?*, no control character, \
-       no . or space at its end, no device's name, not Uninstall"
+       no . or space at its end, no device's name"
     ))),
     false => Ok(()),
   }
@@ -753,9 +752,7 @@ pub(crate) mod tests {
       assert!(file_name(ok).is_ok(), "{ok}");
     }
 
-    for no in
-      ["", "a/b", "a:b", "a\"b", "a\nb", "dot.", "space ", "CON", "nul.app", "Lpt3", "uninstall"]
-    {
+    for no in ["", "a/b", "a:b", "a\"b", "a\nb", "dot.", "space ", "CON", "nul.app", "Lpt3"] {
       assert!(file_name(no).is_err(), "{no}");
     }
 
@@ -945,6 +942,7 @@ pub(crate) mod tests {
     assert_eq!(tree[&RT_MANIFEST][&1][&LANG], MANIFEST.as_bytes());
 
     let (info, got) = payload::unpack(&data[offset as usize..]).unwrap();
+    assert_eq!(info.license, files.iter().any(|(n, _)| *n == "LICENSE.txt"));
     let app_id = app_id(cfg).unwrap();
     assert_eq!(
       (info.name.as_str(), info.id.as_str(), info.app_id),

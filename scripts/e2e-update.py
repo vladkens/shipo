@@ -8,6 +8,7 @@ installed as a user installs it, then updated in place from 2.0.0's feed served 
 uv run scripts/e2e-update.py build <dir>   the example at both versions, <dir>/<version>/<triple>/hello[.exe]
 uv run scripts/e2e-update.py pack <dir>    `shipo release` of each version, a throwaway key, 2.0.0's feed
 uv run scripts/e2e-update.py run <dir>     1.0.0 installed and updated; checks that 2.0.0 is what runs
+  [--v1 <setup>]                           Windows: 1.0.0 installed by this setup (an NSIS one), not <dir>'s
 uv run scripts/e2e-update.py all <dir>     the three on this host (`make e2e`)
 
 `pack` packs the binaries `build` left in <dir> for any OS, so any host packs every OS's: the
@@ -159,8 +160,8 @@ def one(folder: Path, pattern: str) -> Path:
   return found[0]
 
 
-def install(packed: Path, home: Path) -> Path:
-  """1.0.0 installed the way a user does it; its executable."""
+def install(packed: Path, home: Path, v1_setup: Path | None = None) -> Path:
+  """1.0.0 installed the way a user does it, on Windows by `v1_setup` if given; its executable."""
   v1 = packed / VERSIONS[0]
   if sys.platform == "darwin":
     mount = home / "volume"
@@ -172,7 +173,7 @@ def install(packed: Path, home: Path) -> Path:
     return apps / f"{NAME}.app/Contents/MacOS" / BIN
 
   if sys.platform == "win32":
-    run(one(v1, "*-setup.exe"), "/S")
+    run(v1_setup or one(v1, "*-setup.exe"), "/S")
     return Path(os.environ["LOCALAPPDATA"]) / "Programs" / NAME / f"{NAME}.exe"
 
   image = home / f"{NAME}.AppImage"
@@ -185,10 +186,11 @@ UNINSTALL = r"Software\Microsoft\Windows\CurrentVersion\Uninstall"
 RUN = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 
-def uninstall_key() -> dict | None:
-  """Windows: the values of the app's uninstall key, the one whose DisplayName is the app's."""
+def uninstall_keys() -> list[dict]:
+  """Windows: the values of each uninstall key whose DisplayName is the app's."""
   import winreg
 
+  found = []
   with winreg.OpenKey(winreg.HKEY_CURRENT_USER, UNINSTALL) as keys:
     for i in range(winreg.QueryInfoKey(keys)[0]):
       with winreg.OpenKey(keys, winreg.EnumKey(keys, i)) as key:
@@ -198,9 +200,14 @@ def uninstall_key() -> dict | None:
           values[name] = value
 
         if values.get("DisplayName") == NAME:
-          return values
+          found.append(values)
 
-  return None
+  return found
+
+
+def uninstall_key() -> dict | None:
+  """Windows: the values of the app's uninstall key."""
+  return next(iter(uninstall_keys()), None)
 
 
 def registered() -> str | None:
@@ -227,6 +234,13 @@ def uninstall(exe: Path) -> None:
   wrong = {k: (key or {}).get(k) for k, v in want.items() if (key or {}).get(k) != v}
   if wrong or not lnk.is_file() or not (folder / "LICENSE.txt").is_file():
     sys.exit(f"e2e: the install is not spec.md's: {wrong}, {lnk} {lnk.is_file()}")
+
+  # Our key alone, whole, and our files alone, whatever installed 1.0.0 (an NSIS setup).
+  names = {"DisplayName", "DisplayVersion", "Publisher", "DisplayIcon", "InstallLocation", "UninstallString", "QuietUninstallString", "NoModify", "NoRepair", "EstimatedSize"}
+  files = sorted(p.name for p in folder.iterdir() if not p.name.startswith(".shipo-update-"))
+  ours = b"shipo-setup-v1\0\0" in (folder / "Uninstall.exe").read_bytes()
+  if len(uninstall_keys()) != 1 or set(key) != names or files != ["Hello.exe", "LICENSE.txt", "Uninstall.exe"] or not ours:
+    sys.exit(f"e2e: not ours alone: {len(uninstall_keys())} keys, {sorted(key)}, {files}, our uninstaller {ours}")
 
   log(f"installed as spec.md has it: {sorted(key)}")
   with winreg.CreateKey(winreg.HKEY_CURRENT_USER, RUN) as run_key:
@@ -262,12 +276,12 @@ def version(exe: Path) -> str:
   return run(exe, timeout=30).strip()
 
 
-def check(packed: Path) -> None:
+def check(packed: Path, v1_setup: Path | None = None) -> None:
   """Installs 1.0.0, has it update itself from the served feed, and waits for 2.0.0 to run."""
   key = (packed / "key.pub").read_text().strip()
   serve(packed)
   home = Path(tempfile.mkdtemp(prefix="shipo-e2e-", dir=os.environ.get("RUNNER_TEMP")))
-  exe = install(packed, home)
+  exe = install(packed, home, v1_setup)
   if (v := version(exe)) != VERSIONS[0]:
     sys.exit(f"e2e: the installed app is {v}, not {VERSIONS[0]}")
 
@@ -310,10 +324,11 @@ def main() -> None:
   ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
   ap.add_argument("step", choices=("build", "pack", "run", "all"))
   ap.add_argument("dir", type=Path)
+  ap.add_argument("--v1", type=Path, help="run on Windows: the setup that installs 1.0.0")
   args = ap.parse_args()
   out = args.dir.resolve()
   out.mkdir(parents=True, exist_ok=True)
-  steps = {"build": build, "pack": pack, "run": check}
+  steps = {"build": build, "pack": pack, "run": lambda out: check(out, args.v1 and args.v1.resolve())}
   for step in steps if args.step == "all" else [args.step]:
     steps[step](out)
 

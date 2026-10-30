@@ -51,6 +51,8 @@ pub struct Info {
   pub app_id: String,
   /// The shortcut's description.
   pub comment: String,
+  /// Whether the setup writes `LICENSE.txt`, which its uninstaller then removes.
+  pub license: bool,
 }
 
 impl Info {
@@ -67,7 +69,8 @@ impl Info {
       format!("{k}={}\n", v.join(" "))
     });
 
-    lines.collect::<String>().into_bytes()
+    let license = if self.license { "license=1\n" } else { "" };
+    (lines.collect::<String>() + license).into_bytes()
   }
 
   fn decode(data: &[u8]) -> io::Result<Self> {
@@ -82,6 +85,10 @@ impl Info {
         "id" => &mut info.id,
         "app-id" => &mut info.app_id,
         "comment" => &mut info.comment,
+        "license" => {
+          info.license = v == "1";
+          continue;
+        }
         _ => continue,
       };
 
@@ -193,6 +200,7 @@ mod tests {
       id: "com.example.hello".into(),
       app_id: "{a90596b0-07fa-55a1-9740-d4470c5cef1c}".into(),
       comment: "Says\r\nhello".into(),
+      license: true,
     }
   }
 
@@ -200,7 +208,7 @@ mod tests {
   fn round_trip() {
     let files = vec![("Hello.exe".to_string(), vec![7; 5000]), ("LICENSE.txt".into(), vec![])];
     let data = pack(&info(), &files).unwrap();
-    assert!(data.len() < 200, "{}", data.len());
+    assert!(data.len() < 220, "{}", data.len());
 
     let (got, got_files) = unpack(&data).unwrap();
     assert_eq!(got, Info { comment: "Says hello".into(), ..info() });

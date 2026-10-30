@@ -13,6 +13,7 @@ use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, HANDLE};
 use windows_sys::Win32::System::Com::{
   CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
 };
+use windows_sys::Win32::System::Environment::GetCommandLineW;
 use windows_sys::Win32::System::Registry::{
   HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SZ,
   RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteKeyValueW, RegDeleteTreeW, RegGetValueW,
@@ -24,7 +25,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBo
 use windows_sys::core::{GUID, HRESULT, PWSTR};
 
 use super::payload::{self, Info};
-use super::{Args, UNINSTALLER, Value, own, placeholder, put, remove, uninstaller, values};
+use super::{
+  Args, UNINSTALLER, Value, guid, install, own, placeholder, previous, remove, uninstaller, values,
+};
 
 const UNINSTALL: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
 const RUN: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -32,16 +35,30 @@ const APPROVED: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Star
 
 /// Runs the setup: 0 when it installed or uninstalled, 2 when not, with a message unless `/S`.
 pub fn main() -> ExitCode {
-  let args = Args::parse(env::args_os().skip(1));
+  // SAFETY: the process's own command line, NUL-terminated, alive as long as the process.
+  let raw = unsafe {
+    let line = GetCommandLineW();
+    String::from_utf16_lossy(std::slice::from_raw_parts(
+      line,
+      (0..).take_while(|&i| *line.add(i) != 0).count(),
+    ))
+  };
+
+  let args = Args::parse(env::args_os().skip(1), &raw);
   let mut title = "Setup".to_string();
   let Err(e) = run(&args, &mut title) else { return ExitCode::SUCCESS };
   if !args.silent {
-    let (text, title) = (wide(&e.to_string()), wide(&title));
-    // SAFETY: NUL-terminated strings, no owner window.
-    unsafe { MessageBoxW(null_mut(), text.as_ptr(), title.as_ptr(), MB_ICONERROR | MB_OK) };
+    message(&title, &e);
   }
 
   ExitCode::from(2)
+}
+
+/// An error's message box, with no owner window.
+fn message(title: &str, e: &io::Error) {
+  let (text, title) = (wide(&e.to_string()), wide(title));
+  // SAFETY: NUL-terminated strings.
+  unsafe { MessageBoxW(null_mut(), text.as_ptr(), title.as_ptr(), MB_ICONERROR | MB_OK) };
 }
 
 /// The payload of this exe installed, or uninstalled when it holds no files; `title` the
@@ -53,6 +70,10 @@ fn run(args: &Args, title: &mut String) -> io::Result<()> {
   let (info, mut files, stub) = own(&exe, fields)?;
   let uninstall = files.is_empty();
   *title = format!("{} {}", info.name, if uninstall { "Uninstall" } else { "Setup" });
+  if !guid(&info.app_id) {
+    return Err(io::Error::other(format!("the app id {:?} is no GUID", info.app_id)));
+  }
+
   if uninstall {
     let dir = path.parent().ok_or_else(|| io::Error::other("the uninstaller is in no folder"))?;
     return uninstall_from(dir, &path, &info);
@@ -65,8 +86,9 @@ fn run(args: &Args, title: &mut String) -> io::Result<()> {
 
   // An update, `/S` with no `/D=`, goes where the app is.
   let key = format!(r"{UNINSTALL}\{}", info.app_id);
-  let dir = match (&args.dir, text(&key, "InstallLocation")) {
-    (Some(dir), _) => dir.clone(),
+  let location = text(&key, "InstallLocation");
+  let dir = match (args.folder()?, location.as_deref()) {
+    (Some(dir), _) => dir,
     (None, Some(dir)) if !dir.is_empty() => dir.into(),
     (None, _) => {
       let local = env::var_os("LOCALAPPDATA").ok_or_else(|| io::Error::other("no LOCALAPPDATA"))?;
@@ -74,13 +96,26 @@ fn run(args: &Args, title: &mut String) -> io::Result<()> {
     }
   };
 
+  // The placeholder's magic, read from this exe: a literal would put a second one in it.
+  let magic = &placeholder()[..payload::MAGIC.len()];
+  let licensed = previous(&dir, &info, location.as_deref(), magic)? == Some(true);
   files.push((UNINSTALLER.into(), uninstaller(stub, fields[0], &info)?));
-  let size = put(&dir, &files)?;
   let exe = dir.join(format!("{}.exe", info.name));
-  shortcut(&programs()?.join(format!("{}.lnk", info.name)), &exe, &dir, &info.comment)?;
-  set(&key, &values(&info, &dir, size.div_ceil(1024)))?;
-  if !args.silent {
-    Command::new(&exe).current_dir(&dir).spawn()?;
+  let lnk = || programs().map(|p| p.join(format!("{}.lnk", info.name)));
+  install(
+    &dir,
+    &files,
+    licensed,
+    // Written whole, so no value of an NSIS install before stays.
+    |size| delete(&key).and_then(|()| set(&key, &values(&info, &dir, size.div_ceil(1024)))),
+    || shortcut(&lnk()?, &exe, &dir, &info.comment),
+  )?;
+
+  // Installed, whether the app starts or not.
+  if !args.silent
+    && let Err(e) = Command::new(&exe).current_dir(&dir).spawn()
+  {
+    message(title, &e);
   }
 
   Ok(())
@@ -95,7 +130,7 @@ fn uninstall_from(dir: &Path, path: &Path, info: &Info) -> io::Result<()> {
   let away = [env::temp_dir(), dir.parent().unwrap_or(dir).to_path_buf()];
   // Never over a file there: std's rename on Windows replaces one.
   let moved = |d: &PathBuf| !d.join(&name).exists() && fs::rename(path, d.join(&name)).is_ok();
-  let removed = remove(dir, &info.name, || away.iter().any(moved));
+  let removed = remove(dir, info, || away.iter().any(moved));
   if dir.join(format!("{}.exe", info.name)).exists() {
     return removed;
   }
@@ -105,15 +140,14 @@ fn uninstall_from(dir: &Path, path: &Path, info: &Info) -> io::Result<()> {
     _ => Ok(()),
   });
 
-  let (id, key) = (wide(&info.id), wide(&format!(r"{UNINSTALL}\{}", info.app_id)));
+  let id = wide(&info.id);
   let values = [RUN, APPROVED].map(|run| {
     let run = wide(run);
     // SAFETY: NUL-terminated strings.
     gone(unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, run.as_ptr(), id.as_ptr()) })
   });
 
-  // SAFETY: a NUL-terminated string.
-  let key = gone(unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, key.as_ptr()) });
+  let key = delete(&format!(r"{UNINSTALL}\{}", info.app_id));
   [removed, lnk].into_iter().chain(values).chain([key]).collect()
 }
 
@@ -169,6 +203,13 @@ fn set(key: &str, values: &[(&str, Value)]) -> io::Result<()> {
   // SAFETY: the key opened above.
   unsafe { RegCloseKey(h) };
   done
+}
+
+/// The key `key` under HKCU removed with all it holds; one not there is gone already.
+fn delete(key: &str) -> io::Result<()> {
+  let key = wide(key);
+  // SAFETY: a NUL-terminated string.
+  gone(unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, key.as_ptr()) })
 }
 
 /// The string `name` of the key `key` under HKCU, if it has one.
@@ -242,8 +283,14 @@ fn shortcut(lnk: &Path, target: &Path, dir: &Path, comment: &str) -> io::Result<
     unsafe { std::mem::transmute_copy(&*(*(obj as *const *const usize)).add(index)) }
   }
 
-  let (target, dir, comment, lnk) =
-    (wide_path(target), wide_path(dir), wide(comment), wide_path(lnk));
+  // INFOTIPSIZE: a description of up to 1023 units and its NUL, cut before a surrogate pair's half.
+  let mut tip: Vec<u16> = comment.encode_utf16().take(1023).collect();
+  if tip.last().is_some_and(|u| (0xD800..0xDC00).contains(u)) {
+    tip.pop();
+  }
+
+  tip.push(0);
+  let (target, dir, comment, lnk) = (wide_path(target), wide_path(dir), tip, wide_path(lnk));
   let (mut link, mut file) = (null_mut(), null_mut());
   // SAFETY: COM on this thread; IShellLinkW's methods 7 SetDescription, 9 SetWorkingDirectory, 17
   // SetIconLocation, 20 SetPath, IUnknown's 0 QueryInterface and 2 Release, IPersistFile's 6
