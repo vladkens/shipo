@@ -18,7 +18,7 @@ Each fact has one source: the contract between the two is `spec.md`, the API the
 - Split a file before it passes ~800 lines of code (tests, docs, comments and blanks not counted).
 - Put the library's OS code in `src/platform/<os>.rs` (shared Unix code in `unix.rs`); the rest stays testable on any host.
 - Helper scripts go in `scripts/`, kebab-case, Python run with `uv run`.
-- A comment adds what the code doesn't say, briefly; it never restates the code or says where the code came from (no "ported from …").
+- A comment adds what the code doesn't say, briefly; it never restates the code. Code taken from another project names it in the file's header (project, licence, link to the file), so it can be compared and updated; code moved from the person's own projects says nothing of where it came from.
 - A test never shows a window.
 - Check each format with the system's own reader too: `hdiutil` and `fsck_hfs` for the DMG, `unsquashfs` and the runtime for the AppImage, `dpkg-deb --info` for the .deb, the setup run with `/S` on Windows.
 
