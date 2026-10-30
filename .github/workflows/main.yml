@@ -111,23 +111,42 @@ jobs:
           name: e2e-sums-${{ runner.os }}
           path: e2e/SHA256SUMS
           if-no-files-found: error
+      - if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-dmg
+          path: e2e/*/*.dmg
+          if-no-files-found: error
 
   # Each package is the same bytes whichever host packed it, so the one an OS installed above is
   # the one every host packs. A Mac's DMG is its own, and so the feed that lists it: codesign signs
-  # it by that Mac's keychain identity, which its update needs; Linux and Windows sign it ad hoc.
+  # it by that Mac's keychain identity, which its update needs; Linux and Windows sign it ad hoc,
+  # and that DMG opens on a Mac: hdiutil reads it, codesign verifies the app, the app runs.
   same:
     needs: e2e
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    runs-on: macos-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/download-artifact@v8
         with:
           pattern: e2e-sums-*
+      - uses: actions/download-artifact@v8
+        with:
+          name: e2e-dmg
+          path: dmg
       - run: |
           tail -n +1 e2e-sums-*/SHA256SUMS
           diff e2e-sums-Linux/SHA256SUMS e2e-sums-Windows/SHA256SUMS
           own() { grep -v -e '\.dmg$' -e ' update\.txt$' "$1"; }
           diff <(own e2e-sums-Linux/SHA256SUMS) <(own e2e-sums-macOS/SHA256SUMS)
+      - run: |
+          for dmg in dmg/*/*.dmg; do
+            hdiutil verify -quiet "$dmg"
+            hdiutil attach -nobrowse -readonly -mountpoint mnt "$dmg"
+            codesign --verify --strict mnt/Hello.app
+            echo "$dmg: $(mnt/Hello.app/Contents/MacOS/hello)"
+            hdiutil detach mnt
+          done
 
   # The shared release steps, as in wavo: `build` builds the packer's binaries read-only; on main
   # `publish` puts them up as the `dev` pre-release, and a `release: vX.Y.Z (#N)` commit publishes

@@ -176,17 +176,17 @@ pub fn unzip(zip: &Path, member: &str, path: &Path) -> io::Result<PathBuf> {
   executable(&zip_file(&read(zip)?, member).map_err(at(zip))?, path)
 }
 
-/// `data` at `path` (0755), [place]d: renamed over it, so a copy that runs is never rewritten;
-/// left as it is when it holds `data` already, as Windows renames nothing over a program running.
+/// `data` at `path` (0755), [place]d: renamed over it, so a copy that runs is never rewritten.
+/// Left as it is when it holds `data` already, or another run put it there meanwhile: Windows
+/// renames nothing over a program running.
 fn executable(data: &[u8], path: &Path) -> io::Result<PathBuf> {
-  if fs::read(path).is_ok_and(|had| had == data) {
-    return Ok(path.to_path_buf());
+  let there = || fs::read(path).is_ok_and(|had| had == data);
+  if !there() {
+    let placed = place(path, |part| File::create_new(part)?.write_all(data));
+    placed.or_else(|e| if there() { Ok(()) } else { Err(e) })?;
   }
 
-  place(path, |part| {
-    File::create_new(part)?.write_all(data)?;
-    set_mode(part, 0o755)
-  })?;
+  set_mode(path, 0o755)?;
   Ok(path.to_path_buf())
 }
 
@@ -730,6 +730,10 @@ mod tests {
     assert_eq!(fs::read(&out).unwrap(), b"x");
     assert_eq!(fs::metadata(&out).unwrap().permissions().mode() & 0o777, 0o755);
     assert!(untar(&tar, "d/none", &tmp.join("none")).is_err());
+    // There already, its mode lost: given back.
+    set_mode(&out, 0o644).unwrap();
+    untar(&tar, "d/tool", &out).unwrap();
+    assert_eq!(fs::metadata(&out).unwrap().permissions().mode() & 0o777, 0o755);
 
     // Put in place by a rename: a copy open before keeps its own file.
     let before = fs::File::open(&out).unwrap();
