@@ -53,7 +53,7 @@ The release's file is taken only when its size and SHA-512 are the feed's: the d
 
 ### Keys
 
-A public key is Ed25519's 32 bytes in 64 hex digits; the app holds a list of them, built in. The list must hold a key and only valid ones (a point on the curve, not of small order): one malformed key is the app's own mistake, and the client then reads no feed and fetches none. A private key is its 32-byte seed (RFC 8032) in 64 hex digits, the release job's secret `UPDATE_KEY`.
+A public key is Ed25519's 32 bytes in 64 hex digits; the app holds a list of them, built in. The list must hold a key and only valid ones (a point on the curve, not of small order): one malformed key is the app's own mistake, and the client then reads no feed and fetches none. A private key is its 32-byte seed (RFC 8032) in 64 hex digits, given to the packer by `--key <file>` or the environment variable `SHIPO_UPDATE_KEY`, the release job's secret.
 
 The list may be of any length; two is the rule, made by `shipo keygen update.key update-spare.key` (a key per file): the working one, whose seed becomes the release job's secret, and the spare, whose seed is kept offline and never reaches CI. Both public keys go into the app, so every release trusts both. readme.md gives the steps.
 
@@ -61,7 +61,7 @@ When a private key leaks (the secret was read, a CI log printed it):
 
 1. Make a new spare with `shipo keygen`, its seed offline.
 2. In the app, replace the leaked public key with the new spare's: the app now holds the old spare and the new spare.
-3. Set `UPDATE_KEY` to the old spare's seed and release. The installed apps trust the old spare, so they take this release, which no longer trusts the leaked key; the old spare is the working key from now on.
+3. Set `SHIPO_UPDATE_KEY` to the old spare's seed and release. The installed apps trust the old spare, so they take this release, which no longer trusts the leaked key; the old spare is the working key from now on.
 
 Until an install updates, it still accepts a feed the leaked key signs: release at once. On macOS a bundle must also meet the running app's code requirement ([macOS](#macos)), which the leaked key alone doesn't pass. A lost spare is replaced the same way, signed by the working key. With both lost, no feed reaches the installed apps: people install the next release by hand.
 

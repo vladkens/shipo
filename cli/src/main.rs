@@ -3,7 +3,12 @@
 //! is its command line; [USAGE] is its documentation.
 
 mod config;
+mod ds_store;
+mod feed;
 mod image;
+mod macos;
+mod plist;
+mod tool;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -26,7 +31,7 @@ Options:
   --manifest <file>   app, release, feed: the app's Cargo.toml, by default ./Cargo.toml
   --bin <file>        app: the binary
   --tag v<version>    release: the GitHub release's tag, to write update.txt too
-  --key <file>        release, feed: the private key's file, else $UPDATE_KEY
+  --key <file>        release, feed: the private key's file, else $SHIPO_UPDATE_KEY
   --url <base>        feed: where the files will be served, {version} the version
   --notes <url>       feed: the release notes' page
   --public            keygen: print the public half of a key, made before
@@ -177,9 +182,12 @@ fn twice(opt: &str) -> lexopt::Error {
 // MARK: Commands
 // Each comes in a step of its own (docs/plans).
 
-/// Signs the macOS app of the binary `bin`.
-fn app(_cfg: &Config, _bin: &Path) -> io::Result<()> {
-  Err(not_yet("app"))
+/// Makes and signs the macOS app of the binary `bin`, and prints its path.
+fn app(cfg: &Config, bin: &Path) -> io::Result<()> {
+  let (bundle, signer) = macos::app(cfg, bin, None)?;
+  eprintln!("shipo: {} {}, signed by {signer}", cfg.name, cfg.version);
+  println!("{}", bundle.display());
+  Ok(())
 }
 
 /// The installers of the binaries in `dir`, and with `tag` the feed signed by `key`.
@@ -187,25 +195,35 @@ fn release(_cfg: &Config, _dir: &Path, _tag: Option<&str>, _key: Option<&Path>) 
   Err(not_yet("release"))
 }
 
-/// The feed of `files` served at `url`, signed by `key`.
+/// The feed of `files` served at `url`, signed by `key`, in `<target>/distrib`; prints its path.
 fn feed(
-  _cfg: &Config,
-  _url: &str,
-  _notes: Option<&str>,
-  _files: &[PathBuf],
-  _key: Option<&Path>,
+  cfg: &Config,
+  url: &str,
+  notes: Option<&str>,
+  files: &[PathBuf],
+  key: Option<&Path>,
 ) -> io::Result<()> {
-  Err(not_yet("feed"))
+  // The key first: a missing one fails before the files are hashed.
+  let key = feed::Key::load(key, std::env::var_os("SHIPO_UPDATE_KEY"))?;
+  let body = feed::body(&cfg.version, notes, url, files, str::to_owned)?;
+  let path = feed::write(&key, &body, &cfg.target.join("distrib"))?;
+  println!("{}", path.display());
+  Ok(())
 }
 
 /// A new key in each of `files`, its public half printed.
-fn keygen(_files: &[PathBuf]) -> io::Result<()> {
-  Err(not_yet("keygen"))
+fn keygen(files: &[PathBuf]) -> io::Result<()> {
+  for (file, public) in files.iter().zip(feed::keygen(files)?) {
+    println!("{}: {public}", file.display());
+  }
+
+  Ok(())
 }
 
 /// Prints the public half of the key in `file`.
-fn public(_file: &Path) -> io::Result<()> {
-  Err(not_yet("keygen --public"))
+fn public(file: &Path) -> io::Result<()> {
+  println!("{}", feed::Key::read(file)?.public());
+  Ok(())
 }
 
 /// The error of a command still to come.
@@ -309,11 +327,5 @@ mod tests {
     for (line, want) in cases {
       assert_eq!(args(line), Err(want.into()), "{line}");
     }
-  }
-
-  #[test]
-  fn stubs() {
-    let e = run(lexopt::Parser::from_args(["keygen"])).unwrap_err();
-    assert_eq!(e.to_string(), "keygen: not yet");
   }
 }
