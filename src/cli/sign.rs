@@ -10,7 +10,7 @@ use std::time::Duration;
 use std::{env, fs, io};
 
 use crate::config::Config;
-use crate::tool::{self, Temp, private, run, run_until};
+use crate::tool::{self, Temp, base64, private, run, run_until};
 use crate::{bad, wrap};
 
 /// `path`, a bundle or an image, once `finish` signed it, or notarized it too, with what that
@@ -314,31 +314,6 @@ pub fn certificate(dir: &Path, p12: &str, password: &str) -> io::Result<P12> {
   Ok(P12 { file, password })
 }
 
-/// The bytes of standard base64 `text`, whitespace skipped, ending at its first `=`.
-fn base64(text: &str) -> Option<Vec<u8>> {
-  let (mut out, mut acc, mut bits) = (vec![], 0u32, 0);
-  for c in text.bytes().filter(|c| !c.is_ascii_whitespace()) {
-    let v = match c {
-      b'A'..=b'Z' => c - b'A',
-      b'a'..=b'z' => c - b'a' + 26,
-      b'0'..=b'9' => c - b'0' + 52,
-      b'+' => 62,
-      b'/' => 63,
-      b'=' => break,
-      _ => return None,
-    };
-
-    acc = (acc << 6 | v as u32) & 0xFFFF;
-    bits += 6;
-    if bits >= 8 {
-      bits -= 8;
-      out.push((acc >> bits) as u8);
-    }
-  }
-
-  Some(out)
-}
-
 // MARK: Notarization
 
 /// The secrets of the App Store Connect API key that notarizes: the `.p8`, its id and the issuer.
@@ -423,23 +398,6 @@ pub(crate) mod tests {
 
     for (got, want) in cases {
       assert_eq!(args(got), want);
-    }
-  }
-
-  #[test]
-  fn base64s() {
-    let cases = [
-      ("", Some(&b""[..])),
-      ("Zg==", Some(b"f")),
-      ("Zm8=", Some(b"fo")),
-      ("Zm9v", Some(b"foo")),
-      ("Zm9v\nYmFy\r\n", Some(b"foobar")),
-      ("+/8=", Some(&[0xFB, 0xFF][..])),
-      ("Zm9v!", None),
-    ];
-
-    for (text, want) in cases {
-      assert_eq!(base64(text).as_deref(), want, "{text:?}");
     }
   }
 

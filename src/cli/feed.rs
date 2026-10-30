@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use ed25519_compact::sha512::Hash;
 use ed25519_compact::{KeyPair, Seed};
 
-use crate::tool::{self, hex};
+use crate::tool::{self, base64, hex};
 use crate::{at, bad};
 
 /// The most bytes a feed may be (`spec.md`).
@@ -28,14 +28,19 @@ const PLATFORMS: [(&str, &str); 6] = [
   ("linux-aarch64", "-linux-aarch64.AppImage"),
 ];
 
+/// The DER of a PKCS#8 Ed25519 private key (RFC 8410) up to its 32-byte seed.
+const PKCS8: [u8; 16] = *b"\x30\x2e\x02\x01\x00\x30\x05\x06\x03\x2b\x65\x70\x04\x22\x04\x20";
+
 /// A private key, the Ed25519 pair of its 32-byte seed. No `Debug`, so no log prints it.
 pub struct Key(KeyPair);
 
 impl Key {
-  /// The key of `text`, its seed in 64 hex digits with whitespace around; `from` names it in the
-  /// error, which never holds the text.
+  /// The key of `text`, with whitespace around: its seed in 64 hex digits, or the PEM of its
+  /// PKCS#8 as `openssl genpkey -algorithm ed25519` writes it; `from` names it in the error,
+  /// which never holds the text.
   pub fn parse(text: &str, from: &str) -> io::Result<Self> {
-    match unhex(text.trim()) {
+    let text = text.trim();
+    match unhex(text).or_else(|| pem(text)) {
       Some(seed) => Ok(Self(KeyPair::from_seed(Seed::new(seed)))),
       None => Err(bad(format!("{from} is not a private key: its seed in 64 hex digits"))),
     }
@@ -216,6 +221,13 @@ fn secure(url: &str) -> bool {
   to && url.bytes().all(|b| b.is_ascii_graphic())
 }
 
+/// The seed in `text`, the PEM of a PKCS#8 Ed25519 private key.
+fn pem(text: &str) -> Option<[u8; 32]> {
+  let body = text.strip_prefix("-----BEGIN PRIVATE KEY-----")?;
+  let der = base64(body.strip_suffix("-----END PRIVATE KEY-----")?)?;
+  der.strip_prefix(&PKCS8)?.try_into().ok()
+}
+
 /// `N` bytes from exactly `2 * N` hex digits, of either case.
 fn unhex<const N: usize>(s: &str) -> Option<[u8; N]> {
   if s.len() != 2 * N || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -228,12 +240,16 @@ fn unhex<const N: usize>(s: &str) -> Option<[u8; N]> {
 
 #[cfg(test)]
 mod tests {
+  use std::process::Command;
+
   use super::*;
   use crate::tool::Temp;
 
   /// RFC 8032's test 1: the seed and its public key.
   const SEED: &str = "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60";
   const PUBLIC: &str = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+  /// The seed's PKCS#8 in base64, the body of its PEM.
+  const SEED_PKCS8: &str = "MC4CAQAwBQYDK2VwBCIEIJ1hsZ3v/VpguoRK9JLsLMREScVpezJpGXA7rAMcrn9g";
   /// The SHA-512 of `abc` (FIPS 180-2) and of nothing.
   const ABC: &str = "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f";
   const EMPTY: &str = "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e";
@@ -351,16 +367,33 @@ mod tests {
     assert!(text.unwrap().contains(" http://127.0.0.1:8000/App-dev-macos-aarch64.dmg\n"));
   }
 
+  /// The PEM of `label` holding the base64 `body`, its lines ending in `end`.
+  fn pem_of(label: &str, body: &str, end: &str) -> String {
+    format!("-----BEGIN {label}-----{end}{body}{end}-----END {label}-----{end}")
+  }
+
   #[test]
   fn keys_parse() {
     let upper = format!("\n  {}\r\n", SEED.to_uppercase());
-    for text in [SEED, &format!("{SEED}\n"), &upper] {
+    let pem = pem_of("PRIVATE KEY", SEED_PKCS8, "\n");
+    let crlf = pem.replace('\n', "\r\n");
+    for text in [SEED, &format!("{SEED}\n"), &upper, &pem, &crlf] {
       assert_eq!(Key::parse(text, "k").unwrap().public(), PUBLIC, "{text:?}");
     }
 
     let secret = &SEED[..62];
-    for text in ["", secret, &format!("{SEED}0"), &format!("{secret}xy"), &format!("{SEED} {SEED}")]
-    {
+    let mut wrong =
+      [String::new(), secret.into(), format!("{SEED}0"), format!("{secret}xy")].to_vec();
+    wrong.extend([format!("{SEED} {SEED}"), pem[..pem.len() - 2].into()]);
+    // The public key's PEM, X25519's private key, a seed short by a byte, not base64.
+    let pems = [
+      ("PUBLIC KEY", "MCowBQYDK2VwAyEA11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo="),
+      ("PRIVATE KEY", "MC4CAQAwBQYDK2VuBCIEIJ1hsZ3v/VpguoRK9JLsLMREScVpezJpGXA7rAMcrn9g"),
+      ("PRIVATE KEY", "MC4CAQAwBQYDK2VwBCIEIJ1hsZ3v/VpguoRK9JLsLMREScVpezJpGXA7rAMcrn8="),
+      ("PRIVATE KEY", "MC4CAQAwBQYDK2VwBCIEIJ1hsZ3v/VpguoRK9JLsLMREScVpezJpGXA7rAMcrn9!"),
+    ];
+    wrong.extend(pems.map(|(label, body)| pem_of(label, body, "\n")));
+    for text in &wrong {
       let e = Key::parse(text, "k").err().unwrap().to_string();
       assert_eq!(e, "k is not a private key: its seed in 64 hex digits");
     }
@@ -388,6 +421,21 @@ mod tests {
       e(None, Some(secret.into())),
       "$SHIPO_UPDATE_KEY is not a private key: its seed in 64 hex digits"
     );
+  }
+
+  /// A key `openssl genpkey` made, when this host's OpenSSL makes Ed25519 keys (macOS's LibreSSL
+  /// doesn't): its public half is OpenSSL's.
+  #[test]
+  fn openssl_keys_parse() {
+    let tmp = Temp::new().unwrap();
+    let file = tmp.join("k.pem");
+    let openssl = |args: &str| tool::run(Command::new("openssl").args(args.split(' ')).arg(&file));
+    if openssl("genpkey -algorithm ed25519 -out").is_err() {
+      return;
+    }
+
+    let der = openssl("pkey -pubout -outform DER -in").unwrap();
+    assert_eq!(Key::read(&file).unwrap().public(), hex(&der[der.len() - 32..]));
   }
 
   /// The platform of this host, as the library reads the feed.

@@ -50,6 +50,8 @@ It writes each private key to its file, readable by you alone, and prints both p
 
 `shipo keygen --public <file>` prints a key file's public key, to tell which is which.
 
+A PEM key, as `openssl genpkey -algorithm ed25519` writes it, works too, in a file or the secret.
+
 ### Replacing a key
 
 When the working key leaks, the spare signs the release that drops it:

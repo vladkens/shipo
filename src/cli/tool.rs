@@ -326,6 +326,31 @@ pub fn hex(bytes: &[u8]) -> String {
   bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The bytes of standard base64 `text`, whitespace skipped, ending at its first `=`.
+pub fn base64(text: &str) -> Option<Vec<u8>> {
+  let (mut out, mut acc, mut bits) = (vec![], 0u32, 0);
+  for c in text.bytes().filter(|c| !c.is_ascii_whitespace()) {
+    let v = match c {
+      b'A'..=b'Z' => c - b'A',
+      b'a'..=b'z' => c - b'a' + 26,
+      b'0'..=b'9' => c - b'0' + 52,
+      b'+' => 62,
+      b'/' => 63,
+      b'=' => break,
+      _ => return None,
+    };
+
+    acc = (acc << 6 | v as u32) & 0xFFFF;
+    bits += 6;
+    if bits >= 8 {
+      bits -= 8;
+      out.push((acc >> bits) as u8);
+    }
+  }
+
+  Some(out)
+}
+
 /// The `N` bytes of `data` at `at`, if it holds them; a number's `from_le_bytes` or
 /// `from_be_bytes` reads them.
 pub fn get<const N: usize>(data: &[u8], at: usize) -> Option<[u8; N]> {
@@ -536,5 +561,22 @@ mod tests {
 
     drop(tmp);
     assert!(!path.exists());
+  }
+
+  #[test]
+  fn base64s() {
+    let cases = [
+      ("", Some(&b""[..])),
+      ("Zg==", Some(b"f")),
+      ("Zm8=", Some(b"fo")),
+      ("Zm9v", Some(b"foo")),
+      ("Zm9v\nYmFy\r\n", Some(b"foobar")),
+      ("+/8=", Some(&[0xFB, 0xFF][..])),
+      ("Zm9v!", None),
+    ];
+
+    for (text, want) in cases {
+      assert_eq!(base64(text).as_deref(), want, "{text:?}");
+    }
   }
 }
