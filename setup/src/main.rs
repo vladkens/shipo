@@ -360,18 +360,19 @@ fn same(l: &str, dir: &Path) -> bool {
     let s = s.replace('/', "\\");
     let s = s.trim_end_matches('\\');
     let prefixed = |p: &str| s.get(..p.len()).is_some_and(|h| h.eq_ignore_ascii_case(p));
-    if prefixed(r"\\?\UNC\") {
+    if prefixed(r"\\?\UNC\") || prefixed(r"\\.\UNC\") {
       format!(r"\\{}", &s[8..])
-    } else if prefixed(r"\\?\") {
+    } else if prefixed(r"\\?\") || prefixed(r"\\.\") {
       s[4..].to_string()
     } else {
       s.to_string()
     }
   };
 
+  // Only an absolute folder resolves: a relative one would by the current folder.
   let real = |p: &Path| fs::canonicalize(p).ok();
   plain(l).eq_ignore_ascii_case(&plain(&dir.to_string_lossy()))
-    || real(Path::new(l)).is_some_and(|l| real(dir) == Some(l))
+    || folder(l).and_then(|l| real(&l)).is_some_and(|l| real(dir) == Some(l))
 }
 
 fn in_use(path: &Path, e: io::Error) -> io::Error {
@@ -488,6 +489,11 @@ mod tests {
     assert!(same(r"C:\Apps\Hello", dir) && same(r"c:\apps\hello\", dir));
     assert!(same("C:/Apps/Hello/", dir) && same(r"\\?\C:\Apps\Hello", dir));
     assert!(same(r"\\?\UNC\srv\share\x", Path::new(r"\\srv\share\x")));
+    assert!(same(r"\\.\C:\Apps\Hello", dir));
+    assert!(same(r"\\.\UNC\srv\share\x", Path::new(r"\\srv\share\x")));
+    // A relative folder never matches by the current folder.
+    let here = std::env::current_dir().unwrap();
+    assert!(!same(".", &here) && !same("", &here));
     assert!(!same(r"C:\Users\Me\AppData\Local\Temp", dir) && !same(r"C:\Apps", dir));
   }
 
