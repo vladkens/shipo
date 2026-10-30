@@ -35,11 +35,15 @@ jobs:
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       - run: rustup toolchain install nightly --profile minimal --component rustfmt
       - run: make check
+        env:
+          PYTHONUTF8: 1 # the scripts read the sources as UTF-8 on Windows too
       - run: make test
 
-  # The packer's ignored tests: the real setup (makensis), the .deb and the AppImage read back by
-  # the system's tools, and rcodesign fetched pinned.
+  # On Ubuntu with the tools apt has: the packer's ignored tests (the real setup by makensis, the
+  # .deb and the AppImage read back, rcodesign fetched pinned, signing the Mac's binary), and the
+  # DMGs e2e-macos made, unpacked by dmg2img and checked by fsck.hfsplus (hfsprogs).
   packages:
+    needs: e2e-macos
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -47,8 +51,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.event_name != 'pull_request' }}
-      - run: sudo apt-get update && sudo apt-get install -y nsis squashfs-tools desktop-file-utils
+      - run: sudo apt-get update && sudo apt-get install -y nsis squashfs-tools desktop-file-utils hfsprogs dmg2img
+      - uses: actions/download-artifact@v8
+        with:
+          name: e2e-macos
+          path: macos
       - run: cargo test -- --include-ignored
+        env:
+          SHIPO_TEST_MACHO: ${{ github.workspace }}/macos/1.0.0/aarch64-apple-darwin/hello
+      - run: |
+          for dmg in macos/*/*.dmg; do
+            dmg2img -i "$dmg" -o "${dmg%.dmg}.img"
+            fsck.hfsplus -n "${dmg%.dmg}.img"
+          done
 
   # The end-to-end update (scripts/e2e-update.py): examples/update.rs at 1.0.0 and 2.0.0, packed by
   # shipo, 1.0.0 installed on each OS and updated in place from 2.0.0's feed served on loopback.
@@ -114,7 +129,7 @@ jobs:
       - run: uv run scripts/e2e-update.py run e2e
 
   # The DMG is packed on the Mac that runs it: 1.0.0 takes only a 2.0.0 signed by its own identity,
-  # here "Hello Local Signing", which shipo makes in this runner's keychain.
+  # here "Hello Local Signing", made by the script in a keychain codesign uses without a prompt.
   e2e-macos:
     runs-on: macos-latest
     timeout-minutes: 30
@@ -129,28 +144,12 @@ jobs:
       - run: uv run scripts/e2e-update.py pack e2e
       - uses: actions/upload-artifact@v7
         with:
-          name: e2e-dmg
-          path: e2e/*/*.dmg
+          name: e2e-macos
+          path: |
+            e2e/*/*.dmg
+            e2e/1.0.0/aarch64-apple-darwin/hello
           if-no-files-found: error
       - run: uv run scripts/e2e-update.py run e2e
-
-  # The DMGs shipo made, read by Linux's own tools: dmg2img unpacks the UDZO image, fsck.hfsplus
-  # (hfsprogs) checks its HFS+ volume.
-  e2e-dmg:
-    needs: e2e-macos
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - run: sudo apt-get update && sudo apt-get install -y hfsprogs dmg2img
-      - uses: actions/download-artifact@v8
-        with:
-          name: e2e-dmg
-          path: dmg
-      - run: |
-          for dmg in dmg/*/*.dmg; do
-            dmg2img -i "$dmg" -o "${dmg%.dmg}.img"
-            fsck.hfsplus -n "${dmg%.dmg}.img"
-          done
 
   # The shared release steps, as in wavo: `build` builds the packer's binaries read-only; on main
   # `publish` puts them up as the `dev` pre-release, and a `release: vX.Y.Z (#N)` commit publishes
@@ -167,7 +166,7 @@ jobs:
 
   publish:
     if: github.ref == 'refs/heads/main' # write rights only for main's own workflow
-    needs: [test, packages, e2e, e2e-macos, e2e-dmg, build]
+    needs: [test, packages, e2e, e2e-macos, build]
     runs-on: ubuntu-latest # no build here, and Linux runners start faster
     permissions:
       attestations: write

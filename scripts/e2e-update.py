@@ -41,7 +41,7 @@ MANIFEST = """[package]
 name = "{bin}"
 version = "{version}"
 edition = "2024"
-authors = ["shipo e2e"]
+authors = ["shipo e2e <e2e@example.com>"]
 repository = "https://github.com/vladkens/shipo"
 
 [package.metadata.shipo]
@@ -90,6 +90,25 @@ def png(n: int) -> bytes:
   return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", head) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
 
 
+def keychain(out: Path) -> None:
+  """CI on a Mac: "Hello Local Signing", the identity shipo signs a dev build by, in a keychain of
+  its own that codesign may use without a prompt. shipo would make it in the login keychain, where
+  codesign's first use asks for the password: a prompt nobody answers on a runner."""
+  kc, pw, name = out / "e2e.keychain-db", "e2e", f"{NAME} Local Signing"
+  key, cert, p12 = out / "signing.key", out / "signing.pem", out / "signing.p12"
+  openssl = "/usr/bin/openssl"  # LibreSSL, whose PKCS#12 `security import` reads
+  ext = ["-addext", "keyUsage=critical,digitalSignature", "-addext", "extendedKeyUsage=critical,codeSigning"]
+  run(openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2", "-subj", f"/CN={name}", *ext, "-keyout", key, "-out", cert)
+  run(openssl, "pkcs12", "-export", "-inkey", key, "-in", cert, "-out", p12, "-passout", f"pass:{pw}")
+  run("security", "create-keychain", "-p", pw, kc)
+  run("security", "set-keychain-settings", kc)
+  run("security", "unlock-keychain", "-p", pw, kc)
+  run("security", "import", p12, "-k", kc, "-P", pw, "-T", "/usr/bin/codesign")
+  run("security", "set-key-partition-list", "-S", "apple-tool:,apple:,codesign:", "-s", "-k", pw, kc)
+  listed = [ln.strip().strip('"') for ln in run("security", "list-keychains", "-d", "user").splitlines()]
+  run("security", "list-keychains", "-d", "user", "-s", kc, *listed)
+
+
 def pack(out: Path) -> None:
   """Each version's installers, a throwaway key (key.pub its public half) and 2.0.0's feed,
   out/update.txt, of the files served at http://127.0.0.1:<port>/<version>/."""
@@ -104,9 +123,13 @@ def pack(out: Path) -> None:
   run(shipo, "keygen", key, env=env)
   (out / "key.pub").write_text(run(shipo, "keygen", "--public", key, env=env).strip())
 
+  if sys.platform == "darwin" and os.environ.get("CI"):
+    keychain(out)
+
   for version in VERSIONS:
     manifest = out / version / "Cargo.toml"
     manifest.write_text(MANIFEST.format(bin=BIN, version=version, id=ID, name=NAME))
+    shutil.copy2(ROOT / "LICENSE", out / version / "LICENSE")
     print(run(shipo, "release", out / version, "--manifest", manifest, env=env), end="")
 
   newest = out / VERSIONS[-1]
