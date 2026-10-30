@@ -190,3 +190,22 @@ pub fn busy(e: &io::Error) -> bool {
     [ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION, ERROR_ACCESS_DENIED, ERROR_DIR_NOT_EMPTY];
   e.raw_os_error().is_some_and(|c| codes.contains(&(c as u32)))
 }
+
+#[cfg(test)]
+mod tests {
+  use windows_sys::Win32::Foundation::SetLastError;
+
+  use super::*;
+
+  #[test]
+  fn winhttp_message() {
+    // SAFETY: a null handle fails harmlessly, loading winhttp.dll as the app's own calls do; then
+    // the last error a failed name lookup leaves (ERROR_WINHTTP_NAME_NOT_RESOLVED).
+    unsafe {
+      WinHttpCloseHandle(null_mut());
+      SetLastError(12007);
+    }
+    let e = failed("https://example.invalid").to_string();
+    assert!(e.contains("name") || e.contains("resolved"), "{e}");
+  }
+}
