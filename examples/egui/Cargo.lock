@@ -2855,7 +2855,7 @@ dependencies = [
 
 [[package]]
 name = "shipo"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "block2 0.6.2",
  "ed25519-compact",
