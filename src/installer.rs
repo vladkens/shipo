@@ -260,9 +260,8 @@ impl Folder {
     let mut made = fs::DirBuilder::new();
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut made, 0o700);
-    made
-      .create(&dir)
-      .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", parent.display())))?;
+    let at = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", parent.display()));
+    made.create(&dir).map_err(at)?;
     Ok(Self(dir))
   }
 

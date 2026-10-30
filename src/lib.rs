@@ -105,15 +105,20 @@ pub fn check(feed: &Feed, current: &str) -> Result<Option<Release>> {
 /// Whether the running app can update in place, checked with no network, so an app can hide its
 /// update up front: not without an installed app to replace ([Error::Unsupported]: a build, a
 /// Windows exe outside `%LOCALAPPDATA%\Programs`, a Linux one not run as an AppImage, as a .deb's
-/// in /usr, a translocated app) or one whose folder the user can't write ([Error::Io],
-/// `PermissionDenied`: `/Applications` for a standard user, `/opt`).
+/// in /usr, a translocated app), nor one it can't replace ([Error::Unsupported]: a bundle the user
+/// can't write or on a volume without APFS's swap, an AppImage the user can't write), nor one whose
+/// folder the user can't write ([Error::Io], `PermissionDenied`: `/Applications` for a standard
+/// user, `/opt`).
 pub fn supported() -> Result<()> {
   installed().map(drop)
 }
 
-/// The app an update replaces ([target]), its [home] writable: a staging folder made there.
+/// The app an update replaces ([target]), [replaceable], its [home] writable: a staging folder
+/// made there.
 fn installed() -> Result<PathBuf> {
   let target = target(OS, &env::current_exe()?, &|k| env::var_os(k))?;
+  #[cfg(unix)]
+  replaceable(OS, &target, imp::access(&target))?;
   Folder::new(home(OS, &target))?;
   Ok(target)
 }
@@ -255,6 +260,30 @@ fn target(os: Os, exe: &Path, env: Env) -> Result<PathBuf> {
   }
 }
 
+/// What the user may do to the target, as the OS tells it; Windows' setup replaces its own.
+#[cfg_attr(windows, allow(dead_code))]
+struct Access {
+  writable: bool,
+  /// Whether its volume exchanges two paths in one step (`VOL_CAP_INT_RENAME_SWAP`); macOS only.
+  swap: bool,
+}
+
+/// Whether the installer can put a new app in place of `target`, [Error::Unsupported] with the
+/// reason if not. The macOS swap needs a volume that has it (APFS; not HFS+ or exFAT) and the
+/// bundle writable even for its owner, as moving a folder to another parent rewrites its `..`;
+/// Linux's hard link of the old copy needs the AppImage writable (`protected_hardlinks`), or owned:
+/// an AppImage of no write bit is refused, though its owner could update it.
+#[cfg_attr(windows, allow(dead_code))]
+fn replaceable(os: Os, target: &Path, access: Access) -> Result<()> {
+  let why = match os {
+    Os::Mac if !access.swap => "its volume can't swap two folders in one step (not APFS)",
+    Os::Mac | Os::Linux if !access.writable => "this user can't write it",
+    _ => return Ok(()),
+  };
+
+  Err(Error::Unsupported(format!("{}: {why}", target.display())))
+}
+
 // MARK: Download
 
 /// [download]'s progress: the bytes done, the total.
@@ -271,8 +300,7 @@ fn fetch(release: &Release, parent: &Path, progress: Progress) -> Result<(Folder
     return Err(Error::Feed(format!("{:?} is not https", release.url)));
   }
 
-  let exe = env::current_exe()?;
-  let name = stage_name(OS, &release.url, exe.file_name().unwrap_or_default())?;
+  let name = stage_name(OS, &release.url, env::current_exe()?.file_name().unwrap_or_default())?;
   let dir = Folder::new(parent)?;
   let file = dir.0.join(name);
   let (total, mut told) = (release.size, None::<Instant>);
@@ -553,6 +581,39 @@ mod tests {
     assert!(download(&r, |_, _| {}).is_err(), "a build, and no file");
     assert_eq!(fs::read_dir(&parent).unwrap().count(), 0, "nothing fetched");
     fs::remove_dir(parent).unwrap();
+  }
+
+  #[test]
+  fn an_app_the_installer_cant_replace_is_unsupported() {
+    let access = |writable, swap| Access { writable, swap };
+    let cases = [
+      (Os::Mac, access(true, true), true),
+      (Os::Mac, access(true, false), false),
+      (Os::Mac, access(false, true), false),
+      (Os::Linux, access(true, false), true),
+      (Os::Linux, access(false, false), false),
+      (Os::Windows, access(false, false), true),
+    ];
+    for (i, (os, access, ok)) in cases.into_iter().enumerate() {
+      let r = replaceable(os, Path::new("/a/A.app"), access);
+      assert_eq!(r.is_ok(), ok, "case {i}");
+      assert!(r.is_ok() || matches!(r, Err(Error::Unsupported(_))));
+    }
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn the_access_of_a_folder_of_ours() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = dir("access");
+    let access = imp::access(&root);
+    assert!(access.writable);
+    assert!(cfg!(target_os = "linux") || access.swap, "the temp folder is on APFS");
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o555)).unwrap();
+    let access = imp::access(&root);
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(!access.writable);
+    fs::remove_dir(root).unwrap();
   }
 
   #[test]

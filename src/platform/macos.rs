@@ -16,15 +16,15 @@ use std::{fs, io};
 use block2::RcBlock;
 use objc2_core_foundation::{CFRetained, CFURL, Type};
 use objc2_foundation::{
-  NSBundle, NSError, NSHTTPURLResponse, NSString, NSURL, NSURLRequest, NSURLRequestCachePolicy,
-  NSURLResponse, NSURLSession,
+  NSBundle, NSError, NSHTTPURLResponse, NSNumber, NSString, NSURL, NSURLRequest,
+  NSURLRequestCachePolicy, NSURLResponse, NSURLSession, NSURLVolumeSupportsSwapRenamingKey,
 };
 use objc2_security::{SecCSFlags, SecCode, SecStaticCode, kSecCSCheckAllArchitectures};
 
 pub use super::unix::{alive, busy, detach, wait_exit};
 use super::{Big, Progress};
 use crate::installer::NOTE;
-use crate::{Error, Result};
+use crate::{Access, Error, Result};
 
 // MARK: HTTP
 
@@ -167,6 +167,19 @@ fn owned<T: Type>(path: &Path, status: i32, made: *mut T) -> Result<CFRetained<T
 }
 
 // MARK: Install
+
+/// What the user may do to the bundle `app`, its volume's swap Foundation's
+/// `NSURLVolumeSupportsSwapRenamingKey`, the file system's own `VOL_CAP_INT_RENAME_SWAP`: asked of
+/// the volume rather than guessed from its type's name, and of any path on it, where `getattrlist`
+/// takes only the volume's root.
+pub fn access(app: &Path) -> Access {
+  let (url, mut swap) = (NSURL::fileURLWithPath(&NSString::from_str(&app.to_string_lossy())), None);
+  // SAFETY: one of `NSURL`'s keys, whose value is an `NSNumber`; `swap` an out slot.
+  let got =
+    unsafe { url.getResourceValue_forKey_error(&mut swap, NSURLVolumeSupportsSwapRenamingKey) };
+  let swap = got.ok().and(swap).and_then(|v| v.downcast::<NSNumber>().ok());
+  Access { swap: swap.is_some_and(|n| n.boolValue()), ..super::unix::access(app) }
+}
 
 /// Exchanges the paths `a` and `b` in one step, `renamex_np` with `RENAME_SWAP`, as Sparkle's
 /// `SUFileManager` does on APFS.

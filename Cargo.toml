@@ -40,7 +40,7 @@ toml = { version = "1.1.8", default-features = false, features = ["parse", "serd
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = { version = "0.6.2", default-features = false, features = ["std"] }
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFURL", "CFString"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "NSString", "NSURL", "NSURLSession", "NSURLRequest", "NSURLResponse", "NSError", "NSBundle", "NSDate"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "NSString", "NSURL", "NSURLSession", "NSURLRequest", "NSURLResponse", "NSError", "NSBundle", "NSDate", "NSValue"] }
 objc2-security = { version = "0.3.2", default-features = false, features = ["std", "CSCommon", "SecCode", "SecStaticCode"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]

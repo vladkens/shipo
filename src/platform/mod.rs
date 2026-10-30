@@ -11,9 +11,10 @@
 //! - `start`: the installed app started with the installer's error, not waiting, without the focus.
 //! - `busy`: an error of a rename or removal that may pass if tried again.
 //!
-//! macOS also `accepts` and `exchange`, Windows `setup`. On Unix `alive`, `busy`, `detach` and
-//! `wait_exit` are the `unix` module's below, Linux's `detach` wrapped to close what the app
-//! inherited.
+//! macOS also `accepts` and `exchange`, Windows `setup`, macOS and Linux `access`, what the user
+//! may do to the target. On Unix `access`, `alive`, `busy`, `detach` and `wait_exit` are the
+//! `unix` module's below, Linux's `detach` wrapped to close what the app inherited and macOS's
+//! `access` told the volume's swap.
 
 #[cfg(target_os = "macos")]
 pub mod macos;
@@ -42,14 +43,9 @@ pub type Progress<'a> = &'a mut dyn FnMut(u64);
 
 /// `get`'s answer to the HTTP status `code` of `url`: 2xx is `Ok`.
 fn status(url: &str, code: u32) -> Result<()> {
-  match code {
-    200..300 => Ok(()),
-    _ => Err(Error::Http {
-      url: url.into(),
-      status: Some(u16::try_from(code).unwrap_or(u16::MAX)),
-      message: format!("HTTP {code}"),
-    }),
-  }
+  let status = Some(u16::try_from(code).unwrap_or(u16::MAX));
+  let e = || Error::Http { url: url.into(), status, message: format!("HTTP {code}") };
+  if (200..300).contains(&code) { Ok(()) } else { Err(e()) }
 }
 
 /// `get`'s error for `url` that got no response: the OS's `message`.
@@ -64,10 +60,15 @@ fn http(url: &str, message: impl ToString) -> Error {
 /// removal tries again.
 #[cfg(unix)]
 mod unix {
+  use std::ffi::{CString, c_char};
+  use std::os::unix::ffi::OsStrExt;
   use std::os::unix::process::{CommandExt, parent_id};
+  use std::path::Path;
   use std::process::{Child, Command};
   use std::time::{Duration, Instant};
   use std::{io, thread};
+
+  use crate::Access;
 
   /// Whether the process `pid` runs: `kill(pid, 0)`, which sends nothing. Another user's is not
   /// ours.
@@ -98,6 +99,19 @@ mod unix {
   /// reach it.
   pub fn detach(cmd: &mut Command) -> io::Result<Child> {
     cmd.process_group(0).spawn()
+  }
+
+  /// What this process's user may do to `path`: `access`, which counts ACLs too; a running
+  /// executable, as an AppImage is, answers `ETXTBSY` (26 on Linux and macOS), writable.
+  pub fn access(path: &Path) -> Access {
+    unsafe extern "C" {
+      fn access(path: *const c_char, mode: i32) -> i32;
+    }
+
+    let c = CString::new(path.as_os_str().as_bytes()).unwrap_or_default();
+    // SAFETY: a C string that lives through the call; W_OK is 2.
+    let ok = unsafe { access(c.as_ptr(), 2) } == 0;
+    Access { writable: ok || io::Error::last_os_error().raw_os_error() == Some(26), swap: false }
   }
 
   /// A folder not empty yet: macOS can leave entries out of a folder's listing while it is emptied

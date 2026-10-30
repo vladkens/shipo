@@ -77,7 +77,7 @@ The library replaces the installed app with the release's file, the one people d
 | Windows | `%LOCALAPPDATA%\Programs\<Name>\<Name>.exe`, by the setup | the running exe's folder when it is under `%LOCALAPPDATA%\Programs`, compared case-insensitively |
 | Linux | the AppImage, where the user put it | `$APPIMAGE`, when the running executable is inside `$APPDIR` and `$APPIMAGE` is a file |
 
-There is no target for a bare binary (a build), a Windows exe elsewhere, or a Linux binary not run as an AppImage (the .deb's in `/usr/bin`, which apt updates). A bundle macOS translocated (run from a read-only copy, as it does for an app downloaded and not moved), or a target whose folder the user can't write (`/Applications` for a standard user, `/opt`), can't be updated either. The library tells both apart, so an app can hide its update up front.
+There is no target for a bare binary (a build), a Windows exe elsewhere, or a Linux binary not run as an AppImage (the .deb's in `/usr/bin`, which apt updates). A bundle macOS translocated (run from a read-only copy, as it does for an app downloaded and not moved), a target whose folder the user can't write (`/Applications` for a standard user, `/opt`), a target the user can't write itself (the swap moves the bundle to another folder, which rewrites its `..`), or a bundle on a volume without the swap (`VOL_CAP_INT_RENAME_SWAP`: APFS has it, HFS+ and exFAT don't) can't be updated either. The library tells both apart, so an app can hide its update up front.
 
 ### Staging
 

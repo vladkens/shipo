@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::OnceLock;
 
-pub use super::unix::{alive, busy, wait_exit};
+pub use super::unix::{access, alive, busy, wait_exit};
 use super::{Big, Progress};
 use crate::installer::NOTE;
 use crate::{Error, Result};
