@@ -24,10 +24,11 @@ use crate::{Error, Result};
 
 type P = *mut c_void;
 
-// glibc (libc.so.6 since 2.34; Rust's std links it), <dlfcn.h>.
+// glibc (libc.so.6 since 2.34, libdl before; Rust's std links both), <dlfcn.h> and <unistd.h>.
 unsafe extern "C" {
   fn dlopen(name: *const c_char, flags: c_int) -> P;
   fn dlsym(handle: P, name: *const c_char) -> P;
+  fn close(fd: c_int) -> c_int;
 }
 
 const RTLD_NOW: c_int = 2;
@@ -87,13 +88,14 @@ fn curl() -> Option<&'static Curl> {
   CURL.get_or_init(load).as_ref()
 }
 
-/// The address of `name` in the open library `lib`, as the function pointer type `T`.
+/// The address of `name` in the open library `lib` (null: `RTLD_DEFAULT`, any loaded one), as the
+/// function pointer type `T`.
 ///
 /// # Safety
 /// `T` must be the symbol's real signature, a pointer-sized `extern "C" fn`.
 unsafe fn sym<T: Copy>(lib: P, name: &CStr) -> Option<T> {
   const { assert!(size_of::<T>() == size_of::<P>()) };
-  // SAFETY: a library `dlopen` gave, never closed.
+  // SAFETY: a library `dlopen` gave, never closed, or the process's own.
   let p = unsafe { dlsym(lib, name.as_ptr()) };
   // SAFETY: the caller names the symbol's type; a fn pointer is a non-null pointer.
   (!p.is_null()).then(|| unsafe { transmute_copy::<P, T>(&p) })
@@ -211,16 +213,16 @@ pub fn detach(cmd: &mut Command) -> io::Result<Child> {
 /// `cmd` started with no descriptor past stderr: an AppImage's runtime leaves its FUSE daemon's
 /// pipe open in the app, and the app started by the update would keep the old one mounted.
 fn closed(cmd: &mut Command) -> &mut Command {
-  unsafe extern "C" {
-    fn close_range(first: u32, last: u32, flags: i32) -> i32;
-    fn close(fd: i32) -> i32;
-  }
-
-  // SAFETY: only `close`, async-signal-safe, between fork and exec; close_range is glibc 2.34's,
-  // the loop the older kernels' way.
+  // Found before the fork, `dlsym` being no async-signal-safe call, and not linked: glibc has it
+  // since 2.34, which would be every app's floor.
+  // SAFETY: <unistd.h>'s `close_range`.
+  let range: Option<unsafe extern "C" fn(u32, u32, c_int) -> c_int> =
+    unsafe { sym(std::ptr::null_mut(), c"close_range") };
+  // SAFETY: only `close_range` and `close`, async-signal-safe, between fork and exec; the loop
+  // where it is missing or fails (glibc before 2.34, Linux before 5.9).
   unsafe {
-    cmd.pre_exec(|| {
-      if close_range(3, u32::MAX, 0) != 0 {
+    cmd.pre_exec(move || {
+      if range.is_none_or(|f| f(3, u32::MAX, 0) != 0) {
         (3..1024).for_each(|fd| _ = close(fd));
       }
 
@@ -241,5 +243,29 @@ mod tests {
     let new = unpack(&root.join("app.AppImage"), &root).unwrap();
     assert_eq!(fs::metadata(new).unwrap().permissions().mode() & 0o777, 0o755);
     fs::remove_dir_all(root).unwrap();
+  }
+
+  #[test]
+  fn no_descriptor_past_stderr_is_inherited() {
+    unsafe extern "C" {
+      fn dup2(old: c_int, new: c_int) -> c_int;
+    }
+
+    // Descriptor 9 a copy of stderr without `FD_CLOEXEC`: the child has it unless it is closed.
+    let has_9 = |close: bool| {
+      let mut cmd = Command::new("sh");
+      cmd.args(["-c", "test -e /proc/self/fd/9"]);
+      // SAFETY: only `dup2`, async-signal-safe, between fork and exec.
+      unsafe {
+        cmd.pre_exec(|| if dup2(2, 9) == 9 { Ok(()) } else { Err(io::Error::last_os_error()) })
+      };
+      if close {
+        closed(&mut cmd);
+      }
+
+      cmd.status().unwrap().success()
+    };
+    assert!(has_9(false), "inherited as is");
+    assert!(!has_9(true), "closed");
   }
 }
