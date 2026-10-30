@@ -135,11 +135,13 @@ pub fn unpack(file: &Path, _: &Path) -> Result<PathBuf> {
   Ok(file.to_owned())
 }
 
-/// Runs the per-user setup `exe` silently (`/S`, into the app's folder) with no window, to its end;
-/// its exit code (0 installed, 2 not).
-pub fn setup(exe: &Path) -> io::Result<i32> {
-  let done = Command::new(exe).arg("/S").creation_flags(CREATE_NO_WINDOW).status()?;
-  Ok(done.code().unwrap_or(-1))
+/// Runs the per-user setup `exe` silently (`/S`) into the folder `to`, the running app's, with no
+/// window, to its end; its exit code (0 installed, 2 not). `/D=` goes last and unquoted, its spaces
+/// kept, as the setup reads it.
+pub fn setup(exe: &Path, to: &Path) -> io::Result<i32> {
+  let mut cmd = Command::new(exe);
+  cmd.arg("/S").raw_arg(format!("/D={}", to.display())).creation_flags(CREATE_NO_WINDOW);
+  Ok(cmd.status()?.code().unwrap_or(-1))
 }
 
 /// Whether the process `pid` runs.
@@ -166,10 +168,8 @@ pub fn wait_exit(pid: u32) -> impl Fn(Duration) -> bool {
 /// doesn't end it too.
 pub fn detach(cmd: &mut Command) -> io::Result<Child> {
   let flags = DETACHED_PROCESS | CREATE_NO_WINDOW;
-  match cmd.creation_flags(flags | CREATE_BREAKAWAY_FROM_JOB).spawn() {
-    Err(_) => cmd.creation_flags(flags).spawn(),
-    child => child,
-  }
+  let child = cmd.creation_flags(flags | CREATE_BREAKAWAY_FROM_JOB).spawn();
+  child.or_else(|_| cmd.creation_flags(flags).spawn())
 }
 
 /// Starts the app's folder `app` by its exe, named as this one's, with `args` and `note` in its

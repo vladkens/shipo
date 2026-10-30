@@ -88,7 +88,7 @@ pub fn run(job: &Job) -> ! {
   #[cfg(windows)]
   let setup = imp::setup;
   #[cfg(not(windows))]
-  let setup = |_: &Path| -> io::Result<i32> { Err(io::ErrorKind::Unsupported.into()) };
+  let setup = |_: &Path, _: &Path| -> io::Result<i32> { Err(io::ErrorKind::Unsupported.into()) };
   let rename = |a: &Path, b: &Path| fs::rename(a, b);
   let (wait, start) = (&wait, &imp::start);
   let os = Seams { wait, exchange: &exchange, rename: &rename, setup: &setup, start };
@@ -102,8 +102,8 @@ struct Seams<'a> {
   /// Two paths exchanged in one step: macOS' alone.
   exchange: Rename<'a>,
   rename: Rename<'a>,
-  /// Windows' setup run to its end, its exit code.
-  setup: &'a dyn Fn(&Path) -> io::Result<i32>,
+  /// Windows' setup run to its end into a folder, its exit code.
+  setup: &'a dyn Fn(&Path, &Path) -> io::Result<i32>,
   /// The app at a path started with arguments and an error for its note ([imp::start]).
   start: Start<'a>,
 }
@@ -149,7 +149,7 @@ fn apply(os: Os, job: &Job, s: &Seams) -> io::Result<()> {
 /// than 0 an error; else swapped in, the swap undone if it doesn't start.
 fn put(os: Os, job: &Job, s: &Seams) -> io::Result<()> {
   if os == Os::Windows {
-    return match (s.setup)(&job.new)? {
+    return match (s.setup)(&job.new, &job.target)? {
       0 => (s.start)(&job.target, &job.args, None),
       code => Err(io::Error::other(format!("{} exited with {code}", job.new.display()))),
     };
@@ -335,7 +335,7 @@ mod tests {
     wait: &|_| true,
     exchange: &exchange,
     rename: &rename,
-    setup: &|_| Ok(0),
+    setup: &|_, _| Ok(0),
     start: &|_, _, _| Ok(()),
   };
 
@@ -500,8 +500,8 @@ mod tests {
         RefCell::new(Vec::new()),
         Started::default(),
       );
-      let setup = |exe: &Path| {
-        ran.borrow_mut().push(exe.to_owned());
+      let setup = |exe: &Path, to: &Path| {
+        ran.borrow_mut().push((exe.to_owned(), to.to_owned()));
         code.ok_or_else(|| io::Error::other("no setup"))
       };
       let done = apply(
@@ -509,7 +509,7 @@ mod tests {
         &job,
         &Seams { setup: &setup, start: &starts(&started, false), ..SEAMS },
       );
-      assert_eq!(*ran.borrow(), std::slice::from_ref(&job.new));
+      assert_eq!(*ran.borrow(), [(job.new.clone(), job.target.clone())]);
       let note = done.err().map(|e| e.to_string());
       let why = [
         "",
