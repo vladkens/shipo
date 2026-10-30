@@ -1,7 +1,7 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/shipo
 //! The update's calls on Windows: the file fetched by WinHTTP, the installer started apart from
 //! the app and waiting for it to end, the release's per-user setup run silently, the installed exe
-//! started, the folders its Uninstall keys name.
+//! started, the installs its Uninstall keys name.
 
 use std::ffi::{OsString, c_void};
 use std::fs::File;
@@ -157,11 +157,12 @@ pub fn setup(exe: &Path, to: &Path) -> io::Result<i32> {
   Ok(cmd.status()?.code().unwrap_or(-1))
 }
 
-/// The `InstallLocation` of each `{…}` key under HKCU's Uninstall, as the setup names the app's
-/// (v0.1's NSIS one too): the library doesn't know the app's id, so the folder finds its key.
-pub fn locations() -> Vec<String> {
+/// The `InstallLocation` and `DisplayIcon` (the exe) of each `{…}` key under HKCU's Uninstall, as
+/// the setup names the app's (v0.1's NSIS one too): the library doesn't know the app's id, so the
+/// exe and its folder find its key.
+pub fn installs() -> Vec<(String, String)> {
   let path = wide(r"Software\Microsoft\Windows\CurrentVersion\Uninstall");
-  let (value, mut root, mut found) = (wide("InstallLocation"), null_mut(), vec![]);
+  let (mut root, mut found, mut buf) = (null_mut(), vec![], vec![0u16; 1 << 15]);
   // SAFETY: a NUL-terminated path; the key closed below.
   if unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, path.as_ptr(), 0, KEY_READ, &mut root) } != 0 {
     return found;
@@ -182,14 +183,17 @@ pub fn locations() -> Vec<String> {
       continue;
     }
 
-    let (mut buf, mut len) = ([0u16; 1024], 2048u32);
-    let data = buf.as_mut_ptr().cast();
-    // SAFETY: NUL-terminated names, a buffer of its length in bytes: a longer value fails.
-    let got = unsafe {
-      RegGetValueW(root, key.as_ptr(), value.as_ptr(), RRF_RT_REG_SZ, null_mut(), data, &mut len)
+    // The value's text, up to the longest path Windows takes.
+    let mut get = |value: &str| {
+      let (value, data, mut len) = (wide(value), buf.as_mut_ptr().cast(), 1u32 << 16);
+      // SAFETY: NUL-terminated names, a buffer of its length in bytes.
+      let got = unsafe {
+        RegGetValueW(root, key.as_ptr(), value.as_ptr(), RRF_RT_REG_SZ, null_mut(), data, &mut len)
+      };
+      (got == 0).then(|| String::from_utf16_lossy(&buf[..(len as usize / 2).saturating_sub(1)]))
     };
-    if got == 0 {
-      found.push(String::from_utf16_lossy(&buf[..(len as usize / 2).saturating_sub(1)]));
+    if let (Some(dir), Some(exe)) = (get("InstallLocation"), get("DisplayIcon")) {
+      found.push((dir, exe));
     }
   }
 
