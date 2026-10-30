@@ -249,7 +249,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with: { path: dist } # dist/<target>/hello[.exe]
-      - run: cargo install --locked shipo --version 0.1.0
+      - run: cargo install --locked shipo
       - run: shipo release dist --tag "$GITHUB_REF_NAME"
         env:
           SHIPO_UPDATE_KEY: ${{ secrets.SHIPO_UPDATE_KEY }}
