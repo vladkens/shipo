@@ -1,5 +1,7 @@
 ## v0.1.0 – 2026-10-30
 
+First release: ship your desktop app to macOS, Windows and Linux from one machine, and let it update itself.
+
 ### Features
 
 - Added installers for macOS (DMG), Windows (setup) and Linux (AppImage, .deb), all packed on one Linux machine or Mac.
