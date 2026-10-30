@@ -145,11 +145,16 @@ fn off_unix(kind: &Kind) -> u16 {
   }
 }
 
-/// Whether a file of the first bytes `head` is a program: a Mach-O, thin or fat, or a script.
+/// Whether a file of the first bytes `head` is a program: a Mach-O, thin or fat (32- or 64-bit
+/// offsets), or a script.
 #[cfg_attr(unix, allow(dead_code))]
 fn program(head: &[u8]) -> bool {
-  const MACHO: [[u8; 4]; 3] =
-    [[0xCF, 0xFA, 0xED, 0xFE], [0xCE, 0xFA, 0xED, 0xFE], [0xCA, 0xFE, 0xBA, 0xBE]];
+  const MACHO: [[u8; 4]; 4] = [
+    [0xCF, 0xFA, 0xED, 0xFE],
+    [0xCE, 0xFA, 0xED, 0xFE],
+    [0xCA, 0xFE, 0xBA, 0xBE],
+    [0xCA, 0xFE, 0xBA, 0xBF],
+  ];
   MACHO.iter().any(|m| head.starts_with(m)) || head.starts_with(b"#!")
 }
 
@@ -765,9 +770,10 @@ pub(crate) mod tests {
 
   #[test]
   fn modes_off_unix() {
-    let programs: [(&[u8], bool); 5] = [
+    let programs: [(&[u8], bool); 6] = [
       (&[0xCF, 0xFA, 0xED, 0xFE, 7], true),
       (&[0xCA, 0xFE, 0xBA, 0xBE], true),
+      (&[0xCA, 0xFE, 0xBA, 0xBF], true),
       (b"#!/bin/sh", true),
       (b"<?xml", false),
       (&[0xCF, 0xFA], false),
