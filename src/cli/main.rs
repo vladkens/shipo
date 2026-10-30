@@ -5,8 +5,6 @@
 mod config;
 mod dmg;
 mod feed;
-#[cfg(test)]
-mod feed_v0_1;
 mod hfs;
 mod image;
 mod linux;

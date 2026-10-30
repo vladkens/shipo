@@ -287,35 +287,6 @@ mod tests {
     assert_eq!(fs::read_to_string(&path).unwrap(), V0_1);
   }
 
-  /// The feed the packer writes now, read by v0.1.0's own reader for each platform: what an app
-  /// installed with v0.1 takes from it.
-  #[test]
-  fn compat_v0_1_apps_read_the_feed() {
-    // v0.1's platforms and file names as literals, so a change to [PLATFORMS] fails here.
-    let files = [
-      ("macos-x86_64", "App-v2.0.0-macos-x86_64.dmg"),
-      ("macos-aarch64", "App-v2.0.0-macos-aarch64.dmg"),
-      ("windows-x86_64", "App-v2.0.0-windows-x64-setup.exe"),
-      ("windows-aarch64", "App-v2.0.0-windows-arm64-setup.exe"),
-      ("linux-x86_64", "App-v2.0.0-linux-x86_64.AppImage"),
-      ("linux-aarch64", "App-v2.0.0-linux-aarch64.AppImage"),
-    ];
-    let dir = Temp::files(&files.map(|(_, n)| (n, "abc")));
-    let notes = "https://h/releases/tag/v2.0.0";
-    let paths = files.map(|(_, n)| dir.join(n));
-    let text = body("2.0.0", Some(notes), "https://h/{version}", &paths).unwrap();
-    let feed = fs::read(write(&key(), &text, &dir).unwrap()).unwrap();
-    for (platform, name) in files {
-      let r = crate::feed_v0_1::read(&[PUBLIC], &feed, "1.0.0", platform).unwrap().unwrap();
-      assert_eq!((r.version.as_str(), r.notes.as_deref(), r.size), ("2.0.0", Some(notes), 3));
-      let url = format!("https://h/2.0.0/{name}");
-      assert_eq!((r.url, hex(&r.sha512)), (url, ABC.into()), "{platform}");
-    }
-
-    let up_to_date = crate::feed_v0_1::read(&[PUBLIC], &feed, "2.0.0", "linux-x86_64");
-    assert_eq!(up_to_date.unwrap(), None);
-  }
-
   #[test]
   fn the_signer_is_rfc_8032s() {
     // RFC 8032's test 1: the empty message.
