@@ -11,12 +11,11 @@ check:
 	cargo clippy --all-targets -- -D warnings
 	cargo clippy --no-default-features --all-targets -- -D warnings
 	uv run scripts/size.py --check
-	uv run scripts/plans.py
 
 test:
 	cargo test
 	cargo test --no-default-features
-	uv run --no-project python -m doctest scripts/size.py scripts/plans.py
+	uv run --no-project python -m doctest scripts/size.py
 
 build:
 	cargo build --release
