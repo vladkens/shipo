@@ -1,32 +1,47 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/shipo
 //! The setup's run on Windows: the arch checked, the app installed or uninstalled, the Uninstall
 //! key and the launch-at-login values in the registry, the Start menu shortcut by `IShellLinkW`,
-//! a message box for an error unless `/S`.
+//! a message box for an error unless `/S`; files replaced and removed by the Win32 calls whose
+//! failure on a running exe is certain.
 
 use std::ffi::c_void;
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::ptr::{null, null_mut};
 use std::{env, fs, io};
 
 use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, HANDLE};
+use windows_sys::Win32::Storage::FileSystem::{
+  DeleteFileW, FILE_ATTRIBUTE_READONLY, GetFileAttributesW, INVALID_FILE_ATTRIBUTES,
+  MOVEFILE_REPLACE_EXISTING, MoveFileExW, SetFileAttributesW,
+};
 use windows_sys::Win32::System::Com::{
   CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
 };
+use windows_sys::Win32::System::Diagnostics::Debug::{
+  SEM_FAILCRITICALERRORS, SEM_NOOPENFILEERRORBOX, SetErrorMode,
+};
 use windows_sys::Win32::System::Environment::GetCommandLineW;
+use windows_sys::Win32::System::LibraryLoader::{
+  LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories,
+};
 use windows_sys::Win32::System::Registry::{
   HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SZ,
   RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteKeyValueW, RegDeleteTreeW, RegGetValueW,
   RegSetValueExW,
 };
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, IsWow64Process2};
+use windows_sys::Win32::System::Threading::{
+  CREATE_DEFAULT_ERROR_MODE, GetCurrentProcess, IsWow64Process2,
+};
 use windows_sys::Win32::UI::Shell::{FOLDERID_Programs, SHGetKnownFolderPath, ShellLink};
 use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
 use windows_sys::core::{GUID, HRESULT, PWSTR};
 
 use super::payload::{self, Info};
 use super::{
-  Args, UNINSTALLER, Value, guid, install, own, placeholder, previous, remove, uninstaller, values,
+  Args, RETRY_OWN, UNINSTALLER, Value, folder, guid, install, own, placeholder, previous, remove,
+  retry, uninstaller, values,
 };
 
 const UNINSTALL: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
@@ -35,6 +50,15 @@ const APPROVED: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Star
 
 /// Runs the setup: 0 when it installed or uninstalled, 2 when not, with a message unless `/S`.
 pub fn main() -> ExitCode {
+  // DLLs loaded later only from System32, never the setup's folder (Downloads), where one planted
+  // would run as the user; the imports' own by the link's /DEPENDENTLOADFLAG (build.rs). No
+  // "No disk" box of Windows' own for a drive gone, which a silent update must never show.
+  // SAFETY: process-wide flags, set before anything loads.
+  unsafe {
+    SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
+  }
+
   // SAFETY: the process's own command line, NUL-terminated, alive as long as the process.
   let raw = unsafe {
     let line = GetCommandLineW();
@@ -65,9 +89,10 @@ fn message(title: &str, e: &io::Error) {
 /// message's, once the app's name is known.
 fn run(args: &Args, title: &mut String) -> io::Result<()> {
   let path = env::current_exe()?;
-  let exe = fs::read(&path)?;
+  let exe = retry(RETRY_OWN, || fs::read(&path))?;
   let fields = payload::fields(&placeholder());
-  let (info, mut files, stub) = own(&exe, fields)?;
+  let damaged = |e| io::Error::other(format!("This setup is damaged, download it again: {e}"));
+  let (info, mut files, stub) = own(&exe, fields).map_err(damaged)?;
   let uninstall = files.is_empty();
   *title = format!("{} {}", info.name, if uninstall { "Uninstall" } else { "Setup" });
   if !guid(&info.app_id) {
@@ -76,6 +101,8 @@ fn run(args: &Args, title: &mut String) -> io::Result<()> {
 
   if uninstall {
     let dir = path.parent().ok_or_else(|| io::Error::other("the uninstaller is in no folder"))?;
+    // Explorer starts it in its folder, which then can't go.
+    let _ = env::set_current_dir(env::temp_dir());
     return uninstall_from(dir, &path, &info);
   }
 
@@ -84,13 +111,12 @@ fn run(args: &Args, title: &mut String) -> io::Result<()> {
     return Err(io::Error::other(format!("This setup of {} is for {arch} Windows.", info.name)));
   }
 
-  // An update, `/S` with no `/D=`, goes where the app is.
+  // An update, `/S` with no `/D=`, goes where the app is, if the key holds a [folder].
   let key = format!(r"{UNINSTALL}\{}", info.app_id);
   let location = text(&key, "InstallLocation");
-  let dir = match (args.folder()?, location.as_deref()) {
-    (Some(dir), _) => dir,
-    (None, Some(dir)) if !dir.is_empty() => dir.into(),
-    (None, _) => {
+  let dir = match (args.folder()?, location.as_deref().and_then(folder)) {
+    (Some(dir), _) | (None, Some(dir)) => dir,
+    (None, None) => {
       let local = env::var_os("LOCALAPPDATA").ok_or_else(|| io::Error::other("no LOCALAPPDATA"))?;
       Path::new(&local).join("Programs").join(&info.name)
     }
@@ -113,7 +139,8 @@ fn run(args: &Args, title: &mut String) -> io::Result<()> {
 
   // Installed, whether the app starts or not.
   if !args.silent
-    && let Err(e) = Command::new(&exe).current_dir(&dir).spawn()
+    && let Err(e) =
+      Command::new(&exe).current_dir(&dir).creation_flags(CREATE_DEFAULT_ERROR_MODE).spawn()
   {
     message(title, &e);
   }
@@ -165,6 +192,49 @@ fn fits() -> bool {
     true => native == ARM64,
     false => native == AMD64 || native == ARM64,
   }
+}
+
+// MARK: Files
+
+/// `from` moved over `to`, which a running exe makes fail.
+pub fn move_file(from: &Path, to: &Path) -> io::Result<()> {
+  let (from, wto) = (wide_path(from), wide_path(to));
+  // SAFETY: NUL-terminated paths.
+  writable(to, || {
+    win(unsafe { MoveFileExW(from.as_ptr(), wto.as_ptr(), MOVEFILE_REPLACE_EXISTING) })
+  })
+}
+
+/// The file `path` removed, which a running exe makes fail.
+pub fn delete_file(path: &Path) -> io::Result<()> {
+  let wide = wide_path(path);
+  // SAFETY: a NUL-terminated path.
+  writable(path, || win(unsafe { DeleteFileW(wide.as_ptr()) }))
+}
+
+/// `op` on `path` with its read-only attribute cleared, as NSIS does, set again if `op` fails.
+fn writable(path: &Path, op: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
+  let wide = wide_path(path);
+  // SAFETY: a NUL-terminated path.
+  let attrs = unsafe { GetFileAttributesW(wide.as_ptr()) };
+  let locked = attrs != INVALID_FILE_ATTRIBUTES && attrs & FILE_ATTRIBUTE_READONLY != 0;
+  if locked {
+    // SAFETY: a NUL-terminated path.
+    unsafe { SetFileAttributesW(wide.as_ptr(), attrs & !FILE_ATTRIBUTE_READONLY) };
+  }
+
+  let done = op();
+  if locked && done.is_err() {
+    // SAFETY: a NUL-terminated path.
+    unsafe { SetFileAttributesW(wide.as_ptr(), attrs) };
+  }
+
+  done
+}
+
+/// A Win32 call's BOOL, its last error when false.
+fn win(ok: i32) -> io::Result<()> {
+  if ok != 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
 }
 
 // MARK: Registry

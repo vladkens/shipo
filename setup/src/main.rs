@@ -19,12 +19,16 @@ mod payload;
 mod windows;
 
 use std::ffi::OsString;
+#[cfg(not(windows))]
+use std::fs::{remove_file as delete_file, rename as move_file};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use std::{fs, io, thread};
 
 use payload::{Files, Info, PLACEHOLDER};
+#[cfg(windows)]
+use windows::{delete_file, move_file};
 
 /// Where the payload is: patched by the packer, read as it is in the file ([placeholder]).
 #[used]
@@ -37,6 +41,8 @@ const UNINSTALLER: &str = "Uninstall.exe";
 const LICENSE: &str = "LICENSE.txt";
 /// How long a file in use is tried again: the app that just quit may hold its exe a moment.
 const RETRY: Duration = Duration::from_secs(5);
+/// How long the setup's own file is tried again: an antivirus may hold it a moment after download.
+const RETRY_OWN: Duration = Duration::from_millis(1500);
 
 fn main() -> std::process::ExitCode {
   #[cfg(windows)]
@@ -76,17 +82,23 @@ impl Args {
     Self { silent, dir }
   }
 
-  /// The folder of `/D=`, which must be absolute: a drive's (`C:\…`) or a share's (`\\…`).
+  /// The folder of `/D=`, which must be a [folder].
   fn folder(&self) -> io::Result<Option<PathBuf>> {
     let Some(dir) = &self.dir else { return Ok(None) };
-    let b = dir.as_bytes();
-    let drive =
-      b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/');
-    match drive || dir.starts_with(r"\\") && dir.len() > 2 {
-      true => Ok(Some(dir.into())),
-      false => Err(io::Error::other(format!("/D= takes an absolute folder, not {dir:?}"))),
-    }
+    let e = || io::Error::other(format!("/D= takes an absolute folder, not {dir:?}"));
+    folder(dir).map(Some).ok_or_else(e)
   }
+}
+
+/// `dir` if it is an absolute folder below a drive's root (`C:\…`) or a share's
+/// (`\\server\share\…`), never the root itself, which an uninstall would empty.
+fn folder(dir: &str) -> Option<PathBuf> {
+  let trimmed = dir.trim_end_matches(['\\', '/']);
+  let b = trimmed.as_bytes();
+  let drive =
+    b.len() > 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/');
+  let share = trimmed.strip_prefix(r"\\").is_some_and(|s| s.split(['\\', '/']).count() >= 3);
+  (drive || share).then(|| dir.into())
 }
 
 /// Whether `id` is a GUID in braces, as the packer writes the Uninstall key's name.
@@ -152,9 +164,9 @@ fn unsigned(exe: &mut [u8]) {
   exe[opt + 64..opt + 68].copy_from_slice(&sum.to_le_bytes());
 }
 
-/// `op` until it succeeds, tried again for [RETRY]; its last error then.
-fn retry<T>(mut op: impl FnMut() -> io::Result<T>) -> io::Result<T> {
-  let end = Instant::now() + RETRY;
+/// `op` until it succeeds, tried again for `within`; its last error then.
+fn retry<T>(within: Duration, mut op: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+  let end = Instant::now() + within;
   loop {
     match op() {
       Err(e) if e.kind() != io::ErrorKind::NotFound && Instant::now() < end => {
@@ -179,7 +191,7 @@ fn put(dir: &Path, files: &[(String, Vec<u8>)]) -> io::Result<u64> {
       return Err(e);
     }
 
-    if let Err(e) = retry(|| fs::rename(&part, &path)) {
+    if let Err(e) = retry(RETRY, || move_file(&part, &path)) {
       let _ = fs::remove_file(&part);
       return Err(in_use(&path, e));
     }
@@ -238,7 +250,7 @@ fn install(
   let size = put(dir, files)?;
   let license = dir.join(LICENSE);
   if licensed && !files.iter().any(|(n, _)| n == LICENSE) && license.is_file() {
-    retry(|| fs::remove_file(&license))?;
+    retry(RETRY, || delete_file(&license))?;
   }
 
   key(size)?;
@@ -253,7 +265,7 @@ fn install(
 /// so does the folder. A named file is only ever a file: a folder of that name stays.
 fn remove(dir: &Path, info: &Info, moved: impl FnOnce() -> bool) -> io::Result<()> {
   let exe = dir.join(format!("{}.exe", info.name));
-  match retry(|| fs::remove_file(&exe)) {
+  match retry(RETRY, || delete_file(&exe)) {
     Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(in_use(&exe, e)),
     _ => {}
   }
@@ -279,8 +291,8 @@ fn remove(dir: &Path, info: &Info, moved: impl FnOnce() -> bool) -> io::Result<(
 
   // A folder of a named file's name is not the setup's.
   files.retain(|f| !fs::symlink_metadata(f).is_ok_and(|m| m.is_dir()));
-  let removed = files.iter().map(|f| retry(|| fs::remove_file(f)));
-  let removed = removed.chain(folders.iter().map(|f| retry(|| fs::remove_dir_all(f))));
+  let removed = files.iter().map(|f| retry(RETRY, || delete_file(f)));
+  let removed = removed.chain(folders.iter().map(|f| retry(RETRY, || fs::remove_dir_all(f))));
   let mut done = Ok(());
   for result in removed {
     match result {
@@ -368,7 +380,10 @@ mod tests {
       assert_eq!(folder(ok).unwrap(), Some(PathBuf::from(ok)), "{ok}");
     }
 
-    for no in ["", "Hello", r"Apps\Hello", "C:", "C:Apps", r"\Apps", r"\\"] {
+    // A root never: an uninstall would empty it.
+    let roots = [r"C:\", "d:/", r"C:\\", r"\\server\share", r"\\server\share\"];
+    for no in ["", "Hello", r"Apps\Hello", "C:", "C:Apps", r"\Apps", r"\\"].into_iter().chain(roots)
+    {
       let e = folder(no).unwrap_err().to_string();
       assert_eq!(e, format!("/D= takes an absolute folder, not {no:?}"));
     }
