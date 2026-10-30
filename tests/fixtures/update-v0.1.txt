@@ -1,0 +1,9 @@
+version 1.2.0
+notes https://github.com/me/app/releases/tag/v1.2.0
+macos-x86_64 3 ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f https://github.com/me/app/releases/download/v1.2.0/App-v1.2.0-macos-x86_64.dmg
+macos-aarch64 3 ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f https://github.com/me/app/releases/download/v1.2.0/App-v1.2.0-macos-aarch64.dmg
+windows-x86_64 3 ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f https://github.com/me/app/releases/download/v1.2.0/App-v1.2.0-windows-x64-setup.exe
+windows-aarch64 3 ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f https://github.com/me/app/releases/download/v1.2.0/App-v1.2.0-windows-arm64-setup.exe
+linux-x86_64 3 ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f https://github.com/me/app/releases/download/v1.2.0/App-v1.2.0-linux-x86_64.AppImage
+linux-aarch64 3 ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f https://github.com/me/app/releases/download/v1.2.0/App-v1.2.0-linux-aarch64.AppImage
+sig 431c20d3ce304b6def8164e80a61c33d9fd86db527cc4dcd37d52cb68e913aea82ad0afc7828fd34927c919749cda82c7c85b13787dc1a16d933d0cbdf7f1b04

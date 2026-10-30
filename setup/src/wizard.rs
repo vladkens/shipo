@@ -1,6 +1,9 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/shipo
 //! The setup's wizard when not silent, NSIS MUI2's pages in plain Win32: Welcome, the folder, the
-//! progress with its log and Finish; for the uninstaller, confirm, progress and Finish.
+//! progress with its log and Finish; for the uninstaller, confirm, progress and Finish. An update's
+//! folder is fixed, as its old copy would stay. Cancel, Esc and the close box end it with nothing
+//! changed (exit code 1) before the work and do nothing during it; Finish offers "Run" (checked)
+//! and a desktop shortcut (not).
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;

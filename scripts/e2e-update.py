@@ -261,7 +261,7 @@ def in_use(packed: Path, exe: Path) -> None:
 
 
 def uninstall(exe: Path) -> None:
-  """Windows: the install as spec.md has it, then removed by its QuietUninstallString: the folder,
+  """Windows: the install as the setup makes it, then removed by its QuietUninstallString: the folder,
   the key, the Start menu entry and the launch at login all gone."""
   import winreg
 
@@ -278,7 +278,7 @@ def uninstall(exe: Path) -> None:
 
   wrong = {k: (key or {}).get(k) for k, v in want.items() if (key or {}).get(k) != v}
   if wrong or not lnk.is_file() or not (folder / "LICENSE.txt").is_file():
-    sys.exit(f"e2e: the install is not spec.md's: {wrong}, {lnk} {lnk.is_file()}")
+    sys.exit(f"e2e: the install is not the setup's: {wrong}, {lnk} {lnk.is_file()}")
 
   # Our key alone, whole, and our files alone, whatever installed 1.0.0 (an NSIS setup).
   names = {*want, "DisplayName", "DisplayVersion", "Publisher", "UninstallString", "EstimatedSize"}
@@ -288,7 +288,7 @@ def uninstall(exe: Path) -> None:
   if keys != 1 or set(key) != names or files != ["Hello.exe", "LICENSE.txt", "Uninstall.exe"] or not ours:
     sys.exit(f"e2e: not ours alone: {keys} keys, {sorted(key)}, {files}, our uninstaller {ours}")
 
-  log(f"installed as spec.md has it: {sorted(key)}")
+  log(f"installed as the setup makes it: {sorted(key)}")
   with winreg.CreateKey(winreg.HKEY_CURRENT_USER, RUN) as run_key:
     winreg.SetValueEx(run_key, ID, 0, winreg.REG_SZ, f'"{exe}"')
 

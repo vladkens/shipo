@@ -1,6 +1,6 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/shipo
 //! The Windows setup: the app's exe given its icon, version and manifest, and the per-user setup
-//! of it, our stub (setup/) with the app appended, as spec.md's Windows section gives it.
+//! of it, our stub (setup/) with the app appended.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -700,8 +700,9 @@ pub(crate) mod tests {
     }
   }
 
+  /// The AppId names the Uninstall key a newer setup finds an older install by, v0.1's too.
   #[test]
-  fn ids() {
+  fn compat_app_ids() {
     assert_eq!(sha1(b"abc")[..4], [0xA9, 0x99, 0x3E, 0x36]);
     let long = sha1(&[b'a'; 1000]);
     assert_eq!(tool::hex(&long), "291e9a6c66994949b57ba5e650361e98fc36b1ba");
