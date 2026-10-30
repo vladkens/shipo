@@ -89,7 +89,7 @@ jobs:
         with:
           pattern: e2e-packed-*
           path: packed
-      - run: cargo test --all-features -- --include-ignored
+      - run: cargo test -- --include-ignored
         env:
           SHIPO_TEST_MACHO: ${{ github.workspace }}/macos/1.0.0/aarch64-apple-darwin/hello
           SHIPO_SETUP_STUB_X64: ${{ github.workspace }}/stub/shipo-setup-x64.exe
