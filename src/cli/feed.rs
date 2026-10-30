@@ -287,6 +287,27 @@ mod tests {
     assert_eq!(fs::read_to_string(&path).unwrap(), V0_1);
   }
 
+  /// The feed the packer writes now, read by v0.1.0's own reader for each platform: what an app
+  /// installed with v0.1 takes from it.
+  #[test]
+  fn compat_v0_1_apps_read_the_feed() {
+    let names = PLATFORMS.map(|(_, end)| format!("App-v2.0.0{end}"));
+    let dir = Temp::files(&names.each_ref().map(|n| (n.as_str(), "abc")));
+    let notes = "https://h/releases/tag/v2.0.0";
+    let files = names.map(|n| dir.join(n));
+    let text = body("2.0.0", Some(notes), "https://h/{version}", &files).unwrap();
+    let feed = fs::read(write(&key(), &text, &dir).unwrap()).unwrap();
+    for (platform, end) in PLATFORMS {
+      let r = crate::feed_v0_1::read(&[PUBLIC], &feed, "1.0.0", platform).unwrap().unwrap();
+      assert_eq!((r.version.as_str(), r.notes.as_deref(), r.size), ("2.0.0", Some(notes), 3));
+      let url = format!("https://h/2.0.0/App-v2.0.0{end}");
+      assert_eq!((r.url, hex(&r.sha512)), (url, ABC.into()), "{platform}");
+    }
+
+    let up_to_date = crate::feed_v0_1::read(&[PUBLIC], &feed, "2.0.0", "linux-x86_64");
+    assert_eq!(up_to_date.unwrap(), None);
+  }
+
   #[test]
   fn the_signer_is_rfc_8032s() {
     // RFC 8032's test 1: the empty message.
