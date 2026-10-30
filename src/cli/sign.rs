@@ -363,7 +363,9 @@ pub fn notary(cfg: &Config, dmg: &Path) -> io::Result<()> {
 #[cfg(test)]
 pub(crate) mod tests {
   use super::*;
+  #[cfg(unix)]
   use crate::macos::bundle;
+  #[cfg(unix)]
   use crate::macos::tests::test_app;
 
   #[test]

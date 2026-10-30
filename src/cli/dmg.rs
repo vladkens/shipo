@@ -333,6 +333,7 @@ fn blob(data: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 pub(crate) mod tests {
   use std::env;
+  #[cfg(unix)]
   use std::process::Command;
 
   use super::*;
@@ -341,7 +342,9 @@ pub(crate) mod tests {
   #[cfg(target_os = "macos")]
   use crate::hfs::tests::{Attached, same};
   use crate::sign::NOTARY;
-  use crate::tool::{Temp, run};
+  use crate::tool::Temp;
+  #[cfg(unix)]
+  use crate::tool::run;
 
   /// A bundle `Hello.app` in `dir` of this test's binary, signed ad hoc by codesign, as `app` signs
   /// with no identity: Gatekeeper's checks run on a real signature.
