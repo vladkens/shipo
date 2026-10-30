@@ -407,9 +407,8 @@ LSEnvironment = { HELLO_MODE = "quiet" }
 </plist>
 "#;
 
-  /// The bundle id (`id`) and executable name (`bin`) a release keeps, for an older app to take it.
   #[test]
-  fn compat_info_plist() {
+  fn info_plist() {
     let cfg = config(Path::new("/app"), MACOS);
     assert_eq!(String::from_utf8(xml(&info(&cfg, "11.0").unwrap()).unwrap()).unwrap(), INFO);
 
@@ -417,6 +416,16 @@ LSEnvironment = { HELLO_MODE = "quiet" }
     let keys = plain.as_dictionary().unwrap();
     assert_eq!(keys.len(), 12);
     assert!(!keys.contains_key("LSUIElement"));
+  }
+
+  /// The bundle id and executable name, which a release keeps for an older app to take it.
+  #[test]
+  fn compat_bundle_id_and_executable() {
+    let info = info(&config(Path::new("/app"), ""), "11.0").unwrap();
+    let keys = info.as_dictionary().unwrap();
+    let get = |k| keys.get(k).and_then(Plist::as_string);
+    assert_eq!(get("CFBundleIdentifier"), Some("com.example.hello"));
+    assert_eq!(get("CFBundleExecutable"), Some("hello"));
   }
 
   #[test]

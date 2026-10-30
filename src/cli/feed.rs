@@ -291,7 +291,7 @@ mod tests {
   /// installed with v0.1 takes from it.
   #[test]
   fn compat_v0_1_apps_read_the_feed() {
-    // v0.1's platforms and file names, not [PLATFORMS], which may change.
+    // v0.1's platforms and file names as literals, so a change to [PLATFORMS] fails here.
     let files = [
       ("macos-x86_64", "App-v2.0.0-macos-x86_64.dmg"),
       ("macos-aarch64", "App-v2.0.0-macos-aarch64.dmg"),

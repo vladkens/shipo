@@ -9,7 +9,7 @@ Each fact has one source: the feed's format is the readme's Feed, the API the ru
 - Change the public API or the CLI only with the person's approval. A public struct with public fields is `#[non_exhaustive]`.
 - An app installed with an older library must update to every newer release. What it relies on changes only with the person's approval and never breaks it, each pinned by a `compat_*` test:
   - the feed and the release file names, also by `tests/fixtures/`: a new feed record adds a fixture and keeps v0.1.0's frozen reader passing;
-  - the DMG's one top-level `.app`, its bundle id and its executable name;
+  - the DMG's one top-level `.app`, its bundle id, its executable name and its `<Name> Local Signing` identity name;
   - the `.deb`'s version order;
   - the installer handoff: the `--shipo-install` command line and staging folder, the setup's `/S /D=`, its exit codes and its Uninstall key.
 - The library has no UI and no state of its own: it never shows a window, dialog or notification or takes the focus; the app draws everything and keeps its settings.

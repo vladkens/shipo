@@ -43,7 +43,7 @@ pub fn identity(cfg: &Config, tag: Option<&str>) -> io::Result<Identity> {
     Ok(String::from_utf8_lossy(&run(cmd.args(["-p", "codesigning"]))?).into_owned())
   };
 
-  let local = format!("{} Local Signing", cfg.name);
+  let local = local(&cfg.name);
   let id = choose(&find(true)?, &find(false)?, &local, tag)?;
   if id.make {
     make_identity(&local)?;
@@ -55,6 +55,11 @@ pub fn identity(cfg: &Config, tag: Option<&str>) -> io::Result<Identity> {
   }
 
   Ok(id)
+}
+
+/// The self-signed identity's name of the app `name`, which an older dev build's update needs.
+fn local(name: &str) -> String {
+  format!("{name} Local Signing")
 }
 
 /// A code signing identity in the keychain.
@@ -380,6 +385,11 @@ pub(crate) mod tests {
     assert_eq!(got(untrusted, &other, None), id(local, local, false, true));
     let refused = "v1.2.0 is a release, signed by a Developer ID: the keychain has none";
     assert_eq!(got(untrusted, untrusted, Some("v1.2.0")), Err(refused.into()));
+  }
+
+  #[test]
+  fn compat_local_identity() {
+    assert_eq!(local("Hello"), "Hello Local Signing");
   }
 
   #[test]
