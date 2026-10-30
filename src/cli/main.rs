@@ -9,6 +9,7 @@ mod hfs;
 mod image;
 mod linux;
 mod macos;
+mod payload;
 mod sign;
 mod tool;
 mod unicode;

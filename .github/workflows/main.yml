@@ -39,11 +39,28 @@ jobs:
           PYTHONUTF8: 1 # the scripts read the sources as UTF-8 on Windows too
       - run: make test
 
-  # On Ubuntu with the tools apt has: the packer's ignored tests (the real setup by makensis, the
-  # .deb and the AppImage read back, rcodesign fetched pinned, signing the Mac's binary), and the
-  # DMGs e2e-macos made, unpacked by dmg2img and checked by fsck.hfsplus (hfsprogs).
+  # The setup stubs the packer embeds, stubs/, built again from source as `make setup` builds
+  # them (scripts/setup-stub.py): the same bytes as stubs/SHA256SUMS, or the job fails. On a Mac,
+  # as `make setup` runs: Windows' and Linux's rustc lay the functions out in another order.
+  setup:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - run: cargo install cargo-xwin --locked --version 0.23.1
+      - run: uv run scripts/setup-stub.py --check
+      - if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: setup-stub-built
+          path: setup/target/bin/
+
+  # On Ubuntu with the tools apt has: the packer's ignored tests (the .deb and the AppImage read
+  # back, rcodesign fetched pinned, signing the Mac's binary), and the DMGs and .debs each host
+  # packed, read by dmg2img and fsck.hfsplus (hfsprogs) and dpkg-deb.
   packages:
-    needs: e2e-macos
+    needs: e2e-pack
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -51,25 +68,36 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.event_name != 'pull_request' }}
-      - run: sudo apt-get update && sudo apt-get install -y nsis squashfs-tools desktop-file-utils hfsprogs dmg2img
+      - run: sudo apt-get update && sudo apt-get install -y squashfs-tools desktop-file-utils hfsprogs dmg2img
       - uses: actions/download-artifact@v8
         with:
-          name: e2e-macos
+          name: e2e-bin-macOS
           path: macos
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: e2e-packed-*
+          path: packed
       - run: cargo test -- --include-ignored
         env:
           SHIPO_TEST_MACHO: ${{ github.workspace }}/macos/1.0.0/aarch64-apple-darwin/hello
       - run: |
-          for dmg in macos/*/*.dmg; do
+          for dmg in packed/*/*/*.dmg; do
             dmg2img -i "$dmg" -o "${dmg%.dmg}.img"
             fsck.hfsplus -n "${dmg%.dmg}.img"
           done
+          for deb in packed/*/*/*.deb; do dpkg-deb --info "$deb"; done
 
-  # The end-to-end update (scripts/e2e-update.py): examples/update.rs at 1.0.0 and 2.0.0, packed by
-  # shipo, 1.0.0 installed on each OS and updated in place from 2.0.0's feed served on loopback.
-  # The Windows binaries are built here and packed on Ubuntu, where makensis is.
+  # The end-to-end update (scripts/e2e-update.py): examples/update.rs at 1.0.0 and 2.0.0 built on
+  # each OS, packed by shipo on each OS, 1.0.0 installed and updated in place from 2.0.0's feed
+  # served on loopback, the packages of every packing host on Windows and Linux. The DMG updates
+  # on the Mac that packed it: 1.0.0 takes only a 2.0.0 signed by its own identity, here "Hello
+  # Local Signing", made by the script in a keychain codesign uses without a prompt.
   e2e-bin:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -81,13 +109,17 @@ jobs:
       - run: uv run scripts/e2e-update.py build e2e
       - uses: actions/upload-artifact@v7
         with:
-          name: e2e-windows
+          name: e2e-bin-${{ runner.os }}
           path: e2e/
           if-no-files-found: error
 
   e2e-pack:
     needs: e2e-bin
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -96,20 +128,23 @@ jobs:
           key: e2e
           save-if: ${{ github.event_name != 'pull_request' }}
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-      - run: sudo apt-get update && sudo apt-get install -y nsis squashfs-tools
-      - run: uv run scripts/e2e-update.py build e2e
       - uses: actions/download-artifact@v8
         with:
-          name: e2e-windows
+          pattern: e2e-bin-*
+          merge-multiple: true
           path: e2e
       - run: uv run scripts/e2e-update.py pack e2e
       - uses: actions/upload-artifact@v7
         with:
-          name: e2e-packed
+          name: e2e-packed-${{ runner.os }}
           path: |
             e2e/
             !e2e/target/
+            !e2e/*.keychain-db
+            !e2e/signing.*
           if-no-files-found: error
+      - if: runner.os == 'macOS'
+        run: uv run scripts/e2e-update.py run e2e
 
   e2e:
     needs: e2e-pack
@@ -117,6 +152,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+        packer: [Linux, macOS, Windows]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
@@ -124,32 +160,29 @@ jobs:
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       - uses: actions/download-artifact@v8
         with:
-          name: e2e-packed
+          name: e2e-packed-${{ matrix.packer }}
           path: e2e
       - run: uv run scripts/e2e-update.py run e2e
 
-  # The DMG is packed on the Mac that runs it: 1.0.0 takes only a 2.0.0 signed by its own identity,
-  # here "Hello Local Signing", made by the script in a keychain codesign uses without a prompt.
-  e2e-macos:
+  # The DMGs packed off a Mac, signed ad hoc: read by hdiutil, the app run from the image.
+  e2e-dmg:
+    needs: e2e-pack
     runs-on: macos-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v8
         with:
-          key: e2e
-          save-if: ${{ github.event_name != 'pull_request' }}
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-      - run: uv run scripts/e2e-update.py build e2e
-      - run: uv run scripts/e2e-update.py pack e2e
-      - uses: actions/upload-artifact@v7
-        with:
-          name: e2e-macos
-          path: |
-            e2e/*/*.dmg
-            e2e/1.0.0/aarch64-apple-darwin/hello
-          if-no-files-found: error
-      - run: uv run scripts/e2e-update.py run e2e
+          pattern: e2e-packed-*
+          path: packed
+      - run: |
+          for dmg in packed/e2e-packed-{Linux,Windows}/*/*.dmg; do
+            hdiutil verify -quiet "$dmg"
+            hdiutil attach -nobrowse -readonly -mountpoint mnt "$dmg"
+            codesign --verify --strict mnt/Hello.app
+            test -x mnt/Hello.app/Contents/MacOS/hello
+            echo "$dmg: $(mnt/Hello.app/Contents/MacOS/hello)"
+            hdiutil detach mnt
+          done
 
   # The shared release steps, as in wavo: `build` builds the packer's binaries read-only; on main
   # `publish` puts them up as the `dev` pre-release, and a `release: vX.Y.Z (#N)` commit publishes
@@ -166,7 +199,7 @@ jobs:
 
   publish:
     if: github.ref == 'refs/heads/main' # write rights only for main's own workflow
-    needs: [test, packages, e2e, e2e-macos, build]
+    needs: [test, setup, packages, e2e, e2e-pack, e2e-dmg, build]
     runs-on: ubuntu-latest # no build here, and Linux runners start faster
     permissions:
       attestations: write

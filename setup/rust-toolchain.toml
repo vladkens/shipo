@@ -1,0 +1,6 @@
+# The exact rustc of the stubs in stubs/, so any Mac builds the same bytes (scripts/setup-stub.py;
+# Windows' and Linux's rustc lay them out otherwise); nightly for -Zlocation-detail=none.
+[toolchain]
+channel = "nightly-2026-09-27"
+profile = "minimal"
+targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]

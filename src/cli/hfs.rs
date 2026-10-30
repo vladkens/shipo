@@ -107,7 +107,8 @@ impl Entry {
 
 /// The permission bits and owners of `meta`, the bits set as the writer's own, never the build
 /// host's `umask` (a 0700 bundle opens for its owner alone): folders and files with an execute
-/// bit 0755, other files 0644, links as they are. Off Unix the owners are 0 and no file executes.
+/// bit 0755, other files 0644, links as they are. Off Unix, which keeps no mode on disk, the
+/// owners are 0 and a file executes when [program] says so.
 fn owner(meta: &fs::Metadata, kind: &Kind) -> (u16, u32, u32) {
   #[cfg(unix)]
   let (mode, uid, gid) = {
@@ -115,7 +116,7 @@ fn owner(meta: &fs::Metadata, kind: &Kind) -> (u16, u32, u32) {
     ((meta.mode() & 0o7777) as u16, meta.uid(), meta.gid())
   };
   #[cfg(not(unix))]
-  let (mode, uid, gid, _) = (if matches!(kind, Kind::File(_)) { 0o644 } else { 0o755 }, 0, 0, meta);
+  let (mode, uid, gid, _) = (off_unix(kind), 0, 0, meta);
 
   let mode = match kind {
     Kind::Link(_) => mode,
@@ -124,6 +125,37 @@ fn owner(meta: &fs::Metadata, kind: &Kind) -> (u16, u32, u32) {
   };
 
   (mode, uid, gid)
+}
+
+/// The mode off Unix of an entry: 0755 for a folder, a link and a [program] on disk, else 0644.
+#[cfg_attr(unix, allow(dead_code))]
+fn off_unix(kind: &Kind) -> u16 {
+  let head = match kind {
+    Kind::File(Data::Disk(path, _)) => {
+      let mut head = [0; 4];
+      let read = fs::File::open(path).and_then(|mut f| io::Read::read(&mut f, &mut head));
+      head[..read.unwrap_or(0)].to_vec()
+    }
+    _ => vec![],
+  };
+
+  match kind {
+    Kind::File(_) if !program(&head) => 0o644,
+    _ => 0o755,
+  }
+}
+
+/// Whether a file of the first bytes `head` is a program: a Mach-O, thin or fat (32- or 64-bit
+/// offsets), or a script.
+#[cfg_attr(unix, allow(dead_code))]
+fn program(head: &[u8]) -> bool {
+  const MACHO: [[u8; 4]; 4] = [
+    [0xCF, 0xFA, 0xED, 0xFE],
+    [0xCE, 0xFA, 0xED, 0xFE],
+    [0xCA, 0xFE, 0xBA, 0xBE],
+    [0xCA, 0xFE, 0xBA, 0xBF],
+  ];
+  MACHO.iter().any(|m| head.starts_with(m)) || head.starts_with(b"#!")
 }
 
 // MARK: Names
@@ -734,6 +766,32 @@ pub(crate) mod tests {
     assert_eq!(nfd("Wavö:1").unwrap(), "Wavo\u{308}:1");
     assert!(units(&"x".repeat(256)).is_err());
     assert!(units(&"x".repeat(255)).is_ok());
+  }
+
+  #[test]
+  fn modes_off_unix() {
+    let programs: [(&[u8], bool); 6] = [
+      (&[0xCF, 0xFA, 0xED, 0xFE, 7], true),
+      (&[0xCA, 0xFE, 0xBA, 0xBE], true),
+      (&[0xCA, 0xFE, 0xBA, 0xBF], true),
+      (b"#!/bin/sh", true),
+      (b"<?xml", false),
+      (&[0xCF, 0xFA], false),
+    ];
+
+    for (head, want) in programs {
+      assert_eq!(program(head), want, "{head:?}");
+    }
+
+    let tmp = crate::tool::Temp::new().unwrap();
+    fs::write(tmp.join("exe"), [0xCF, 0xFA, 0xED, 0xFE, 7]).unwrap();
+    fs::write(tmp.join("plist"), "<?xml").unwrap();
+    let disk = |name: &str| Kind::File(Data::Disk(tmp.join(name), 5));
+    assert_eq!(off_unix(&disk("exe")), 0o755);
+    assert_eq!(off_unix(&disk("plist")), 0o644);
+    assert_eq!(off_unix(&Kind::File(Data::Bytes(vec![0xCF, 0xFA, 0xED, 0xFE]))), 0o644);
+    assert_eq!(off_unix(&Kind::Dir(vec![])), 0o755);
+    assert_eq!(off_unix(&Kind::Link("x".into())), 0o755);
   }
 
   #[test]

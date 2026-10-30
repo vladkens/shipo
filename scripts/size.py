@@ -24,7 +24,7 @@ from collections import defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DIRS = tuple(d for d in ("src", "examples", "tests") if (ROOT / d).is_dir())
+DIRS = tuple(d for d in ("src", "setup/src", "examples", "tests") if (ROOT / d).is_dir())
 EXTS = (".rs",)
 KINDS = ("code", "docs", "comments", "tests", "blank")
 # The parts, each with its files (`*` stays within a directory, `{a,b}` is either) and the code
@@ -38,11 +38,13 @@ PARTS = {
   # The library's OS code: each OS, the shared Unix code and the dispatch.
   "library/platform": (500, ("src/platform/*.rs",)),
   # The packer's commands, config, tools, feed and icons.
-  "packer": (1300, ("src/cli/{main,config,tool,feed,image}.rs",)),
+  "packer": (1400, ("src/cli/{main,config,tool,feed,image}.rs",)),
   # The .app bundle, its signing and the DMG with its HFS+ volume, written ourselves.
   "packer/macos": (1300, ("src/cli/{macos,sign,dmg,hfs}.rs",)),
   # The setup and the exe's resources.
-  "packer/windows": (700, ("src/cli/windows.rs",)),
+  "packer/windows": (600, ("src/cli/windows.rs",)),
+  # The setup stub, which installs and uninstalls the app on Windows, and its payload's format.
+  "setup": (700, ("setup/src/*.rs", "src/cli/payload.rs")),
   # The AppImage with its squashfs, and the .deb.
   "packer/linux": (600, ("src/cli/linux.rs",)),
 }

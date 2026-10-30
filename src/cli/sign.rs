@@ -157,19 +157,20 @@ pub fn codesign(bundle: &Path, args: &[OsString]) -> io::Result<()> {
 /// The secrets of the Developer ID certificate: a base64 `.p12` and its password.
 pub const CERT: [&str; 2] = ["APPLE_CERTIFICATE", "APPLE_CERTIFICATE_PASSWORD"];
 
-/// rcodesign (apple-codesign 0.29.0, 2024-11-29) by the triple it runs on, and its tarball's
-/// SHA-256 as the release's SHA256SUMS gives it.
+/// rcodesign (apple-codesign 0.29.0, 2024-11-29) by the triple it runs on, and its archive's
+/// SHA-256 as the release's SHA256SUMS gives it: a tarball, a zip on Windows.
 const RCODESIGN: &str = concat!(
   "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign/0.29.0/",
-  "apple-codesign-0.29.0-{triple}.tar.gz",
+  "apple-codesign-0.29.0-{triple}",
 );
-const RCODESIGN_SHA256: [(&str, &str); 3] = [
+const RCODESIGN_SHA256: [(&str, &str); 4] = [
   ("x86_64-unknown-linux-musl", "dbe85cedd8ee4217b64e9a0e4c2aef92ab8bcaaa41f20bde99781ff02e600002"),
   (
     "aarch64-unknown-linux-musl",
     "4af92c87ddf52f5f2d1258a3b4e56c7dcb8f1b2468df744976c5f139e031961f",
   ),
   ("aarch64-apple-darwin", "d1a532150adaf90048260d76359261aa716abafc45c53c5dc18845029184334a"),
+  ("x86_64-pc-windows-msvc", "54bb500e2da7a8de02fcae0f331d1cac6e6d7173b4281042ff9c528ba3159aaa"),
 ];
 
 /// Whether each of `names` is set in the environment; with a release's `tag`, one missing is an
@@ -189,23 +190,30 @@ pub fn secrets(names: &[&str], tag: Option<&str>) -> io::Result<bool> {
   Ok(missing.is_empty())
 }
 
-/// rcodesign for this host, its tarball fetched into `tools` once, pinned by SHA-256.
+/// rcodesign for this host, its archive fetched into `tools` once, pinned by SHA-256.
 pub fn rcodesign(tools: &Path) -> io::Result<PathBuf> {
-  let os = match env::consts::OS {
-    "macos" => "apple-darwin",
-    _ => "unknown-linux-musl",
+  let (os, ext, exe) = match env::consts::OS {
+    "macos" => ("apple-darwin", ".tar.gz", ""),
+    "windows" => ("pc-windows-msvc", ".zip", ".exe"),
+    _ => ("unknown-linux-musl", ".tar.gz", ""),
   };
 
-  let triple = format!("{}-{os}", env::consts::ARCH);
+  // Windows on arm64 runs the x64 build, as no arm64 one is released.
+  let arch = if os == "pc-windows-msvc" { "x86_64" } else { env::consts::ARCH };
+  let triple = format!("{arch}-{os}");
   let Some(&(_, sha256)) = RCODESIGN_SHA256.iter().find(|(t, _)| *t == triple) else {
     return Err(bad(format!("no rcodesign is pinned for {triple}")));
   };
 
-  let url = RCODESIGN.replace("{triple}", &triple);
+  let url = RCODESIGN.replace("{triple}", &triple) + ext;
   let name = url.rsplit('/').next().unwrap_or_default();
-  let tarball = tool::fetch(&url, sha256, &tools.join(name))?;
-  let member = format!("apple-codesign-0.29.0-{triple}/rcodesign");
-  tool::untar(&tarball, &member, &tools.join("rcodesign"))
+  let archive = tool::fetch(&url, sha256, &tools.join(name))?;
+  let member = format!("apple-codesign-0.29.0-{triple}/rcodesign{exe}");
+  let path = tools.join(format!("rcodesign{exe}"));
+  match ext {
+    ".zip" => tool::unzip(&archive, &member, &path),
+    _ => tool::untar(&archive, &member, &path),
+  }
 }
 
 /// Signs `bundle` by rcodesign with the hardened runtime and `entitlements`: `signed` by the

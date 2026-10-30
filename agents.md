@@ -1,6 +1,6 @@
 # shipo
 
-Releases and updates for desktop apps. The packer (`src/cli/`, the `shipo` binary) turns an app's bare binaries for macOS, Windows and Linux into signed installers and a signed update feed, on a Linux or macOS host. The library (the rest of `src/`, the `shipo` library) runs inside the app: it checks the feed, downloads the update and installs it in place after the app quits. Both are one crate, `shipo`: the binary needs the `cli` feature, on by default.
+Releases and updates for desktop apps. The packer (`src/cli/`, the `shipo` binary) turns an app's bare binaries for macOS, Windows and Linux into signed installers and a signed update feed, on a Linux, macOS or Windows host. The library (the rest of `src/`, the `shipo` library) runs inside the app: it checks the feed, downloads the update and installs it in place after the app quits. Both are one crate, `shipo`: the binary needs the `cli` feature, on by default. The Windows setup's stub is a package of its own, `setup/` (`shipo-setup`, never published), which the packer appends the app to.
 
 Each fact has one source: the contract between the two is `spec.md`, the API the rustdoc, the CLI `shipo --help`, checks the `Makefile`, the work under way `docs/plans/`.
 
@@ -9,7 +9,7 @@ Each fact has one source: the contract between the two is `spec.md`, the API the
 - Change `spec.md`, the public API or the CLI only with the person's approval; a `spec.md` change lands with both sides' code. A public struct with public fields is `#[non_exhaustive]`.
 - The library has no UI and no state of its own: it never shows a window, dialog or notification or takes the focus; the app draws everything and keeps its settings.
 - Library dependencies are only `ed25519-compact`, `thiserror` (the library's `Error`), the `objc2` family on macOS and `windows-sys` on Windows (Linux loads libcurl at run time): every app builds them. The packer's are optional, under the `cli` feature, so an app with `default-features = false` builds none of them. The packer takes a crate only where our own code would be large. Change dependencies only with `cargo add`, `cargo remove` or `cargo upgrade`, never by hand.
-- The packer builds every package on any of the three OSes. It may use only what each OS has or installs by one command on all three (`curl`, `git`); a tool of one platform (an apt package, `hdiutil`, `makensis`) is replaced by our own code, and any other tool is fetched pinned by version and SHA-256. `makensis` is the one still in use, until the setup of our own lands.
+- The packer builds every package on any of the three OSes. It may use only what each OS has or installs by one command on all three (`curl`, `git`); a tool of one platform (an apt package, `hdiutil`, `makensis`) is replaced by our own code, and any other tool is fetched pinned by version and SHA-256.
 - An app's release job installs the packer pinned to a version, `cargo install shipo --version <x> --locked`; the prebuilt binaries are a convenience.
 
 ## Code
