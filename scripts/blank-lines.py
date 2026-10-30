@@ -52,7 +52,9 @@ def main():
   roots = [Path(a) for a in args if a != "--fix"] or [ROOT / d for d in ("src", "setup/src", "examples", "tests")]
   found = 0
 
-  for path in sorted(p for r in roots for p in ([r] if r.is_file() else r.rglob("*.rs"))):
+  # Not the example apps' build folders, examples/<app>/target.
+  files = (p for r in roots for p in ([r] if r.is_file() else r.rglob("*.rs")) if "target" not in p.relative_to(r).parts)
+  for path in sorted(files):
     lines = path.read_text().splitlines(keepends=True)
     hits = missing(lines)
     found += len(hits)

@@ -56,6 +56,27 @@ jobs:
           name: setup-stub-built
           path: setup/target/bin/
 
+  # The example apps, each a project of its own: built, and their update steps tested with no
+  # window. Not gpui: its build is the heaviest by far and needs the system's graphics libraries.
+  examples:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [egui, nimbo]
+    defaults:
+      run:
+        working-directory: examples/${{ matrix.app }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: examples/${{ matrix.app }}
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - run: cargo build --locked
+      - run: cargo test --locked
+
   # On Ubuntu with the tools apt has: the packer's ignored tests (the .deb and the AppImage read
   # back, rcodesign fetched pinned, signing the Mac's binary), and the DMGs and .debs each host
   # packed, read by dmg2img and fsck.hfsplus (hfsprogs) and dpkg-deb.
@@ -199,7 +220,7 @@ jobs:
 
   publish:
     if: github.ref == 'refs/heads/main' # write rights only for main's own workflow
-    needs: [test, setup, packages, e2e, e2e-pack, e2e-dmg, build]
+    needs: [test, setup, examples, packages, e2e, e2e-pack, e2e-dmg, build]
     runs-on: ubuntu-latest # no build here, and Linux runners start faster
     permissions:
       attestations: write

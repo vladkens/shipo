@@ -1,0 +1,19 @@
+[package]
+name = "shipo-egui"
+version = "0.1.0"
+edition = "2024"
+publish = false
+# The .deb's Maintainer.
+authors = ["Me <me@example.com>"]
+# Where `shipo release --tag` links the feed's files: your app's repository.
+repository = "https://github.com/me/hello"
+
+[dependencies]
+eframe = "0.37.0"
+shipo = { path = "../..", default-features = false }
+
+[package.metadata.shipo]
+id = "dev.shipo.example.egui"
+name = "ShipoEgui"
+icon = "icon.png"
+comment = "Updates itself from a shipo feed"

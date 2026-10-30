@@ -1,0 +1,3 @@
+# macOS 14 is the least nimbo runs on (its readme): the binary is built for it.
+[env]
+MACOSX_DEPLOYMENT_TARGET = "14.0"

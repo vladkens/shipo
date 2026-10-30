@@ -192,7 +192,8 @@ def files_now() -> dict[str, str]:
   out = {}
   for d in DIRS:
     for p in sorted((ROOT / d).rglob("*")):
-      if p.suffix in EXTS:
+      # Not the example apps' build folders, examples/<app>/target.
+      if p.suffix in EXTS and "target" not in p.relative_to(ROOT).parts:
         out[p.relative_to(ROOT).as_posix()] = p.read_text()
 
   return out
