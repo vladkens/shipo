@@ -93,7 +93,9 @@ fn run(args: &Args, title: &mut String) -> io::Result<()> {
 fn uninstall_from(dir: &Path, path: &Path, info: &Info) -> io::Result<()> {
   let name = format!("{}-uninstall-{}.exe", info.name, std::process::id());
   let away = [env::temp_dir(), dir.parent().unwrap_or(dir).to_path_buf()];
-  remove(dir, &info.name, || away.iter().any(|d| fs::rename(path, d.join(&name)).is_ok()))?;
+  // Never over a file there: std's rename on Windows replaces one.
+  let moved = |d: &PathBuf| !d.join(&name).exists() && fs::rename(path, d.join(&name)).is_ok();
+  remove(dir, &info.name, || away.iter().any(moved))?;
   match fs::remove_file(programs()?.join(format!("{}.lnk", info.name))) {
     Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
     _ => {}
