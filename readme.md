@@ -1,6 +1,6 @@
 <div align="center">
 
-# shipo
+<img src="docs/logo.png" alt="shipo" width="600" />
 
 **Releases and updates for desktop apps**
 
