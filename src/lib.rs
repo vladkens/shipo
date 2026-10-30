@@ -174,7 +174,7 @@ pub fn download(release: &Release, mut progress: impl FnMut(u64, u64)) -> Result
 /// removes what is left; an error of those comes from [finish] in the app it starts.
 /// [Error::Install] when the installer gives no sign in 10 s, nothing swapped. The staging folder
 /// is the installer's from here on: on an error the next [download] removes it. A fake update's is
-/// [Error::Unsupported], nothing installed.
+/// [Error::Install], nothing installed.
 pub fn install(staged: Staged) -> Result<()> {
   let Staged { new, target, dir } = staged;
   let Some(dir) = dir else { return fake::install() };
@@ -736,7 +736,7 @@ mod tests {
     assert_eq!((seen.len(), seen[0], seen[19]), (20, (2_500_000, r.size), (r.size, r.size)));
     assert!(seen.is_sorted());
     let e = install(staged).unwrap_err();
-    assert!(matches!(&e, Error::Unsupported(m) if m.contains("fake")), "{e}");
+    assert!(matches!(&e, Error::Install(m) if m.contains("fake")), "{e}");
 
     let fails = check_or_fake(&fake, "1.0", Some("2.0:fail-download")).unwrap().unwrap();
     let mut seen = Vec::new();

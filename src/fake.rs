@@ -36,8 +36,8 @@ pub fn var() -> Option<String> {
   std::env::var(VAR).ok().filter(|v| !v.is_empty())
 }
 
-/// [VAR]'s `value`, [Error::Feed] for one malformed.
-fn parse(value: &str) -> Result<Fake> {
+/// [VAR]'s `value`, `None` if malformed.
+fn parse(value: &str) -> Option<Fake> {
   let (version, fail) = match value.rsplit_once(':') {
     Some((v, "fail-check")) => (v, Some(Step::Check)),
     Some((v, "fail-download")) => (v, Some(Step::Download)),
@@ -47,21 +47,26 @@ fn parse(value: &str) -> Result<Fake> {
   let valid = !version.contains(|c: char| c.is_whitespace() || c == ':')
     && feed::newer(version, "0").is_some();
   match version {
-    "none" => Ok(Fake { version: None, fail }),
-    v if valid => Ok(Fake { version: Some(v.into()), fail }),
-    _ => Err(Error::Feed(format!(
-      "{VAR}={value:?} is not <version> or none, either with :fail-check or :fail-download"
-    ))),
+    "none" => Some(Fake { version: None, fail }),
+    v if valid => Some(Fake { version: Some(v.into()), fail }),
+    _ => None,
   }
 }
 
 /// [crate::check] faked by [VAR]'s `value`: the release as a feed of `feed`'s place would give it,
-/// its notes and file under the GitHub repository's releases (example.com's for another host).
+/// its notes and file under the feed URL's part up to `/releases` (example.com's without one).
+/// Its failure, and a malformed value's, is [Error::Http] of no response, as offline: an app
+/// quiet on a broken feed shows that.
 pub fn check(feed: &Feed, value: &str) -> Result<Option<Release>> {
-  let fake = parse(value)?;
+  let failed = |message| Error::Http { url: feed.url.into(), status: None, message };
+  let Some(fake) = parse(value) else {
+    let want = "<version> or none, either with :fail-check or :fail-download";
+    return Err(failed(format!("{VAR}={value:?} is not {want}")));
+  };
+
   std::thread::sleep(PACE);
   if fake.fail == Some(Step::Check) {
-    return Err(Error::Feed(format!("{VAR}={value}: a fake failure, nothing was fetched")));
+    return Err(failed(format!("{VAR}={value}: a fake failure, nothing was fetched")));
   }
 
   let Some(version) = fake.version.clone() else { return Ok(None) };
@@ -90,10 +95,10 @@ pub fn download(fake: &Fake, size: u64, progress: Progress) -> Result<Staged> {
   Ok(Staged { new: PathBuf::new(), target: PathBuf::new(), dir: None })
 }
 
-/// [crate::install] of a fake update: [Error::Unsupported] after a [PACE], nothing installed.
+/// [crate::install] of a fake update: [Error::Install] after a [PACE], nothing installed.
 pub fn install() -> Result<()> {
   std::thread::sleep(PACE);
-  Err(Error::Unsupported(format!("{VAR}: a fake update, nothing was installed")))
+  Err(Error::Install(format!("{VAR}: a fake update, nothing was installed")))
 }
 
 #[cfg(test)]
@@ -111,7 +116,7 @@ mod tests {
       ("none:fail-check", fake(None, Some(Step::Check))),
     ];
     for (value, want) in cases {
-      assert_eq!(parse(value).unwrap(), want, "{value}");
+      assert_eq!(parse(value), Some(want), "{value}");
     }
 
     for value in [
@@ -124,8 +129,7 @@ mod tests {
       "1.2:",
       "1.2.0-rc.1:fail-downlaod",
     ] {
-      let e = parse(value).unwrap_err();
-      assert!(matches!(&e, Error::Feed(m) if m.contains(VAR)), "{value:?}: {e}");
+      assert_eq!(parse(value), None, "{value:?}");
     }
   }
 
@@ -141,7 +145,11 @@ mod tests {
     let other = check(&feed("https://example.org/update.txt"), "v2").unwrap().unwrap();
     assert_eq!(other.notes.as_deref(), Some("https://example.com/releases/tag/v2"));
     assert_eq!(check(&feed(github), "none").unwrap(), None);
-    let e = check(&feed(github), "1.2.0:fail-check").unwrap_err();
-    assert!(matches!(&e, Error::Feed(m) if m.contains("fake")), "{e}");
+    for value in ["1.2.0:fail-check", "yes"] {
+      let e = check(&feed(github), value).unwrap_err();
+      let offline =
+        matches!(&e, Error::Http { status: None, message, .. } if message.contains(VAR));
+      assert!(offline, "{value}: {e}");
+    }
   }
 }

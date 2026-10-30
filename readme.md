@@ -101,7 +101,7 @@ The updater uses the system's HTTP; the dependency counts above leave out 6 crat
 
 ### Fake update
 
-To see your updater's offer, progress and error screens with no release, mark the feed fakeable and run the app with `SHIPO_FAKE_UPDATE` set: `check` offers that version (`none`: nothing newer) after a second with no network, `download` counts to 100% in about 5 s, fetching nothing, and `install` fails with `Error::Unsupported`, nothing installed. A suffix `:fail-check` or `:fail-download` fails that step. `check` ignores the variable for a feed not marked; `shipo::supported()`, which knows no feed, is `Ok` while it is set, and `shipo::faking()` tells whether it is.
+To see your updater's offer, progress and error screens with no release, mark the feed fakeable and run the app with `SHIPO_FAKE_UPDATE` set, a dev build too. `check` offers that version (`none`: nothing newer) after a second with no network, `download` counts to 100% in about 5 s, fetching nothing, and `install` fails with `Error::Install`, nothing installed. A suffix `:fail-check` fails the check with `Error::Http` as offline (a malformed value too), `:fail-download` the download with `Error::Mismatch` at 40%. `check` ignores the variable for a feed not marked; `shipo::supported()`, which knows no feed, is `Ok` while it is set, and `shipo::faking()` tells whether it is, for the app's own gates of its updater. `SHIPO_UPDATE_ERROR=<text>` shows the failed-relaunch screen: `shipo::finish()` returns it as `Error::Install`.
 
 ```rust
 const FEED: shipo::Feed = shipo::Feed::new(URL, KEYS).fakeable();
