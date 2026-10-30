@@ -36,7 +36,7 @@ cargo install --locked shipo
 
 ## 🔑 Keys
 
-The feed is signed with Ed25519. Your app holds two public keys and takes a feed signed by either: the working key signs every release, the spare stands by to replace it. Make a pair for each app: the feed doesn't name its app, so keys of its own keep another app's feed out.
+The feed is signed with Ed25519. Your app holds two public keys and takes a feed signed by either: the working key signs every release, the spare stands by to replace it. Use a key pair per app, so each app takes only its own feed: the feed doesn't name its app.
 
 ```sh
 shipo keygen update.key update-spare.key
@@ -93,7 +93,7 @@ fn update() -> shipo::Result<()> {
 
 The installer waits for the app to quit, puts the new version in and restarts it with the same arguments. If that fails, macOS and Linux put the old version back and Windows reruns the app in its folder; the next `finish` returns the error. `shipo::supported()` tells up front whether this install can update in place, and [examples/update.rs](examples/update.rs) is a console app that updates itself.
 
-A pre-release install, a version with `-` such as `1.3.0-rc.1`, takes no update, `1.3.0` included: `check` returns `Error::Unsupported`, and its testers install the release by hand. Every older install takes a pre-release the feed offers, so mark one as a pre-release on GitHub (`gh release create --prerelease`): `releases/latest` then still serves the last release's feed.
+A pre-release (a version with `-`, such as `1.3.0-rc.1`) doesn't update itself, not even to `1.3.0`: `check` returns `Error::Unsupported`, and testers install the next build by hand. A release does update to a newer pre-release the feed offers. So publish pre-releases with `gh release create --prerelease`, and the `releases/latest` feed stays on the last release.
 
 The updater uses the system's HTTP; the dependency counts above leave out 6 crates that derive the error type at build time.
 
@@ -174,7 +174,7 @@ shipo reads these from `[package]`, or from `[workspace.package]` for `version`,
 | `deb-depends` | list | `libc6 (>= <the binary's glibc>)` | the packages the .deb needs; shipo adds that `libc6` unless you list one |
 | `deb-recommends` | list | none | the packages the .deb recommends |
 
-On Linux, set your window's app id (Wayland) and WM_CLASS (X11) to `id`, so docks match the window to the app's menu entry and icon. The binary runs on the glibc it was built with or newer: build it on the oldest Ubuntu you support, and shipo puts that glibc in the .deb's `Depends`.
+On Linux, set your window's app id (Wayland) and WM_CLASS (X11) to `id`, so docks match the window to the app's menu entry and icon. The binary needs the glibc it was built with or newer, so build it on the oldest Ubuntu you support: shipo writes that glibc into the .deb's `Depends`.
 
 Put the release builds, x86_64 or aarch64, in `dist/<target>/<bin>[.exe]`, such as `dist/aarch64-apple-darwin/hello`, and run:
 
