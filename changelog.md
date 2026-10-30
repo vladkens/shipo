@@ -5,6 +5,7 @@
 - Added a new Windows setup with a classic install wizard, an optional desktop shortcut and a silent `/S` mode.
 - Added updates of v0.1's Windows installs to the new setup, with no reinstall.
 - Added packing on Windows: Linux, macOS or Windows builds every installer, with nothing else to install.
+- Added a fake update to see an app's updater UI with no release: a feed marked `.fakeable()` and `SHIPO_FAKE_UPDATE=<version>`.
 - Added reproducible packages: with `SOURCE_DATE_EPOCH` set, shipo packs the same bytes from any host, except a DMG signed with an identity and the feed that lists it.
 
 ### Fixes

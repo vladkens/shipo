@@ -13,6 +13,8 @@
 //! Then `update` prints the version, `update --check <feed url> <key>...` what the feed offers,
 //! `update --update <feed url> <key>...` updates, printing the download's percentage.
 //! `make e2e` does all of it on this host (scripts/e2e-update.py), as CI does on each OS.
+//! With `SHIPO_FAKE_UPDATE=2.0.0` (the readme's Fake update) its feed's update is faked: any URL
+//! and key do.
 
 use std::env;
 use std::error::Error;
@@ -39,7 +41,7 @@ fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
   };
 
   let keys = keys.iter().map(String::as_str).collect::<Vec<_>>();
-  let Some(release) = shipo::check(&Feed::new(url, &keys), VERSION)? else {
+  let Some(release) = shipo::check(&Feed::new(url, &keys).fakeable(), VERSION)? else {
     println!("{VERSION} is the latest");
     return Ok(());
   };

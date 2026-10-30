@@ -25,13 +25,21 @@ pub struct Feed<'a> {
   /// `shipo keygen` makes two, the working one and the spare kept offline, so a leaked key can be
   /// dropped by a release the other signs (the readme's Keys).
   pub keys: &'a [&'a str],
+  /// Whether `SHIPO_FAKE_UPDATE` fakes its updates ([Feed::fakeable]).
+  pub(crate) fakeable: bool,
 }
 
 impl<'a> Feed<'a> {
   /// The feed at `url` signed by any of `keys`. An option added later comes as a method of its
   /// own, so it breaks no app's const.
   pub const fn new(url: &'a str, keys: &'a [&'a str]) -> Self {
-    Self { url, keys }
+    Self { url, keys, fakeable: false }
+  }
+
+  /// The feed, its updates faked while `SHIPO_FAKE_UPDATE` is set, so the app's updater UI shows
+  /// with no feed or release: the readme's Fake update, [crate::faking].
+  pub const fn fakeable(self) -> Self {
+    Self { fakeable: true, ..self }
   }
 
   /// The release the feed's bytes `text`, fetched by the app itself, offer this platform when it
@@ -69,6 +77,8 @@ pub struct Release {
   pub size: u64,
   /// The file's SHA-512.
   pub sha512: [u8; 64],
+  /// What a fake release does, of `SHIPO_FAKE_UPDATE`: it reaches no network and no disk.
+  pub(crate) fake: Option<crate::fake::Fake>,
 }
 
 impl Release {
@@ -76,7 +86,8 @@ impl Release {
   /// size 0, a zero hash), so [crate::download] refuses it.
   #[doc(hidden)]
   pub fn test(version: &str) -> Self {
-    Self { version: version.into(), notes: None, url: String::new(), size: 0, sha512: [0; 64] }
+    let (notes, url, sha512) = (None, String::new(), [0; 64]);
+    Self { version: version.into(), notes, url, size: 0, sha512, fake: None }
   }
 
   /// Checks the file downloaded for the release against its size and SHA-512: [Error::Mismatch]
@@ -178,7 +189,7 @@ pub fn release(text: &str, current: &str, platform: &str) -> Result<Option<Relea
 
   let Some((size, sha512, url)) = file else { return Ok(None) };
   let (version, notes, url) = (version.into(), notes.map(String::from), url.into());
-  Ok(Some(Release { version, notes, url, size, sha512 }))
+  Ok(Some(Release { version, notes, url, size, sha512, fake: None }))
 }
 
 /// A platform's `<size> <sha512> <url>`, of its line's `rest`.
@@ -239,7 +250,7 @@ enum Part<'a> {
 /// Whether version `v` comes after `than`: numeric dot parts (`1.10` after `1.9`, `1.2` equal to
 /// `1.2.0`), then a release after its pre-releases (`1.2.0-dev`); a leading `v` and `+build`
 /// are ignored. `None` if one isn't a version.
-fn newer(v: &str, than: &str) -> Option<bool> {
+pub fn newer(v: &str, than: &str) -> Option<bool> {
   fn key(v: &str) -> Option<(Vec<u64>, bool, Vec<Part<'_>>)> {
     let v = v.trim().trim_start_matches('v').split('+').next()?;
     let (core, pre) = v.split_once('-').map_or((v, None), |(c, p)| (c, Some(p)));
