@@ -153,7 +153,7 @@ shipo reads these from `[package]`, or from `[workspace.package]` for `version`,
 | Key | Type | Default | What it does |
 |---|---|---|---|
 | `accessory` | bool | `false` | a menu bar app, without a Dock icon |
-| `entitlements` | path | none | the entitlements plist to sign with |
+| `entitlements` | path | none | the entitlements plist to sign with; not the App Sandbox, as a sandboxed app can't update itself |
 | `plist` | table | none | Info.plist keys to add or override, like usage strings |
 
 `[package.metadata.shipo.windows]`:

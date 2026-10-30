@@ -164,10 +164,8 @@ fn truncated() -> io::Error {
 /// bundle and who signed it.
 pub fn app(cfg: &Config, bin: &Path, tag: Option<&str>) -> io::Result<(PathBuf, String)> {
   let entitlements = cfg.macos.entitlements.as_deref();
-  if let Some(path) = entitlements
-    && !path.is_file()
-  {
-    return Err(bad(format!("macos.entitlements: no file {}", path.display())));
+  if let Some(path) = entitlements {
+    allowed(path)?;
   }
 
   let signed = !cfg!(target_os = "macos") && sign::secrets(&sign::CERT, tag)?;
@@ -179,6 +177,24 @@ pub fn app(cfg: &Config, bin: &Path, tag: Option<&str>) -> io::Result<(PathBuf, 
     }
     false => sign::sign_elsewhere(cfg, bundle, signed, entitlements),
   })
+}
+
+/// Checks the entitlements' plist at `path`: the App Sandbox is refused, as a sandboxed app can't
+/// replace its own bundle, so the updater couldn't install a release.
+fn allowed(path: &Path) -> io::Result<()> {
+  let what = format!("macos.entitlements: {}", path.display());
+  if !path.is_file() {
+    return Err(bad(format!("{what}: no file")));
+  }
+
+  let plist = Plist::from_file(path).map_err(|e| bad(format!("{what}: {e}")))?;
+  let sandbox = plist.as_dictionary().and_then(|d| d.get("com.apple.security.app-sandbox"));
+  match sandbox.and_then(Plist::as_boolean) {
+    Some(true) => Err(bad(format!(
+      "{what}: com.apple.security.app-sandbox is on, and the updater can't replace a sandboxed app"
+    ))),
+    _ => Ok(()),
+  }
 }
 
 /// `<target>/<Name>.app` of the binary `bin`, unsigned, in place of one there: the binary
@@ -577,6 +593,32 @@ LSEnvironment = { HELLO_MODE = "quiet" }
 
     let e = bundle(&cfg, &tmp.join("hello.entitlements")).unwrap_err().to_string();
     assert!(e.ends_with("hello.entitlements: not a 64-bit Mach-O binary"), "{e}");
+  }
+
+  #[test]
+  fn a_sandboxed_app_is_refused() {
+    let tmp = Temp::new().unwrap();
+    let cfg = test_app(&tmp);
+    let path = tmp.join("hello.entitlements");
+    let what = format!("macos.entitlements: {}", path.display());
+    let write = |on: bool| {
+      let plist = dict([("com.apple.security.app-sandbox", on.into())]);
+      fs::write(&path, xml(&plist).unwrap()).unwrap();
+    };
+
+    allowed(&path).unwrap();
+    write(false);
+    allowed(&path).unwrap();
+    write(true);
+    let e = app(&cfg, &tmp.join("hello"), None).unwrap_err().to_string();
+    let why = "com.apple.security.app-sandbox is on, and the updater can't replace a sandboxed app";
+    assert_eq!(e, format!("{what}: {why}"));
+
+    fs::write(&path, "not a plist").unwrap();
+    assert!(allowed(&path).unwrap_err().to_string().starts_with(&what));
+    fs::remove_file(&path).unwrap();
+    let e = app(&cfg, &tmp.join("hello"), None).unwrap_err().to_string();
+    assert_eq!(e, format!("{what}: no file"));
   }
 
   /// The files under `dir`, at any depth.

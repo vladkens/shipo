@@ -126,7 +126,7 @@ Linux's rename of the new AppImage over the target, the undoing of a swap and th
 
 The DMG is a UDIF image compressed with zlib (UDZO) of an HFS+ volume named `<Name>`, holding `<Name>.app`, an `Applications` symlink to `/Applications` and the `.DS_Store` that lays out its window. The packer sets the bundle's modes: folders and files with an execute bit 0755, other files 0644. The app and the image are signed by a Developer ID, the image notarized and stapled, so the first launch of a downloaded copy passes Gatekeeper.
 
-Every release must be signed by one stable identity: the library takes a bundle only when it meets the running app's designated requirement, and an ad-hoc signature's requirement is its own build, so an ad-hoc app takes no update. That is also what keeps the user's grants (Accessibility, the microphone) through an update. A release keeps the bundle id (the app's `id`) and the executable's name.
+Every release must be signed by one stable identity: the library takes a bundle only when it meets the running app's designated requirement, and an ad-hoc signature's requirement is its own build, so an ad-hoc app takes no update. That is also what keeps the user's grants (Accessibility, the microphone) through an update. A release keeps the bundle id (the app's `id`) and the executable's name. The app runs outside the App Sandbox: a sandboxed app can't replace its own bundle, so the packer refuses entitlements with `com.apple.security.app-sandbox` on.
 
 ## Windows
 
