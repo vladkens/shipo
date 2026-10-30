@@ -41,6 +41,7 @@ const BANNER: i32 = 164;
 const HEADER: i32 = 57;
 const FOOT: i32 = 313;
 const STYLE: u32 = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+const EX: u32 = WS_EX_CONTROLPARENT;
 const SS_ETCHEDHORZ: u32 = 0x10;
 const BAR: u32 = 1000;
 /// The app's group icon, as the packer stamps it.
@@ -229,7 +230,7 @@ impl Wizard {
       };
 
       RegisterClassExW(&wc);
-      let (x, ex) = (CW_USEDEFAULT, WS_EX_CONTROLPARENT);
+      let (x, ex) = (CW_USEDEFAULT, EX);
       let (me, c, t, n) =
         (self as *const Self as *const c_void, class.as_ptr(), title.as_ptr(), null_mut());
       let hwnd = CreateWindowExW(ex, c, t, STYLE, x, x, 0, 0, n, n, inst, me);
@@ -243,6 +244,8 @@ impl Wizard {
       GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY), &mut mi);
       let ((cx, cy), a) = (self.outer(), mi.rcWork);
       let (x, y) = (a.left + (a.right - a.left - cx) / 2, a.top + (a.bottom - a.top - cy) / 2);
+      // A window larger than the screen keeps its title bar on it.
+      let (x, y) = (x.max(a.left), y.max(a.top));
       SetWindowPos(hwnd, null_mut(), x, y, cx, cy, SWP_NOZORDER | SWP_NOACTIVATE);
       self.build();
       ShowWindow(hwnd, SW_SHOWNORMAL);
@@ -266,7 +269,7 @@ impl Wizard {
   /// The window's size for its client area.
   fn outer(&self) -> (i32, i32) {
     let mut r = RECT { left: 0, top: 0, right: self.s(W), bottom: self.s(H) };
-    let ex = WS_EX_CONTROLPARENT;
+    let ex = EX;
     type Adjust = unsafe extern "system" fn(*mut RECT, u32, BOOL, u32, u32) -> BOOL;
     // SAFETY: a rect to adjust; the export of its documented type, Windows 10 1607 and later.
     unsafe {
@@ -489,6 +492,11 @@ impl Wizard {
   }
 
   fn go(&self, page: Page) {
+    if self.page.get() == Page::Folder {
+      // SAFETY: this window's timer, if set.
+      unsafe { KillTimer(self.hwnd.get(), SPACE) };
+    }
+
     self.page.set(page);
     self.build();
   }

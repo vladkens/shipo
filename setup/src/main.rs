@@ -95,9 +95,10 @@ impl Args {
 /// `dir` without a trailing separator if it is an absolute folder below a drive's root (`C:\…`,
 /// `\\?\C:\…`) or a share's (`\\server\share\…`, `\\?\UNC\server\share\…`), never the root
 /// itself, which an uninstall would empty: no part of it empty, `.`, `..`, or dots and spaces
-/// alone, which Windows drops or climbs by.
+/// alone, which Windows drops or climbs by. Its `/` made `\`, so the key holds it as Windows does.
 fn folder(dir: &str) -> Option<PathBuf> {
-  let dir = dir.trim_end_matches(['\\', '/']);
+  let dir = dir.replace('/', "\\");
+  let dir = dir.trim_end_matches('\\');
   let prefixed = |p: &str| dir.get(..p.len()).is_some_and(|h| h.eq_ignore_ascii_case(p));
   let (parts, least) = match [r"\\?\UNC\", r"\\.\UNC\"].into_iter().find(|p| prefixed(p)) {
     Some(p) => (&dir[p.len()..], 3),
@@ -108,7 +109,7 @@ fn folder(dir: &str) -> Option<PathBuf> {
     },
   };
 
-  let parts: Vec<_> = parts.split(['\\', '/']).collect();
+  let parts: Vec<_> = parts.split('\\').collect();
   let named = |p: &&str| !p.trim_matches(['.', ' ']).is_empty();
   (parts.len() >= least && parts.iter().all(named)).then(|| dir.into())
 }
@@ -351,10 +352,26 @@ fn remove(dir: &Path, info: &Info, moved: impl FnOnce() -> bool) -> io::Result<(
   done
 }
 
-/// Whether the folder `l`, as the Uninstall key holds it, is `dir`, its case and a trailing
-/// separator aside.
+/// Whether the folder `l`, as the Uninstall key holds it, is `dir`: by their text, case, `/`, a
+/// trailing separator and `\\?\` aside, else as the file system resolves them (a mapped drive,
+/// 8.3).
 fn same(l: &str, dir: &Path) -> bool {
-  Path::new(l.trim_end_matches(['\\', '/'])).as_os_str().eq_ignore_ascii_case(dir.as_os_str())
+  let plain = |s: &str| {
+    let s = s.replace('/', "\\");
+    let s = s.trim_end_matches('\\');
+    let prefixed = |p: &str| s.get(..p.len()).is_some_and(|h| h.eq_ignore_ascii_case(p));
+    if prefixed(r"\\?\UNC\") {
+      format!(r"\\{}", &s[8..])
+    } else if prefixed(r"\\?\") {
+      s[4..].to_string()
+    } else {
+      s.to_string()
+    }
+  };
+
+  let real = |p: &Path| fs::canonicalize(p).ok();
+  plain(l).eq_ignore_ascii_case(&plain(&dir.to_string_lossy()))
+    || real(Path::new(l)).is_some_and(|l| real(dir) == Some(l))
 }
 
 fn in_use(path: &Path, e: io::Error) -> io::Error {
@@ -429,7 +446,7 @@ mod tests {
 
     let folder = |dir: &str| Args { dir: Some(dir.into()), ..Args::default() }.folder();
     for ok in [r"C:\Apps", "d:/apps", r"\\server\share\Apps"] {
-      assert_eq!(folder(ok).unwrap(), Some(PathBuf::from(ok)), "{ok}");
+      assert_eq!(folder(ok).unwrap(), Some(PathBuf::from(ok.replace('/', "\\"))), "{ok}");
     }
 
     // A root never: an uninstall would empty it.
@@ -450,6 +467,7 @@ mod tests {
       (r"\\?\UNC\server\share\Apps\", r"\\?\UNC\server\share\Apps"),
       (r"\\.\unc\server\share\Apps", r"\\.\unc\server\share\Apps"),
       (r"C:\.Apps\a.b", r"C:\.Apps\a.b"),
+      ("C:/Apps/Hello/", r"C:\Apps\Hello"),
     ];
     for (dir, want) in oks {
       assert_eq!(folder(dir), Some(PathBuf::from(want)), "{dir}");
@@ -468,6 +486,8 @@ mod tests {
   fn same_folders() {
     let dir = Path::new(r"C:\Apps\Hello");
     assert!(same(r"C:\Apps\Hello", dir) && same(r"c:\apps\hello\", dir));
+    assert!(same("C:/Apps/Hello/", dir) && same(r"\\?\C:\Apps\Hello", dir));
+    assert!(same(r"\\?\UNC\srv\share\x", Path::new(r"\\srv\share\x")));
     assert!(!same(r"C:\Users\Me\AppData\Local\Temp", dir) && !same(r"C:\Apps", dir));
   }
 

@@ -125,7 +125,7 @@ fn run(args: &Args, title: &mut String) -> io::Result<ExitCode> {
     let dir = path.parent().ok_or_else(|| io::Error::other("the uninstaller is in no folder"))?;
     // The copy it moves to the temp folder, started again, would take that folder for the app's.
     let key = format!(r"{UNINSTALL}\{}", info.app_id);
-    if !named || text(&key, "InstallLocation").is_some_and(|l| !same(&l, dir)) {
+    if !named || text(&key, "InstallLocation").is_some_and(|l| !l.is_empty() && !same(&l, dir)) {
       let n = &info.name;
       return Err(io::Error::other(format!(
         "This is not {n}'s Uninstall.exe in its install folder: remove {n} in Settings › Apps."
