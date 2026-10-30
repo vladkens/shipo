@@ -3,7 +3,6 @@
 //! the app and waiting for it to end, the release's per-user setup run silently, the installed exe
 //! started.
 
-use std::env;
 use std::ffi::{OsString, c_void};
 use std::fs::File;
 use std::io::{self, Write};
@@ -13,10 +12,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::ptr::{null, null_mut};
 use std::time::Duration;
+use std::{env, slice};
 
 use windows_sys::Win32::Foundation::{
   ERROR_ACCESS_DENIED, ERROR_DIR_NOT_EMPTY, ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION,
-  WAIT_OBJECT_0,
+  GetLastError, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Networking::WinHttp::{
   URL_COMPONENTS, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE,
@@ -24,6 +24,8 @@ use windows_sys::Win32::Networking::WinHttp::{
   WinHttpCloseHandle, WinHttpConnect, WinHttpCrackUrl, WinHttpOpen, WinHttpOpenRequest,
   WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest,
 };
+use windows_sys::Win32::System::Diagnostics::Debug;
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::{
   CREATE_BREAKAWAY_FROM_JOB, CREATE_NO_WINDOW, DETACHED_PROCESS, OpenProcess, PROCESS_SYNCHRONIZE,
   WaitForSingleObject,
@@ -56,9 +58,19 @@ fn ok(url: &str, done: BOOL) -> Result<()> {
   if done == 0 { Err(failed(url)) } else { Ok(()) }
 }
 
-/// The last WinHTTP call's error, as `url`'s.
+/// The last WinHTTP call's error, as `url`'s. WinHTTP's own codes (12000-12999) have their
+/// messages in winhttp.dll, where std doesn't look: "OS Error 12007 (FormatMessageW() returned
+/// error 317)"; any other code isn't there and keeps std's.
 fn failed(url: &str) -> Error {
-  super::http(url, io::Error::last_os_error())
+  let flags = Debug::FORMAT_MESSAGE_FROM_HMODULE | Debug::FORMAT_MESSAGE_IGNORE_INSERTS;
+  // SAFETY: no arguments; the same code as `e`'s, as a u32.
+  let (e, mut buf, code) = (io::Error::last_os_error(), [0u16; 512], unsafe { GetLastError() });
+  // SAFETY: a NUL-terminated name; loaded by the call that failed.
+  let dll = unsafe { GetModuleHandleW(wide("winhttp.dll").as_ptr()) };
+  // SAFETY: a module or null (no message), a buffer of its length.
+  let n = unsafe { Debug::FormatMessageW(flags, dll, code, 0, buf.as_mut_ptr(), 512, null()) };
+  let s = String::from_utf16_lossy(&buf[..n as usize]).trim_end().to_owned();
+  super::http(url, if n == 0 { e.to_string() } else { format!("{s} (os error {code})") })
 }
 
 /// `s` as a NUL-terminated UTF-16 string, for the `W` calls.
@@ -82,29 +94,26 @@ pub fn get(url: &str, to: &Path, max: u64, big: Big, progress: Progress) -> Resu
   ok(url, unsafe { WinHttpCrackUrl(w.as_ptr(), 0, 0, &mut parts) })?;
   let part = |p: *const u16, n: u32| {
     // SAFETY: a part WinHttpCrackUrl found in `w`, null when missing.
-    let s =
-      if p.is_null() { &[][..] } else { unsafe { std::slice::from_raw_parts(p, n as usize) } };
+    let s = if p.is_null() { &[][..] } else { unsafe { slice::from_raw_parts(p, n as usize) } };
     s.iter().copied().chain([0]).collect::<Vec<u16>>()
   };
   let host = part(parts.lpszHostName, parts.dwHostNameLength);
   let path = part(parts.lpszUrlPath, parts.dwUrlPathLength + parts.dwExtraInfoLength);
   let secure = if parts.nScheme == WINHTTP_INTERNET_SCHEME_HTTPS { WINHTTP_FLAG_SECURE } else { 0 };
 
-  let (agent, verb, proxy) = (wide("shipo"), wide("GET"), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY);
-  let (mut code, mut len) = (0u32, 4u32);
-  // SAFETY: NUL-terminated strings, null for the defaults; a handle dropped after its children
-  // (locals drop in reverse); the status into a u32 of its length.
+  let (agent, proxy) = (wide("shipo"), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY);
+  let (mut code, mut n) = (0u32, 4u32);
+  // SAFETY: NUL-terminated strings, null for the defaults (the verb GET); a handle dropped after
+  // its children (locals drop in reverse); the status into a u32 of its length.
   unsafe {
     let session = handle(url, WinHttpOpen(agent.as_ptr(), proxy, null(), null(), 0))?;
     let connect = handle(url, WinHttpConnect(session.0, host.as_ptr(), parts.nPort, 0))?;
-    let req =
-      WinHttpOpenRequest(connect.0, verb.as_ptr(), path.as_ptr(), null(), null(), null(), secure);
+    let req = WinHttpOpenRequest(connect.0, null(), path.as_ptr(), null(), null(), null(), secure);
     let req = handle(url, req)?;
     ok(url, WinHttpSendRequest(req.0, null(), 0, null(), 0, 0, 0))?;
     ok(url, WinHttpReceiveResponse(req.0, null_mut()))?;
     let query = WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER;
-    let into = (&raw mut code).cast();
-    ok(url, WinHttpQueryHeaders(req.0, query, null(), into, &mut len, null_mut()))?;
+    ok(url, WinHttpQueryHeaders(req.0, query, null(), (&raw mut code).cast(), &mut n, null_mut()))?;
     super::status(url, code)?;
     read(&req, to, url, max, big, progress)
   }
@@ -177,8 +186,7 @@ pub fn detach(cmd: &mut Command) -> io::Result<Child> {
 /// app would get a window of its own, in Windows Terminal or conhost: it gets a console with none
 /// (a windowed app is unaffected).
 pub fn start(app: &Path, args: &[OsString], note: Option<&str>) -> io::Result<()> {
-  let exe = app.join(env::current_exe()?.file_name().unwrap_or_default());
-  let mut cmd = Command::new(exe);
+  let mut cmd = Command::new(app.join(env::current_exe()?.file_name().unwrap_or_default()));
   cmd.env_remove(NOTE).envs(note.map(|n| (NOTE, n))).args(args).creation_flags(CREATE_NO_WINDOW);
   cmd.spawn().map(drop)
 }
@@ -186,7 +194,25 @@ pub fn start(app: &Path, args: &[OsString], note: Option<&str>) -> io::Result<()
 /// A file another process has open (a sharing or lock violation) or is deleting (access denied),
 /// a folder not empty yet: the app that just quit may hold its files a moment after it ended.
 pub fn busy(e: &io::Error) -> bool {
-  let codes =
-    [ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION, ERROR_ACCESS_DENIED, ERROR_DIR_NOT_EMPTY];
-  e.raw_os_error().is_some_and(|c| codes.contains(&(c as u32)))
+  let c = [ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION, ERROR_ACCESS_DENIED, ERROR_DIR_NOT_EMPTY];
+  e.raw_os_error().is_some_and(|x| c.contains(&(x as u32)))
+}
+
+#[cfg(test)]
+mod tests {
+  use windows_sys::Win32::Foundation::SetLastError;
+
+  use super::*;
+
+  #[test]
+  fn winhttp_message() {
+    // SAFETY: a null handle fails harmlessly, loading winhttp.dll as the app's own calls do; then
+    // the last error a failed name lookup leaves (ERROR_WINHTTP_NAME_NOT_RESOLVED).
+    unsafe {
+      WinHttpCloseHandle(null_mut());
+      SetLastError(12007);
+    }
+    let e = failed("https://example.invalid").to_string();
+    assert!(e.contains("name") || e.contains("resolved"), "{e}");
+  }
 }

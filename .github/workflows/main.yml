@@ -188,7 +188,7 @@ jobs:
   # `publish` puts them up as the `dev` pre-release, and a `release: vX.Y.Z (#N)` commit publishes
   # the crate and the same archives as the version. `publish` never compiles.
   build:
-    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    if: "github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' || startsWith(github.event.pull_request.title, 'release: v')"
     runs-on: macos-latest # the macOS binary needs a Mac; Linux cross-compiles
     steps:
       - uses: actions/checkout@v7

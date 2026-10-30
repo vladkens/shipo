@@ -262,6 +262,20 @@ jobs:
         env: { GH_TOKEN: "${{ github.token }}" }
 ```
 
+## 🆚 Compared
+
+Every crate an updater pulls in ships inside your app and must be trusted: shipo's updater adds only 8 to 15 crates and uses the OS's own HTTP.
+
+| | **shipo** | [cargo-packager](https://github.com/crabnebula-dev/cargo-packager) | [Tauri](https://v2.tauri.app/distribute/) | [Velopack](https://github.com/velopack/velopack) | [Sparkle](https://sparkle-project.org) | [Conveyor](https://conveyor.hydraulic.dev) |
+|---|---|---|---|---|---|---|
+| Packs every OS from one machine | ✅ | ❌ | ❌ | ✅ on a Mac | ➖ updater only | ✅ |
+| macOS release from Linux | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| Crates in your app, Linux / Windows / macOS | **8 / 10 / 15** | 114 / 117 / 125 | +42 / +42 / +53 | 107 / 115 / 107 | — | — |
+| Signed updates | ✅ with a spare key | ✅ one key | ✅ one key | ❌ HTTPS only | ✅ one key | ✅ |
+| Delta updates | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
+| License | MIT | MIT/Apache-2.0 | MIT/Apache-2.0 | MIT | MIT | paid (free for open source) |
+
+Crates: `cargo tree` of an app with only the updater, on 2026-10-30; for Tauri, what its updater adds. One key: a leaked key can't be replaced by an update. HTTPS only: whoever can change the hosting can ship an update. Sparkle is the reference on macOS; cargo-packager and Tauri also make MSI, .rpm or pacman.
 
 ## 🤝 Contributing
 
