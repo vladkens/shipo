@@ -1,6 +1,6 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/shipo
 //! The Windows setup: the app's exe given its icon, version and manifest, and the per-user setup
-//! of it, our stub (src/setup/) with the app appended, as spec.md's Windows section gives it.
+//! of it, our stub (setup/) with the app appended, as spec.md's Windows section gives it.
 
 use std::collections::BTreeMap;
 use std::env;
@@ -83,7 +83,7 @@ fn stub(cfg: &Config, arch: Arch) -> io::Result<Vec<u8>> {
 
 /// [setup] of the stub `stub`: given the app's icon, its version as the setup's and [MANIFEST],
 /// the placeholder patched, the payload of the app's exe, `LICENSE.txt` when the app has a
-/// `LICENSE`, and the setup's [Info] appended (src/setup/payload.rs).
+/// `LICENSE`, and the setup's [Info] appended ([payload]).
 fn build(
   cfg: &Config,
   binary: &Path,

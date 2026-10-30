@@ -1,7 +1,7 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/shipo
 //! The Windows setup's payload: what the packer appends to the setup stub and the stub installs,
 //! and the placeholder in the stub that says where it is. Shared by the packer, which writes it,
-//! and the stub, which reads it; each uses its half.
+//! and the stub (`setup/`, which takes this file by its path), which reads it; each uses its half.
 //!
 //! The placeholder is [PLACEHOLDER] bytes in the stub's data: [MAGIC], then three u64 LE, its own
 //! offset in the file, the payload's and the payload's length, zeros until the packer patches

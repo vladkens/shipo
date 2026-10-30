@@ -9,7 +9,6 @@ mod hfs;
 mod image;
 mod linux;
 mod macos;
-#[path = "../setup/payload.rs"]
 mod payload;
 mod sign;
 mod tool;

@@ -24,7 +24,7 @@ from collections import defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DIRS = tuple(d for d in ("src", "examples", "tests") if (ROOT / d).is_dir())
+DIRS = tuple(d for d in ("src", "setup/src", "examples", "tests") if (ROOT / d).is_dir())
 EXTS = (".rs",)
 KINDS = ("code", "docs", "comments", "tests", "blank")
 # The parts, each with its files (`*` stays within a directory, `{a,b}` is either) and the code
@@ -44,7 +44,7 @@ PARTS = {
   # The setup and the exe's resources.
   "packer/windows": (600, ("src/cli/windows.rs",)),
   # The setup stub, which installs and uninstalls the app on Windows, and its payload's format.
-  "setup": (500, ("src/setup/*.rs",)),
+  "setup": (500, ("setup/src/*.rs", "src/cli/payload.rs")),
   # The AppImage with its squashfs, and the .deb.
   "packer/linux": (600, ("src/cli/linux.rs",)),
 }

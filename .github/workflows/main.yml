@@ -39,7 +39,7 @@ jobs:
           PYTHONUTF8: 1 # the scripts read the sources as UTF-8 on Windows too
       - run: make test
 
-  # The setup stub (src/setup/) for x64 and arm64 Windows, which the packer appends the app to; the
+  # The setup stub (setup/) for x64 and arm64 Windows, which the packer appends the app to; the
   # packer takes these by $SHIPO_SETUP_STUB_<ARCH>, a release's from shipo's `setup-v<N>` release.
   setup:
     runs-on: windows-latest
@@ -49,13 +49,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: setup
+          workspaces: setup
           save-if: ${{ github.event_name != 'pull_request' }}
       - run: rustup target add aarch64-pc-windows-msvc
       - run: make setup
       - run: |
           mkdir stub
-          cp target/x86_64-pc-windows-msvc/setup/shipo-setup.exe stub/shipo-setup-x64.exe
-          cp target/aarch64-pc-windows-msvc/setup/shipo-setup.exe stub/shipo-setup-arm64.exe
+          cp setup/target/x86_64-pc-windows-msvc/release/shipo-setup.exe stub/shipo-setup-x64.exe
+          cp setup/target/aarch64-pc-windows-msvc/release/shipo-setup.exe stub/shipo-setup-arm64.exe
           ls -l stub && sha256sum stub/*
       - uses: actions/upload-artifact@v7
         with:

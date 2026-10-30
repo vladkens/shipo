@@ -21,26 +21,10 @@ name = "shipo"
 path = "src/cli/main.rs"
 required-features = ["cli"]
 
-# The Windows setup stub, which the packer appends an app to; built by `make setup`.
-[[bin]]
-name = "shipo-setup"
-path = "src/setup/main.rs"
-required-features = ["setup"]
-
 [features]
 default = ["cli"]
 # The packer, the `shipo` binary; an app takes the library alone with `default-features = false`.
 cli = ["dep:flate2", "dep:getrandom", "dep:hmac-sha256", "dep:lexopt", "dep:plist", "dep:png", "dep:serde", "dep:tar", "dep:toml"]
-# The setup stub, `shipo-setup`: its payload's zlib and the Windows calls of the setup.
-setup = [
-  "dep:flate2",
-  "windows-sys/Win32_Security",
-  "windows-sys/Win32_System_Com",
-  "windows-sys/Win32_System_Registry",
-  "windows-sys/Win32_System_SystemInformation",
-  "windows-sys/Win32_UI_Shell",
-  "windows-sys/Win32_UI_WindowsAndMessaging",
-]
 
 [dependencies]
 ed25519-compact = { version = "2.6.0", default-features = false }
@@ -63,12 +47,3 @@ objc2-security = { version = "0.3.2", default-features = false, features = ["std
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61.2", default-features = false, features = ["Win32_Foundation", "Win32_Networking_WinHttp", "Win32_System_Threading"] }
-
-# The setup stub's build: small, as each setup carries it.
-[profile.setup]
-inherits = "release"
-opt-level = "z"
-lto = true
-codegen-units = 1
-panic = "abort"
-strip = true

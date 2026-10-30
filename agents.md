@@ -1,6 +1,6 @@
 # shipo
 
-Releases and updates for desktop apps. The packer (`src/cli/`, the `shipo` binary) turns an app's bare binaries for macOS, Windows and Linux into signed installers and a signed update feed, on a Linux, macOS or Windows host. The library (the rest of `src/`, the `shipo` library) runs inside the app: it checks the feed, downloads the update and installs it in place after the app quits. Both are one crate, `shipo`: the binary needs the `cli` feature, on by default.
+Releases and updates for desktop apps. The packer (`src/cli/`, the `shipo` binary) turns an app's bare binaries for macOS, Windows and Linux into signed installers and a signed update feed, on a Linux, macOS or Windows host. The library (the rest of `src/`, the `shipo` library) runs inside the app: it checks the feed, downloads the update and installs it in place after the app quits. Both are one crate, `shipo`: the binary needs the `cli` feature, on by default. The Windows setup's stub is a package of its own, `setup/` (`shipo-setup`, never published), which the packer appends the app to.
 
 Each fact has one source: the contract between the two is `spec.md`, the API the rustdoc, the CLI `shipo --help`, checks the `Makefile`, the work under way `docs/plans/`.
 

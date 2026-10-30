@@ -1,9 +1,10 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/shipo
 //! The Windows setup stub: it installs the app its payload holds for the current user, or, as the
 //! uninstaller (a payload of no files), removes it, as spec.md's Windows section gives it. The
-//! packer stamps its icon, version and manifest and appends the payload ([payload]). This file is
-//! what holds on any host: the arguments, the files written and removed, the Uninstall key's
-//! values; `windows.rs` the registry, the shortcut and the run.
+//! packer stamps its icon, version and manifest and appends the payload ([payload], the packer's
+//! `src/cli/payload.rs`). A package of its own, so the `shipo` crate's binary stays the packer.
+//! This file is what holds on any host: the arguments, the files written and removed, the Uninstall
+//! key's values; `windows.rs` the registry, the shortcut and the run.
 //!
 //! The idea of a stub with a placeholder the packer patches is Velopack's (MIT,
 //! <https://github.com/velopack/velopack/blob/develop/src/bins/src/setup.rs>); the code is ours.
@@ -12,6 +13,7 @@
 // Off Windows only the tests run what is here.
 #![cfg_attr(not(windows), allow(dead_code))]
 
+#[path = "../../src/cli/payload.rs"]
 mod payload;
 #[cfg(windows)]
 mod windows;
