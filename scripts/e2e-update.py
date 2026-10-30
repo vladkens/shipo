@@ -1,0 +1,241 @@
+# Copyright (c) vladkens | MIT License | https://github.com/vladkens/shipo
+# /// script
+# requires-python = ">=3.11"
+# ///
+"""The end-to-end update: examples/update.rs built at 1.0.0 and 2.0.0, packed by shipo, 1.0.0
+installed as a user installs it, then updated in place from 2.0.0's feed served on loopback.
+
+uv run scripts/e2e-update.py build <dir>   the example at both versions, <dir>/<version>/<triple>/hello[.exe]
+uv run scripts/e2e-update.py pack <dir>    `shipo release` of each version, a throwaway key, 2.0.0's feed
+uv run scripts/e2e-update.py run <dir>     1.0.0 installed and updated; checks that 2.0.0 is what runs
+
+`pack` packs the binaries `build` left in <dir> for any OS, so one host may pack another's: the
+setup needs makensis, the DMG a Mac (signed by "Hello Local Signing", which v1 and v2 must share).
+`run` takes this OS's files. CI runs all three on each OS (.github/workflows/main.yml).
+"""
+
+import argparse
+import functools
+import hashlib
+import http.server
+import os
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import zlib
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+VERSIONS = ("1.0.0", "2.0.0")
+NAME, BIN, ID = "Hello", "hello", "dev.shipo.hello"
+PORT = 18765
+URL = f"http://127.0.0.1:{PORT}"
+EXE = ".exe" if sys.platform == "win32" else ""
+WAIT = 120  # seconds for the update to land
+
+MANIFEST = """[package]
+name = "{bin}"
+version = "{version}"
+edition = "2024"
+authors = ["shipo e2e"]
+repository = "https://github.com/vladkens/shipo"
+
+[package.metadata.shipo]
+id = "{id}"
+name = "{name}"
+icon = "../icon.png"
+comment = "shipo's end-to-end update"
+"""
+
+
+def log(msg: str) -> None:
+  print(f"e2e: {msg}", flush=True)
+
+
+def run(*args, **kw) -> str:
+  """Runs a command to its end, its stdout given back; its stderr passes through."""
+  log(" ".join(str(a) for a in args))
+  return subprocess.run([str(a) for a in args], check=True, stdout=subprocess.PIPE, text=True, **kw).stdout
+
+
+def target_dir() -> Path:
+  return Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
+
+
+def build(out: Path) -> None:
+  """The example at each version, as `release` takes binaries: <out>/<version>/<triple>/hello."""
+  host = next(ln.split()[1] for ln in run("rustc", "-vV").splitlines() if ln.startswith("host:"))
+  for version in VERSIONS:
+    env = os.environ | {"UPDATE_VERSION": version}
+    cmd = ["cargo", "build", "--release", "--example", "update", "--no-default-features"]
+    run(*cmd, cwd=ROOT, env=env)
+    dest = out / version / host / f"{BIN}{EXE}"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(target_dir() / "release/examples" / f"update{EXE}", dest)
+    log(f"built {dest}")
+
+
+def png(n: int) -> bytes:
+  """A square opaque PNG, n×n, of one colour."""
+
+  def chunk(kind: bytes, data: bytes) -> bytes:
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+  raw = b"".join(b"\x00" + bytes([40, 120, 200, 255]) * n for _ in range(n))
+  head = struct.pack(">IIBBBBB", n, n, 8, 6, 0, 0, 0)
+  return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", head) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
+
+
+def pack(out: Path) -> None:
+  """Each version's installers, a throwaway key (key.pub its public half) and 2.0.0's feed,
+  out/update.txt, of the files served at http://127.0.0.1:<port>/<version>/."""
+  run("cargo", "build", "--release", "--bin", "shipo", cwd=ROOT)
+  shipo = target_dir() / "release" / f"shipo{EXE}"
+  # The tools shipo fetches (rcodesign, the AppImage runtime) once for both versions.
+  env = os.environ | {"CARGO_TARGET_DIR": str(out / "target")}
+  (out / "icon.png").write_bytes(png(1024))
+
+  key = out / "update.key"
+  key.unlink(missing_ok=True)
+  run(shipo, "keygen", key, env=env)
+  (out / "key.pub").write_text(run(shipo, "keygen", "--public", key, env=env).strip())
+
+  for version in VERSIONS:
+    manifest = out / version / "Cargo.toml"
+    manifest.write_text(MANIFEST.format(bin=BIN, version=version, id=ID, name=NAME))
+    print(run(shipo, "release", out / version, "--manifest", manifest, env=env), end="")
+
+  newest = out / VERSIONS[-1]
+  files = sorted(f for f in newest.glob(f"{NAME}-dev-*") if f.suffix != ".deb")
+  url = f"{URL}/{{version}}"
+  feed = run(shipo, "feed", "--manifest", newest / "Cargo.toml", "--url", url, "--key", key, *files, env=env)
+  shutil.copy2(feed.strip(), out / "update.txt")
+  print((out / "update.txt").read_text(), end="")
+
+
+def serve(root: Path) -> None:
+  """Serves `root` on loopback in a thread for the rest of the run."""
+  handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(root))
+  server = http.server.ThreadingHTTPServer(("127.0.0.1", PORT), handler)
+  threading.Thread(target=server.serve_forever, daemon=True).start()
+
+
+def one(folder: Path, pattern: str) -> Path:
+  found = sorted(folder.glob(pattern))
+  if len(found) != 1:
+    sys.exit(f"e2e: {folder} holds {len(found)} of {pattern}, not one")
+
+  return found[0]
+
+
+def install(packed: Path, home: Path) -> Path:
+  """1.0.0 installed the way a user does it; its executable."""
+  v1 = packed / VERSIONS[0]
+  if sys.platform == "darwin":
+    mount = home / "volume"
+    run("hdiutil", "attach", "-nobrowse", "-readonly", "-mountpoint", mount, one(v1, "*.dmg"))
+    apps = home / "Applications"
+    apps.mkdir()
+    run("ditto", mount / f"{NAME}.app", apps / f"{NAME}.app")
+    run("hdiutil", "detach", mount)
+    return apps / f"{NAME}.app/Contents/MacOS" / BIN
+
+  if sys.platform == "win32":
+    run(one(v1, "*-setup.exe"), "/S")
+    return Path(os.environ["LOCALAPPDATA"]) / "Programs" / NAME / f"{NAME}.exe"
+
+  image = home / f"{NAME}.AppImage"
+  shutil.copy2(one(v1, "*.AppImage"), image)
+  image.chmod(0o755)
+  return image
+
+
+def registered() -> str | None:
+  """Windows: the installed version the setup wrote last, its uninstall key's DisplayVersion."""
+  import winreg
+
+  path = r"Software\Microsoft\Windows\CurrentVersion\Uninstall"
+  with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path) as keys:
+    for i in range(winreg.QueryInfoKey(keys)[0]):
+      with winreg.OpenKey(keys, winreg.EnumKey(keys, i)) as key:
+        try:
+          if winreg.QueryValueEx(key, "DisplayName")[0] == NAME:
+            return winreg.QueryValueEx(key, "DisplayVersion")[0]
+        except OSError:
+          continue
+
+  return None
+
+
+def stamp(exe: Path):
+  """What changes when the update lands. Windows: the setup's last write, as reading the exe
+  could hold it open against the setup; elsewhere the file, swapped or renamed in one step."""
+  if sys.platform == "win32":
+    return registered()
+
+  st = exe.stat()
+  return (st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+def version(exe: Path) -> str:
+  return run(exe, timeout=30).strip()
+
+
+def check(packed: Path) -> None:
+  """Installs 1.0.0, has it update itself from the served feed, and waits for 2.0.0 to run."""
+  key = (packed / "key.pub").read_text().strip()
+  serve(packed)
+  home = Path(tempfile.mkdtemp(prefix="shipo-e2e-", dir=os.environ.get("RUNNER_TEMP")))
+  exe = install(packed, home)
+  if (v := version(exe)) != VERSIONS[0]:
+    sys.exit(f"e2e: the installed app is {v}, not {VERSIONS[0]}")
+
+  before = stamp(exe)
+  out = run(exe, "--update", f"{URL}/update.txt", key, timeout=WAIT)
+  print(out, end="")
+  if f"installed {VERSIONS[1]}" not in out:
+    sys.exit("e2e: the app did not install the update")
+
+  deadline = time.monotonic() + WAIT
+  while stamp(exe) == before:
+    if time.monotonic() > deadline:
+      sys.exit(f"e2e: {exe} unchanged after {WAIT} s")
+
+    time.sleep(1)
+
+  log(f"{exe} replaced")
+  while (v := version(exe)) != VERSIONS[1]:
+    if time.monotonic() > deadline:
+      sys.exit(f"e2e: the installed app is {v}, not {VERSIONS[1]}")
+
+    time.sleep(2)
+
+  log(f"the installed app is {v}")
+  # The installer removes its staging folder and the old copy as it ends (Windows': the next run).
+  if sys.platform != "win32":
+    folder = exe.parent.parent.parent.parent if sys.platform == "darwin" else exe.parent
+    while left := [p.name for p in folder.iterdir() if ".shipo-" in p.name]:
+      if time.monotonic() > deadline:
+        sys.exit(f"e2e: left in {folder}: {left}")
+
+      time.sleep(1)
+
+  log("updated in place")
+
+
+def main() -> None:
+  ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+  ap.add_argument("step", choices=("build", "pack", "run"))
+  ap.add_argument("dir", type=Path)
+  args = ap.parse_args()
+  out = args.dir.resolve()
+  out.mkdir(parents=True, exist_ok=True)
+  {"build": build, "pack": pack, "run": check}[args.step](out)
+
+
+if __name__ == "__main__":
+  main()

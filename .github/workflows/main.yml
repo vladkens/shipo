@@ -1,0 +1,178 @@
+name: main
+
+# Never pull_request_target or issue_comment: they run PR code with the base branch's rights.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Main runs queue instead, so a dev release is never cut off; a release commit gets its own group.
+concurrency:
+  group: ${{ github.workflow }}-${{ startsWith(github.event.head_commit.message, 'release:') && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - run: rustup toolchain install nightly --profile minimal --component rustfmt
+      - run: make check
+      - run: make test
+
+  # The packer's ignored tests: the real setup (makensis), the .deb and the AppImage read back by
+  # the system's tools, and rcodesign fetched pinned.
+  packages:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - run: sudo apt-get update && sudo apt-get install -y nsis squashfs-tools desktop-file-utils
+      - run: cargo test -- --include-ignored
+
+  # The end-to-end update (scripts/e2e-update.py): examples/update.rs at 1.0.0 and 2.0.0, packed by
+  # shipo, 1.0.0 installed on each OS and updated in place from 2.0.0's feed served on loopback.
+  # The Windows binaries are built here and packed on Ubuntu, where makensis is.
+  e2e-bin:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: e2e
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - run: uv run scripts/e2e-update.py build e2e
+      - uses: actions/upload-artifact@v7
+        with:
+          name: e2e-windows
+          path: e2e/
+          if-no-files-found: error
+
+  e2e-pack:
+    needs: e2e-bin
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: e2e
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - run: sudo apt-get update && sudo apt-get install -y nsis squashfs-tools
+      - run: uv run scripts/e2e-update.py build e2e
+      - uses: actions/download-artifact@v8
+        with:
+          name: e2e-windows
+          path: e2e
+      - run: uv run scripts/e2e-update.py pack e2e
+      - uses: actions/upload-artifact@v7
+        with:
+          name: e2e-packed
+          path: |
+            e2e/
+            !e2e/target/
+          if-no-files-found: error
+
+  e2e:
+    needs: e2e-pack
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - uses: actions/download-artifact@v8
+        with:
+          name: e2e-packed
+          path: e2e
+      - run: uv run scripts/e2e-update.py run e2e
+
+  # The DMG is packed on the Mac that runs it: 1.0.0 takes only a 2.0.0 signed by its own identity,
+  # here "Hello Local Signing", which shipo makes in this runner's keychain.
+  e2e-macos:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: e2e
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - run: uv run scripts/e2e-update.py build e2e
+      - run: uv run scripts/e2e-update.py pack e2e
+      - uses: actions/upload-artifact@v7
+        with:
+          name: e2e-dmg
+          path: e2e/*/*.dmg
+          if-no-files-found: error
+      - run: uv run scripts/e2e-update.py run e2e
+
+  # The DMGs shipo made, read by Linux's own tools: dmg2img unpacks the UDZO image, fsck.hfsplus
+  # (hfsprogs) checks its HFS+ volume.
+  e2e-dmg:
+    needs: e2e-macos
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - run: sudo apt-get update && sudo apt-get install -y hfsprogs dmg2img
+      - uses: actions/download-artifact@v8
+        with:
+          name: e2e-dmg
+          path: dmg
+      - run: |
+          for dmg in dmg/*/*.dmg; do
+            dmg2img -i "$dmg" -o "${dmg%.dmg}.img"
+            fsck.hfsplus -n "${dmg%.dmg}.img"
+          done
+
+  # The shared release steps, as in wavo: `build` builds the packer's binaries read-only; on main
+  # `publish` puts them up as the `dev` pre-release, and a `release: vX.Y.Z (#N)` commit publishes
+  # the crate and the same archives as the version. `publish` never compiles.
+  build:
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest # the macOS binary needs a Mac; Linux cross-compiles
+    steps:
+      - uses: actions/checkout@v7
+      - uses: vladkens/actions/rust-build@v1
+        with:
+          targets: aarch64-apple-darwin x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+          dev: true
+
+  publish:
+    if: github.ref == 'refs/heads/main' # write rights only for main's own workflow
+    needs: [test, packages, e2e, e2e-macos, e2e-dmg, build]
+    runs-on: ubuntu-latest # no build here, and Linux runners start faster
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write # crates.io Trusted Publishing and attestations
+    steps:
+      - uses: actions/checkout@v7
+      - uses: vladkens/actions/rust-publish@v1
