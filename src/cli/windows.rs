@@ -43,10 +43,17 @@ const MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?
 </assembly>
 "#;
 
-/// `<Name>-dev-windows-<x64|arm64>-setup.exe` in `out_dir`: the per-user setup of `binary`, the
-/// app's exe for `arch`, built by `makensis`, which apt's nsis installs.
-pub fn setup(cfg: &Config, binary: &Path, arch: Arch, out_dir: &Path) -> io::Result<PathBuf> {
-  build(cfg, binary, arch, out_dir, OsStr::new("makensis"))
+/// `<Name>-<label>-windows-<x64|arm64>-setup.exe` in `out_dir`, [named](crate::out) by `tag`: the
+/// per-user setup of `binary`, the app's exe for `arch`, built by `makensis`, which apt's nsis
+/// installs.
+pub fn setup(
+  cfg: &Config,
+  binary: &Path,
+  arch: Arch,
+  tag: Option<&str>,
+  out_dir: &Path,
+) -> io::Result<PathBuf> {
+  build(cfg, binary, arch, tag, out_dir, OsStr::new("makensis"))
 }
 
 /// [setup] by the program `makensis`.
@@ -54,6 +61,7 @@ fn build(
   cfg: &Config,
   binary: &Path,
   arch: Arch,
+  tag: Option<&str>,
   out_dir: &Path,
   makensis: &OsStr,
 ) -> io::Result<PathBuf> {
@@ -104,7 +112,7 @@ fn build(
   }
 
   fs::create_dir_all(out_dir)?;
-  let out = out_dir.join(format!("{}-dev-windows-{}-setup.exe", cfg.name, arch.windows()));
+  let out = crate::out(out_dir, &cfg.name, tag, &format!("windows-{}-setup.exe", arch.windows()));
   let setup = tool::read(&tmp.join("out.exe"))?;
   tool::place(&out, |part| File::create_new(part)?.write_all(&setup))?;
   Ok(out)
@@ -1179,7 +1187,8 @@ SectionEnd
     fs::write(&bin, exe(AMD64)).unwrap();
     let out = tmp.join("out");
 
-    let e = build(&cfg, &bin, Arch::X86_64, &out, OsStr::new("shipo-no-makensis")).unwrap_err();
+    let e =
+      build(&cfg, &bin, Arch::X86_64, None, &out, OsStr::new("shipo-no-makensis")).unwrap_err();
     assert_eq!(
       e.to_string(),
       "shipo-no-makensis not found: the setup needs it, `apt-get install nsis`"
@@ -1196,16 +1205,17 @@ SectionEnd
       );
       fs::write(&fake, script).unwrap();
       crate::tool::set_mode(&fake, 0o755).unwrap();
-      let e = build(&cfg, &bin, Arch::X86_64, &out, fake.as_os_str()).unwrap_err().to_string();
+      let e =
+        build(&cfg, &bin, Arch::X86_64, None, &out, fake.as_os_str()).unwrap_err().to_string();
       let want = "failed (exit status: 1): warning 6001: Variable \"x\" not referenced\nError: warning treated as error";
       assert!(e.ends_with(want), "{e}");
     }
 
-    let e = setup(&cfg, &bin, Arch::Aarch64, &out).unwrap_err();
+    let e = setup(&cfg, &bin, Arch::Aarch64, None, &out).unwrap_err();
     assert_eq!(e.to_string(), format!("{}: the exe is for x64, not arm64", bin.display()));
     cfg.name = "A/B".into();
     assert!(
-      setup(&cfg, &bin, Arch::X86_64, &out)
+      setup(&cfg, &bin, Arch::X86_64, None, &out)
         .unwrap_err()
         .to_string()
         .contains("no Windows file name")
@@ -1219,8 +1229,8 @@ SectionEnd
       return;
     }
 
-    let made = setup(&cfg, &bin, Arch::X86_64, &out).unwrap();
-    assert_eq!(made, out.join("Hello-dev-windows-x64-setup.exe"));
+    let made = setup(&cfg, &bin, Arch::X86_64, Some("v1.2.0"), &out).unwrap();
+    assert_eq!(made, out.join("Hello-v1.2.0-windows-x64-setup.exe"));
     let data = fs::read(&made).unwrap();
     assert!(data.starts_with(b"MZ") && data.len() > 30_000, "{}", data.len());
     assert_eq!(fs::read_dir(&out).unwrap().count(), 1);

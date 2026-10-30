@@ -129,7 +129,7 @@ Put the release builds, x86_64 or aarch64, in `dist/<target>/<bin>[.exe]`, such 
 
 ```sh
 shipo release dist                   # the installers of a dev build, Hello-dev-*
-shipo release dist --tag v1.2.0      # a release: signed, notarized, and update.txt
+shipo release dist --tag v1.2.0      # a release, Hello-v1.2.0-*: signed, notarized, and update.txt
 shipo feed --url https://example.com/hello/{version} dist/*.dmg dist/*-setup.exe dist/*.AppImage
 shipo app --bin target/release/hello # the signed Hello.app alone, to try it on a Mac
 ```
@@ -143,7 +143,7 @@ It writes the installers and the signed feed, `update.txt`, into `dist/`:
 | `Hello-dev-linux-x86_64.AppImage` | shipo |
 | `Hello-dev-linux-x86_64.deb` | apt or the user |
 
-With `--tag v1.2.0` (`v` and the app's version) the feed links the files of that GitHub release, named `Hello-v1.2.0-…`: rename `-dev-` to the tag as you upload them. `shipo feed` signs a feed for files served elsewhere and writes it to `target/distrib/update.txt`. `shipo --help` lists every option.
+With `--tag v1.2.0` (`v` and the app's version) the files are `Hello-v1.2.0-…`, and the feed links them in that GitHub release: upload them as they are. `shipo feed` signs a feed for files served elsewhere and writes it to `target/distrib/update.txt`. `shipo --help` lists every option.
 
 macOS releases need a paid Apple Developer ID, and an App Store Connect API key for notarization. A release takes these secrets:
 
@@ -201,9 +201,7 @@ jobs:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-      - run: | # the names the feed lists
-          cd dist && for f in Hello-dev-*; do mv "$f" "${f/-dev-/-$GITHUB_REF_NAME-}"; done
-          gh release create "$GITHUB_REF_NAME" Hello-v* update.txt
+      - run: gh release create "$GITHUB_REF_NAME" dist/Hello-* dist/update.txt
         env: { GH_TOKEN: "${{ github.token }}" }
 ```
 
@@ -215,9 +213,3 @@ Pull requests are welcome, including ones made with agents: point yours at [agen
 ## 📝 License
 
 Distributed under the [MIT License](LICENSE).
-
-## 🔍 See also
-
-- [sparkle-project/Sparkle](https://github.com/sparkle-project/Sparkle) – The macOS updater; shipo checks the code signature the same way.
-- [velopack/velopack](https://github.com/velopack/velopack) – Installers and updates for Windows, macOS and Linux, with delta updates.
-- [crabnebula-dev/cargo-packager](https://github.com/crabnebula-dev/cargo-packager) – Installers and an updater for Rust apps from the Tauri team, with more formats such as MSI and pacman.

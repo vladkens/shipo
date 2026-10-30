@@ -96,10 +96,17 @@ fn pngs(cfg: &Config, sizes: &[usize]) -> io::Result<BTreeMap<usize, Vec<u8>>> {
 
 // MARK: AppImage
 
-/// `<Name>-dev-linux-<arch>.AppImage` in `out_dir` of the binary `bin`, 0755: the type2 runtime of
-/// `arch`, fetched into `<target>/tools` once and pinned by SHA-256, with the squashfs of the
-/// [appdir] appended. The runtime mounts it, by FUSE or unpacked, and sets `APPIMAGE` and `APPDIR`.
-pub fn appimage(cfg: &Config, bin: &Path, arch: Arch, out_dir: &Path) -> io::Result<PathBuf> {
+/// `<Name>-<label>-linux-<arch>.AppImage` in `out_dir` ([named](crate::out) by `tag`) of the binary
+/// `bin`, 0755: the type2 runtime of `arch`, fetched into `<target>/tools` once and pinned by
+/// SHA-256, with the squashfs of the [appdir] appended. The runtime mounts it, by FUSE or unpacked,
+/// and sets `APPIMAGE` and `APPDIR`.
+pub fn appimage(
+  cfg: &Config,
+  bin: &Path,
+  arch: Arch,
+  tag: Option<&str>,
+  out_dir: &Path,
+) -> io::Result<PathBuf> {
   // The runtime's SHA-256.
   let sha256 = match arch {
     Arch::X86_64 => "2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d",
@@ -114,7 +121,7 @@ pub fn appimage(cfg: &Config, bin: &Path, arch: Arch, out_dir: &Path) -> io::Res
 
   let mtime = u32::try_from(mtime(bin)?).map_err(|_| bad("the squashfs's time is past 2106"))?;
   let squashfs = squashfs(&appdir(cfg, read(bin)?, icon)?, mtime)?;
-  let out = out_dir.join(format!("{}-dev-linux-{arch}.AppImage", cfg.name));
+  let out = crate::out(out_dir, &cfg.name, tag, &format!("linux-{arch}.AppImage"));
   tool::place(&out, |part| {
     let mut file = File::create_new(part)?;
     io::copy(&mut File::open(&runtime)?, &mut file)?;
@@ -139,10 +146,16 @@ fn appdir(cfg: &Config, bin: Vec<u8>, icon: Vec<u8>) -> io::Result<Tree> {
 
 // MARK: Debian package
 
-/// `<Name>-dev-linux-<arch>.deb` in `out_dir` of the binary `bin`: `/usr/bin/<bin>`, the
-/// `.desktop` entry, the icon at each [HICOLOR] size and the [license] as the copyright. Its
-/// version is a `dev` build's or a release's.
-pub fn deb(cfg: &Config, bin: &Path, arch: Arch, dev: bool, out_dir: &Path) -> io::Result<PathBuf> {
+/// `<Name>-<label>-linux-<arch>.deb` in `out_dir` ([named](crate::out) by `tag`) of the binary
+/// `bin`: `/usr/bin/<bin>`, the `.desktop` entry, the icon at each [HICOLOR] size and the [license]
+/// as the copyright. Its version is a release's with a `tag`, else a `dev` build's.
+pub fn deb(
+  cfg: &Config,
+  bin: &Path,
+  arch: Arch,
+  tag: Option<&str>,
+  out_dir: &Path,
+) -> io::Result<PathBuf> {
   let pkg = package(cfg)?;
   let pngs = pngs(cfg, &HICOLOR)?;
   let license = license(cfg);
@@ -164,9 +177,9 @@ pub fn deb(cfg: &Config, bin: &Path, arch: Arch, dev: bool, out_dir: &Path) -> i
     tree.file(&format!("usr/share/doc/{pkg}/copyright"), 0o644, read(&license)?);
   }
 
-  let control = control(cfg, &pkg, arch, dev, tree.size())?;
+  let control = control(cfg, &pkg, arch, tag.is_none(), tree.size())?;
   let data = deb_archive(&control, &tree, mtime(bin)?)?;
-  let out = out_dir.join(format!("{}-dev-linux-{arch}.deb", cfg.name));
+  let out = crate::out(out_dir, &cfg.name, tag, &format!("linux-{arch}.deb"));
   tool::place(&out, |part| File::create_new(part)?.write_all(&data))?;
   Ok(out)
 }
@@ -1060,8 +1073,8 @@ deb-recommends = ["libgtk-3-0t64 | libgtk-3-0", "libasound2t64"]
 
     // Both made first, so a host that can't run the AppImage still checks the .deb: an emulator's
     // binfmt entry refuses the AppImage's magic bytes in the ELF header.
-    let image = appimage(&cfg, &bin, arch, &out).unwrap();
-    let deb = deb(&cfg, &bin, arch, true, &out).unwrap();
+    let image = appimage(&cfg, &bin, arch, None, &out).unwrap();
+    let deb = deb(&cfg, &bin, arch, None, &out).unwrap();
     assert_eq!(deb, out.join(format!("Hello World-dev-linux-{arch}.deb")));
     let info = text(Command::new("dpkg-deb").arg("--info").arg(&deb));
     let control = control(&cfg, "hello", arch, true, 0).unwrap();

@@ -17,7 +17,7 @@ The packer makes, per platform it is given a binary for:
 | `linux-<arch>` | `<Name>-<label>-linux-<arch>.AppImage` | the app as one file ([Linux](#linux)) |
 | `linux-<arch>` | `<Name>-<label>-linux-<arch>.deb` | the app for apt, which updates it; not in the feed |
 
-`<Name>` is the app's name, `<label>` is `dev` for a build of a branch and the tag, `v<version>`, for a release. The packer writes `dev` names; the release job (vladkens/actions `rust-publish`) renames `<Name>-dev-` to `<Name>-v<version>-` as it uploads them, the same bytes, and the feed lists them by those names. A release's tag is `v` and the app's version; the packer refuses another.
+`<Name>` is the app's name, `<label>` is `dev` for a build of a branch and the tag, `v<version>`, for a release. The packer writes the files by these names and the feed lists them so, to be uploaded as they are. A release's tag is `v` and the app's version; the packer refuses another.
 
 ## The feed
 

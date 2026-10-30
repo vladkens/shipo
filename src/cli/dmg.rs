@@ -15,9 +15,9 @@ use crate::hfs::{self, Data, Entry, Kind};
 use crate::macos::{self, Plist};
 use crate::{Arch, bad, sign, tool};
 
-/// `<Name>-dev-macos-<arch>.dmg` in `dir` of the signed bundle `app`, signed as [crate::macos::app]
-/// signs it; notarized and stapled when it is a Developer ID's and `notarize`, which a release (a
-/// `tag`) takes. Gives its path.
+/// `<Name>-<label>-macos-<arch>.dmg` in `dir` ([named](crate::out) by `tag`) of the signed bundle
+/// `app`, signed as [crate::macos::app] signs it; notarized and stapled when it is a Developer ID's
+/// and `notarize`, which a release (a `tag`) takes. Gives its path.
 pub fn dmg(
   cfg: &Config,
   app: &Path,
@@ -26,7 +26,7 @@ pub fn dmg(
   notarize: bool,
   dir: &Path,
 ) -> io::Result<PathBuf> {
-  let out = write(cfg, app, arch, dir)?;
+  let out = write(cfg, app, arch, tag, dir)?;
   sign::kept(out, |out| {
     let (signer, developer) = sign::sign_image(cfg, out, tag)?;
     if tag.is_some() && !developer {
@@ -45,10 +45,16 @@ pub fn dmg(
   .map(|(out, ())| out)
 }
 
-/// `<Name>-dev-macos-<arch>.dmg` in `dir` of the bundle `app`, unsigned, [placed](tool::place) over
-/// one there, so a failure leaves none.
-fn write(cfg: &Config, app: &Path, arch: Arch, dir: &Path) -> io::Result<PathBuf> {
-  let out = dir.join(format!("{}-dev-macos-{arch}.dmg", cfg.name));
+/// `<Name>-<label>-macos-<arch>.dmg` in `dir` of the bundle `app`, unsigned, [placed](tool::place)
+/// over one there, so a failure leaves none.
+fn write(
+  cfg: &Config,
+  app: &Path,
+  arch: Arch,
+  tag: Option<&str>,
+  dir: &Path,
+) -> io::Result<PathBuf> {
+  let out = crate::out(dir, &cfg.name, tag, &format!("macos-{arch}.dmg"));
   tool::place(&out, |part| {
     let mut file = io::BufWriter::new(fs::File::create_new(part)?);
     image(&cfg.name, app, &mut file)?;
@@ -404,7 +410,7 @@ pub(crate) mod tests {
     let mut cfg = crate::macos::tests::config(&tmp, "");
     cfg.name = "Wavö".into();
     let app = signed_app(&tmp, "Wavö.app");
-    let dmg = write(&cfg, &app, Arch::Aarch64, &tmp).unwrap();
+    let dmg = write(&cfg, &app, Arch::Aarch64, None, &tmp).unwrap();
     assert_eq!(dmg, tmp.join("Wavö-dev-macos-aarch64.dmg"));
 
     run(Command::new("codesign").args(["--force", "--sign", "-"]).arg(&dmg)).unwrap();
@@ -450,7 +456,7 @@ pub(crate) mod tests {
     let tmp = Temp::new().unwrap();
     let cfg = crate::macos::tests::config(&tmp, "");
     let app = bundle(&tmp, "Hello.app");
-    let dmg = write(&cfg, &app, Arch::X86_64, &tmp).unwrap();
+    let dmg = write(&cfg, &app, Arch::X86_64, None, &tmp).unwrap();
     let exe = env::current_exe().unwrap();
     let rcodesign = sign::rcodesign(&exe.ancestors().nth(3).unwrap().join("tools")).unwrap();
     let check = |dmg: &Path| {
@@ -463,7 +469,7 @@ pub(crate) mod tests {
     sign::rsign(&rcodesign, &dmg, None, &[]).unwrap();
     check(&dmg);
 
-    let dmg = write(&cfg, &app, Arch::X86_64, &tmp).unwrap();
+    let dmg = write(&cfg, &app, Arch::X86_64, None, &tmp).unwrap();
     let p12 = crate::sign::tests::p12(&tmp, "pw", true);
     let p12 = sign::certificate(&tmp, &p12, "pw").unwrap();
     sign::rsign(&rcodesign, &dmg, Some(&p12), &[]).unwrap();

@@ -76,14 +76,13 @@ fn platform(name: &str) -> Option<usize> {
 }
 
 /// The feed's records before its signature: `version`, `notes` if given, and a line per file of
-/// `files`, each served at `<url>/<name(its file name)>` percent-encoded, `{version}` in `url` the
-/// version. `release` names the files as its release serves them; the command keeps them.
+/// `files`, each served at `<url>/<its file name>` percent-encoded, `{version}` in `url` the
+/// version.
 pub fn body(
   version: &str,
   notes: Option<&str>,
   url: &str,
   files: &[PathBuf],
-  name: impl Fn(&str) -> String,
 ) -> io::Result<String> {
   if !comparable(version) {
     return Err(bad(format!("the version {version:?} is not <number>.<number>… without a `v`")));
@@ -110,7 +109,7 @@ pub fn body(
       )));
     };
 
-    let url = format!("{base}/{}", encode(&name(file_name)));
+    let url = format!("{base}/{}", encode(file_name));
     if !secure(&url) {
       return Err(bad(format!("{url:?} is not an https URL the apps would take")));
     }
@@ -266,7 +265,7 @@ mod tests {
     let dir = Temp::files(&[(names[0], "abc"), (names[1], ""), (names[2], "abc")]);
     let notes = "https://github.com/me/app/releases/tag/v1.2.0";
     let url = "https://github.com/me/app/releases/download/v{version}/";
-    let text = body("1.2.0", Some(notes), url, &names.map(|n| dir.join(n)), str::to_owned).unwrap();
+    let text = body("1.2.0", Some(notes), url, &names.map(|n| dir.join(n))).unwrap();
     let path = write(&key(), &text, &dir.join("distrib")).unwrap();
     assert_eq!(path, dir.join("distrib/update.txt"));
     assert!(!dir.join("distrib/update.txt.part").exists());
@@ -314,12 +313,11 @@ mod tests {
   }
 
   #[test]
-  fn version_in_the_url_and_the_release_names() {
+  fn version_in_the_url() {
     let (_dir, files) = release();
-    let rename = |n: &str| n.replace("App-dev-", "App-v2.0.0-");
-    let text = body("2.0.0", None, "https://h/{version}/x/{version}", &files, rename).unwrap();
+    let text = body("2.0.0", None, "https://h/{version}/x/{version}", &files).unwrap();
     let line = text.lines().find(|l| l.starts_with("linux-aarch64 ")).unwrap();
-    assert!(line.ends_with(" https://h/2.0.0/x/2.0.0/App-v2.0.0-linux-aarch64.AppImage"), "{line}");
+    assert!(line.ends_with(" https://h/2.0.0/x/2.0.0/App-dev-linux-aarch64.AppImage"), "{line}");
     let order = text.lines().map(|l| l.split(' ').next().unwrap()).collect::<Vec<_>>();
     let want = ["version"].into_iter().chain(PLATFORMS.map(|(p, _)| p)).collect::<Vec<_>>();
     assert_eq!(order, want);
@@ -345,11 +343,11 @@ mod tests {
     ];
 
     for (version, notes, url, names, want) in cases {
-      let e = body(version, notes, url, &paths(&dir, names), str::to_owned).unwrap_err();
+      let e = body(version, notes, url, &paths(&dir, names)).unwrap_err();
       assert!(e.to_string().contains(want), "{version} {notes:?} {url} {names:?}: {e}");
     }
 
-    let text = body("1.0", None, "http://127.0.0.1:8000/", &paths(&dir, &[dmg]), str::to_owned);
+    let text = body("1.0", None, "http://127.0.0.1:8000/", &paths(&dir, &[dmg]));
     assert!(text.unwrap().contains(" http://127.0.0.1:8000/App-dev-macos-aarch64.dmg\n"));
   }
 
@@ -401,7 +399,7 @@ mod tests {
   fn the_library_reads_the_feed() {
     let (dir, files) = release();
     let notes = "https://h/releases/tag/v1.2.0";
-    let text = body("1.2.0", Some(notes), "https://h/{version}", &files, str::to_owned).unwrap();
+    let text = body("1.2.0", Some(notes), "https://h/{version}", &files).unwrap();
     let feed = fs::read(write(&key(), &text, &dir).unwrap()).unwrap();
     let reader = shipo::Feed::new("https://h/update.txt", &[PUBLIC]);
     let r = reader.read(&feed, "0.0.0").unwrap();
@@ -496,7 +494,7 @@ mod tests {
     for (name, want) in
       [(space, format!("My%20App-dev{end}")), (other, format!("Wav%C3%B6-dev{end}"))]
     {
-      let text = body("1.0", None, "https://h/", &paths(&dir, &[&name]), str::to_owned).unwrap();
+      let text = body("1.0", None, "https://h/", &paths(&dir, &[&name])).unwrap();
       let feed = fs::read(write(&key(), &text, &dir.join("out")).unwrap()).unwrap();
       let r = reader.read(&feed, "0.0.0").unwrap().unwrap();
       assert_eq!(r.url, format!("https://h/{want}"));

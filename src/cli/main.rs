@@ -263,9 +263,9 @@ impl fmt::Display for Arch {
   }
 }
 
-/// The installers of the binaries in `dir`, `<Name>-dev-…` at its top level, each path printed;
-/// with `tag` also update.txt there, signed by `key`, of the files as the GitHub release serves
-/// them. The tag and the key are checked before anything is built.
+/// The installers of the binaries in `dir`, [named](out) by `tag` at its top level, each path
+/// printed; with `tag` also update.txt there, signed by `key`, of the files at the GitHub release
+/// by those names. The tag and the key are checked before anything is built.
 fn release(cfg: &Config, dir: &Path, tag: Option<&str>, key: Option<&Path>) -> io::Result<()> {
   if tag.is_none() && key.is_some() {
     return Err(bad("--key signs the feed, which only --tag writes"));
@@ -289,11 +289,10 @@ fn release(cfg: &Config, dir: &Path, tag: Option<&str>, key: Option<&Path>) -> i
         let (app, _) = macos::app(cfg, &bin, tag)?;
         vec![dmg::dmg(cfg, &app, arch, tag, notarize, dir)?]
       }
-      Os::Windows => vec![windows::setup(cfg, &bin, arch, dir)?],
-      Os::Linux => vec![
-        linux::appimage(cfg, &bin, arch, dir)?,
-        linux::deb(cfg, &bin, arch, tag.is_none(), dir)?,
-      ],
+      Os::Windows => vec![windows::setup(cfg, &bin, arch, tag, dir)?],
+      Os::Linux => {
+        vec![linux::appimage(cfg, &bin, arch, tag, dir)?, linux::deb(cfg, &bin, arch, tag, dir)?]
+      }
     };
 
     for file in made {
@@ -308,8 +307,7 @@ fn release(cfg: &Config, dir: &Path, tag: Option<&str>, key: Option<&Path>) -> i
   files.retain(|f| f.extension().is_none_or(|e| e != "deb"));
   let url = format!("{}/releases/download/{tag}", cfg.repository);
   let notes = format!("{}/releases/tag/{tag}", cfg.repository);
-  let name = |file: &str| renamed(&cfg.name, tag, file);
-  let body = feed::body(&cfg.version, Some(&notes), &url, &files, name)?;
+  let body = feed::body(&cfg.version, Some(&notes), &url, &files)?;
   println!("{}", feed::write(&key, &body, dir)?.display());
   Ok(())
 }
@@ -342,20 +340,49 @@ fn tagged(tag: &str, version: &str, repository: &str, name: &str) -> io::Result<
   Ok(())
 }
 
-/// Removes `dir`'s update.txt and `<name>-dev-*` files, a previous run's, so no old feed or
-/// package of a triple gone from `dir` is left beside the new ones.
+/// `<name>-<label>-<end>` in `dir`, a file `release` writes: the label the `tag`, else `dev`.
+pub fn out(dir: &Path, name: &str, tag: Option<&str>, end: &str) -> PathBuf {
+  dir.join(format!("{name}-{}-{end}", tag.unwrap_or("dev")))
+}
+
+/// Removes `dir`'s update.txt and the files a run of any [label] writes, `<name>-<label>-<end>` of
+/// each [Arch]'s ends, so no old feed, package of a triple gone from `dir` or other version's file
+/// is left beside the new ones, which a glob would upload.
 fn clean(dir: &Path, name: &str) -> io::Result<()> {
-  let prefix = format!("{name}-dev-");
+  let ends: Vec<_> = Arch::ALL
+    .into_iter()
+    .flat_map(|a| {
+      [
+        format!("-macos-{a}.dmg"),
+        format!("-windows-{}-setup.exe", a.windows()),
+        format!("-linux-{a}.AppImage"),
+        format!("-linux-{a}.deb"),
+      ]
+    })
+    .collect();
+
+  let ours = |f: &str| {
+    let rest = f.strip_prefix(name).and_then(|f| f.strip_prefix('-')).unwrap_or_default();
+    ends.iter().any(|end| rest.strip_suffix(end.as_str()).is_some_and(label))
+  };
+
   for entry in fs::read_dir(dir)? {
     let entry = entry?;
     let file = entry.file_name();
-    let stale = file == "update.txt" || file.to_str().is_some_and(|f| f.starts_with(&prefix));
+    let stale = file == "update.txt" || file.to_str().is_some_and(ours);
     if stale && !entry.file_type()?.is_dir() {
       fs::remove_file(entry.path())?;
     }
   }
 
   Ok(())
+}
+
+/// Whether `l` is a file name's label: `dev`, or a tag, `v<number>.<number>…`.
+fn label(l: &str) -> bool {
+  let Some(version) = l.strip_prefix('v') else { return l == "dev" };
+  let parts: Vec<_> = version.split('.').take(2).collect();
+  parts.len() == 2 && parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// The binaries in `dir`, `<triple>/<bin>[.exe]` of each [Os] and [Arch], each with its OS and
@@ -384,15 +411,6 @@ fn binaries(dir: &Path, bin: &str) -> io::Result<Vec<(Os, Arch, PathBuf)>> {
   Ok(found)
 }
 
-/// The name rust-publish gives the release's `file`: `<name>-dev-…` as `<name>-<tag>-…`, the same
-/// bytes; another name as it is.
-fn renamed(name: &str, tag: &str, file: &str) -> String {
-  match file.strip_prefix(&format!("{name}-dev-")) {
-    Some(rest) => format!("{name}-{tag}-{rest}"),
-    None => file.to_string(),
-  }
-}
-
 /// The feed of `files` served at `url`, signed by `key`, in `<target>/distrib`; prints its path.
 fn feed(
   cfg: &Config,
@@ -403,7 +421,7 @@ fn feed(
 ) -> io::Result<()> {
   // The key first: a missing one fails before the files are hashed.
   let key = feed::Key::load(key, std::env::var_os("SHIPO_UPDATE_KEY"))?;
-  let body = feed::body(&cfg.version, notes, url, files, str::to_owned)?;
+  let body = feed::body(&cfg.version, notes, url, files)?;
   let path = feed::write(&key, &body, &cfg.target.join("distrib"))?;
   println!("{}", path.display());
   Ok(())
@@ -616,28 +634,24 @@ mod tests {
   }
 
   #[test]
-  fn renames() {
-    let cases = [
-      ("Wavo-dev-linux-x86_64.AppImage", "Wavo-v1.2.0-linux-x86_64.AppImage"),
-      ("Wavo-dev-windows-arm64-setup.exe", "Wavo-v1.2.0-windows-arm64-setup.exe"),
-      ("Wavo Pro-dev-macos-aarch64.dmg", "Wavo Pro-dev-macos-aarch64.dmg"),
-      ("Wavo-devx-linux-x86_64.AppImage", "Wavo-devx-linux-x86_64.AppImage"),
-      ("update.txt", "update.txt"),
-    ];
+  fn names() {
+    let dir = Path::new("dist");
+    assert_eq!(out(dir, "Wavo", None, "linux-x86_64.deb"), dir.join("Wavo-dev-linux-x86_64.deb"));
+    assert_eq!(
+      out(dir, "Wavo Pro", Some("v1.2.0"), "macos-aarch64.dmg"),
+      dir.join("Wavo Pro-v1.2.0-macos-aarch64.dmg")
+    );
+  }
 
-    for (file, want) in cases {
-      assert_eq!(renamed("Wavo", "v1.2.0", file), want, "{file}");
+  #[test]
+  fn labels() {
+    for l in ["dev", "v1.2", "v1.2.0", "v1.2.0-rc.1", "v10.0.0+b5"] {
+      assert!(label(l), "{l}");
     }
 
-    assert_eq!(
-      renamed("My-dev-App", "v1.2.0", "My-dev-App-dev-linux-x86_64.AppImage"),
-      "My-dev-App-v1.2.0-linux-x86_64.AppImage"
-    );
-
-    assert_eq!(
-      renamed("Wavo Pro", "v1.2.0", "Wavo Pro-dev-macos-aarch64.dmg"),
-      "Wavo Pro-v1.2.0-macos-aarch64.dmg"
-    );
+    for l in ["", "devx", "Pro-dev", "v", "v1", "vx.1", "v2-v1.0.0", "v1..0", "1.2.0"] {
+      assert!(!label(l), "{l}");
+    }
   }
 
   #[test]
@@ -648,7 +662,14 @@ mod tests {
       "Wavo-dev-windows-x64-setup.exe",
       "update.txt",
       "Wavo-v1.2.0-linux-x86_64.deb",
+      "Wavo-v1.1.0-rc.1-macos-aarch64.dmg",
+      "Wavo-v1.2.0-windows-arm64-setup.exe",
+      "Wavo-v1.2.0-linux-aarch64.AppImage",
       "Wavo-devx.txt",
+      "Wavo-dev-linux-x86_64.zip",
+      "Wavo-v1.2.0-notes.md",
+      "Wavo-v2-v1.0.0-linux-x86_64.deb",
+      "Wavo Pro-dev-linux-x86_64.deb",
       "Other-dev-linux-x86_64.deb",
       "notes.md",
     ];
@@ -661,9 +682,12 @@ mod tests {
     clean(&tmp, "Wavo").unwrap();
     let want = [
       "Other-dev-linux-x86_64.deb",
+      "Wavo Pro-dev-linux-x86_64.deb",
       "Wavo-dev-folder",
+      "Wavo-dev-linux-x86_64.zip",
       "Wavo-devx.txt",
-      "Wavo-v1.2.0-linux-x86_64.deb",
+      "Wavo-v1.2.0-notes.md",
+      "Wavo-v2-v1.0.0-linux-x86_64.deb",
       "notes.md",
     ];
     assert_eq!(listed(&tmp), want);
