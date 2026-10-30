@@ -1,3 +1,5 @@
 # The committed setup stubs (make setup): bytes, never diffed or merged as text; no LFS, which
 # cargo's git checkouts never fetch.
 /stubs/*.exe binary -diff
+# Signed test fixtures: their bytes on every OS, no CRLF on a Windows checkout.
+/tests/fixtures/** -text
