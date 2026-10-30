@@ -275,14 +275,7 @@ Every crate an updater pulls in ships inside your app and must be trusted: shipo
 | Delta updates | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
 | License | MIT | MIT/Apache-2.0 | MIT/Apache-2.0 | MIT | MIT | paid (free for open source) |
 
-- **Packs every OS from one machine**: one CI job makes every installer. Sparkle and [WinSparkle](https://winsparkle.org) only update, so you pack with other tools.
-- **macOS release from Linux**: the DMG is signed and notarized on a Linux runner, so you need no Mac and no macOS runner.
-- **Crates in your app**: each one is code every user runs, and it adds build time. Tauri's count is what its updater adds to a Tauri app. Sparkle is an Objective-C framework and Conveyor uses each OS's updater, so they add none.
-- **Signed updates**: a stolen hosting or CI token can't push an update without the private key. With a spare key a leaked key is replaced by a normal release; with one key, only by a release people download by hand (Sparkle can switch keys in an update signed with your Developer ID). Conveyor relies on each OS's signing. Velopack checks only the hashes in its feed, so whoever can change the hosting can ship an update.
-- **Delta updates**: an update downloads only what changed; shipo downloads the whole app. Velopack sends them on every OS, Sparkle on macOS, Conveyor on Windows and macOS.
-- **License**: all are free for commercial use except Conveyor, paid for closed-source apps.
-
-The others lead elsewhere: delta updates, more formats (MSI, .rpm, pacman) and years of use, with Sparkle the reference on macOS. Crates are what `cargo tree -e normal` listed on 2026-10-30 for an app with only the updater, counting the updater itself and its build-time macros.
+Crates: `cargo tree` of an app with only the updater, on 2026-10-30; for Tauri, what its updater adds. One key: a leaked key can't be replaced by an update. HTTPS only: whoever can change the hosting can ship an update. Sparkle is the reference on macOS; cargo-packager and Tauri also make MSI, .rpm or pacman.
 
 ## 🤝 Contributing
 
