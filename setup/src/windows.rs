@@ -86,12 +86,14 @@ fn run(args: &Args, title: &mut String) -> io::Result<()> {
   Ok(())
 }
 
-/// Removes the app of `info` from `dir`, the uninstaller at `path` moved to the temp folder first,
-/// where it can be while it runs, so the folder can go; then its shortcut, its launch at login and
-/// its key. The app's data stays.
+/// Removes the app of `info` from `dir`, the uninstaller at `path` moved out first, where it can be
+/// while it runs, so the folder can go: to the temp folder, or the install folder's parent when
+/// that is on another volume; then its shortcut, its launch at login and its key. The app's data
+/// stays.
 fn uninstall_from(dir: &Path, path: &Path, info: &Info) -> io::Result<()> {
-  let away = env::temp_dir().join(format!("{}-uninstall-{}.exe", info.name, std::process::id()));
-  remove(dir, &info.name, || fs::rename(path, &away).is_ok())?;
+  let name = format!("{}-uninstall-{}.exe", info.name, std::process::id());
+  let away = [env::temp_dir(), dir.parent().unwrap_or(dir).to_path_buf()];
+  remove(dir, &info.name, || away.iter().any(|d| fs::rename(path, d.join(&name)).is_ok()))?;
   match fs::remove_file(programs()?.join(format!("{}.lnk", info.name))) {
     Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
     _ => {}

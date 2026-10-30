@@ -139,10 +139,12 @@ fn file_name(name: &str) -> io::Result<()> {
   let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
     || numbered && (stem.starts_with("COM") || stem.starts_with("LPT"));
   let chars = name.chars().any(|c| c.is_control() || r#"<>:"/\|?*"#.contains(c));
-  match name.is_empty() || chars || device || name.ends_with(['.', ' ']) {
+  // The setup's own uninstaller is `Uninstall.exe`, beside `<name>.exe`.
+  let taken = name.eq_ignore_ascii_case("Uninstall");
+  match name.is_empty() || chars || device || taken || name.ends_with(['.', ' ']) {
     true => Err(bad(format!(
       "the name {name:?} makes no Windows file name: none of <>:\"/\\|?*, no control character, \
-       no . or space at its end, no device's name"
+       no . or space at its end, no device's name, not Uninstall"
     ))),
     false => Ok(()),
   }
@@ -751,7 +753,9 @@ pub(crate) mod tests {
       assert!(file_name(ok).is_ok(), "{ok}");
     }
 
-    for no in ["", "a/b", "a:b", "a\"b", "a\nb", "dot.", "space ", "CON", "nul.app", "Lpt3"] {
+    for no in
+      ["", "a/b", "a:b", "a\"b", "a\nb", "dot.", "space ", "CON", "nul.app", "Lpt3", "uninstall"]
+    {
       assert!(file_name(no).is_err(), "{no}");
     }
 

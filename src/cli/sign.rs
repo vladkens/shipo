@@ -198,7 +198,9 @@ pub fn rcodesign(tools: &Path) -> io::Result<PathBuf> {
     _ => ("unknown-linux-musl", ".tar.gz", ""),
   };
 
-  let triple = format!("{}-{os}", env::consts::ARCH);
+  // Windows on arm64 runs the x64 build, as no arm64 one is released.
+  let arch = if os == "pc-windows-msvc" { "x86_64" } else { env::consts::ARCH };
+  let triple = format!("{arch}-{os}");
   let Some(&(_, sha256)) = RCODESIGN_SHA256.iter().find(|(t, _)| *t == triple) else {
     return Err(bad(format!("no rcodesign is pinned for {triple}")));
   };
