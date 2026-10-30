@@ -1,7 +1,7 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/shipo
 //! The programs the packer runs: a command whose failure is an error with what it printed, the
-//! pinned tools it fetches by the system's `curl`, checked by their SHA-256, and the temporary
-//! folders and private files their secrets go through.
+//! pinned tools it fetches by the system's `curl`, checked by their SHA-256 and unpacked by our own
+//! tar reader, and the temporary folders and private files their secrets go through.
 
 use std::fmt::Write;
 use std::fs::{self, File, OpenOptions};
@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::bad;
+use crate::{bad, tar};
 
 /// The secrets a release job holds, kept from every program the packer runs: one that needs a
 /// value gets it under a name of its own.
@@ -180,10 +180,15 @@ pub fn sha256(path: &Path) -> io::Result<String> {
   Ok(hex)
 }
 
-/// The file `member` of the gzipped tarball `tarball`, by the system's `tar`, at `path` (0755):
-/// written beside it and renamed over it, so a copy that runs is never rewritten.
+/// The file `member` of the gzipped tarball `tarball` at `path` (0755): written beside it and
+/// renamed over it, so a copy that runs is never rewritten.
 pub fn untar(tarball: &Path, member: &str, path: &Path) -> io::Result<PathBuf> {
-  let data = run(Command::new("tar").arg("-xzOf").arg(tarball).arg(member))?;
+  let at = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", tarball.display()));
+  let files = tar::files(&fs::read(tarball).map_err(at)?).map_err(at)?;
+  let Some((_, data)) = files.into_iter().find(|(name, _)| name == member) else {
+    return Err(bad(format!("{}: no {member}", tarball.display())));
+  };
+
   let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
   let part = path.with_file_name(format!("{name}.part"));
   let _ = fs::remove_file(&part);

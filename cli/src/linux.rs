@@ -1,20 +1,20 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/shipo
 //! The Linux packages of the app's binary: its `.desktop` entry, the AppImage (the type2 runtime
-//! with a squashfs of the AppDir appended, by `mksquashfs`) and the `.deb` (by `dpkg-deb`).
+//! with a squashfs of the AppDir appended) and the `.deb`, both built in memory.
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::time::SystemTime;
 use std::{io, iter};
 
 use toml::Value;
 
-use crate::bad;
 use crate::config::Config;
 use crate::image::{Image, icons};
-use crate::tool::{self, Temp, run};
+use crate::tree::Tree;
+use crate::{bad, deb, squashfs, tool};
 
 /// The release of the AppImage type2 runtime: static, so the AppImage needs no libfuse2.
 const RUNTIME: &str = "20251108";
@@ -125,41 +125,36 @@ pub fn appimage(cfg: &Config, bin: &Path, arch: &str, out_dir: &Path) -> io::Res
   let runtime = cfg.target.join("tools").join(format!("runtime-{RUNTIME}-{arch}"));
   let runtime = tool::fetch(&url, sha256, &runtime)?;
 
-  let tmp = Temp::new()?;
-  let (dir, squashfs) = (tmp.join("AppDir"), tmp.join("app.squashfs"));
-  appdir(cfg, bin, &icon, &dir)?;
-  let mut cmd = Command::new("mksquashfs");
-  cmd.arg(&dir).arg(&squashfs).args(["-comp", "zstd", "-root-owned", "-noappend", "-b", "128K"]);
-  apt(cmd.args(["-mkfs-time", "0", "-quiet", "-no-progress"]), "squashfs-tools")?;
-
+  let mtime = u32::try_from(mtime(bin)?).map_err(|_| bad("the squashfs's time is past 2106"))?;
+  let squashfs = squashfs::build(&appdir(cfg, read(bin)?, icon)?, mtime)?;
   let out = out_dir.join(format!("{}-dev-linux-{arch}.AppImage", cfg.name));
   place(&out, |part| {
     let mut file = File::create(part)?;
     io::copy(&mut File::open(&runtime)?, &mut file)?;
-    io::copy(&mut File::open(&squashfs)?, &mut file)?;
+    io::Write::write_all(&mut file, &squashfs)?;
     file.sync_all()?;
     tool::set_mode(part, 0o755)
   })?;
   Ok(out)
 }
 
-/// The AppDir in `dir` of the binary `bin` and the icon's PNG: `usr/bin/<bin>` (0755), `AppRun`
-/// a link to it, `<id>.desktop`, `<id>.png` and `.DirIcon` a link to it. The folders are 0755 and
-/// the rest 0644 whatever the umask: squashfs keeps the modes.
-fn appdir(cfg: &Config, bin: &Path, icon: &[u8], dir: &Path) -> io::Result<()> {
-  copy(bin, &dir.join("usr/bin").join(&cfg.bin), 0o755)?;
-  put(&dir.join(format!("{}.desktop", cfg.id)), desktop(cfg)?.as_bytes(), 0o644)?;
-  put(&dir.join(format!("{}.png", cfg.id)), icon, 0o644)?;
-  symlink(&format!("usr/bin/{}", cfg.bin), &dir.join("AppRun"))?;
-  symlink(&format!("{}.png", cfg.id), &dir.join(".DirIcon"))?;
-  open_dirs(dir)
+/// The AppDir of the binary `bin` and the icon's PNG: `usr/bin/<bin>` (0755), `AppRun` a link to
+/// it, `<id>.desktop`, `<id>.png` and `.DirIcon` a link to it.
+fn appdir(cfg: &Config, bin: Vec<u8>, icon: Vec<u8>) -> io::Result<Tree> {
+  let mut tree = Tree::default();
+  tree.file(&format!("usr/bin/{}", cfg.bin), 0o755, bin);
+  tree.file(&format!("{}.desktop", cfg.id), 0o644, desktop(cfg)?);
+  tree.file(&format!("{}.png", cfg.id), 0o644, icon);
+  tree.link("AppRun", &format!("usr/bin/{}", cfg.bin));
+  tree.link(".DirIcon", &format!("{}.png", cfg.id));
+  Ok(tree)
 }
 
 // MARK: Debian package
 
-/// `<Name>-dev-linux-<arch>.deb` in `out_dir` of the binary `bin`, by `dpkg-deb`, xz-compressed
-/// as older dpkg reads it: `/usr/bin/<bin>`, the `.desktop` entry, the icon at each [HICOLOR] size
-/// and the [license] as the copyright. Its version is a `dev` build's or a release's.
+/// `<Name>-dev-linux-<arch>.deb` in `out_dir` of the binary `bin`: `/usr/bin/<bin>`, the
+/// `.desktop` entry, the icon at each [HICOLOR] size and the [license] as the copyright. Its
+/// version is a `dev` build's or a release's.
 pub fn deb(cfg: &Config, bin: &Path, arch: &str, dev: bool, out_dir: &Path) -> io::Result<PathBuf> {
   let pkg = package(cfg)?;
   let pngs = pngs(cfg, &HICOLOR)?;
@@ -171,31 +166,21 @@ pub fn deb(cfg: &Config, bin: &Path, arch: &str, dev: bool, out_dir: &Path) -> i
     );
   }
 
-  let tmp = Temp::new()?;
-  let root = tmp.join(&pkg);
-  let share = root.join("usr/share");
-  let mut size = copy(bin, &root.join("usr/bin").join(&cfg.bin), 0o755)?;
-  let desktop = desktop(cfg)?;
-  put(&share.join(format!("applications/{}.desktop", cfg.id)), desktop.as_bytes(), 0o644)?;
-  size += desktop.len() as u64;
-  for (n, png) in &pngs {
-    put(&share.join(format!("icons/hicolor/{n}x{n}/apps/{}.png", cfg.id)), png, 0o644)?;
-    size += png.len() as u64;
+  let mut tree = Tree::default();
+  tree.file(&format!("usr/bin/{}", cfg.bin), 0o755, read(bin)?);
+  tree.file(&format!("usr/share/applications/{}.desktop", cfg.id), 0o644, desktop(cfg)?);
+  for (n, png) in pngs {
+    tree.file(&format!("usr/share/icons/hicolor/{n}x{n}/apps/{}.png", cfg.id), 0o644, png);
   }
 
   if let Some(license) = license {
-    size += copy(&license, &share.join(format!("doc/{pkg}/copyright")), 0o644)?;
+    tree.file(&format!("usr/share/doc/{pkg}/copyright"), 0o644, read(&license)?);
   }
 
-  put(&root.join("DEBIAN/control"), control(cfg, &pkg, arch, dev, size)?.as_bytes(), 0o644)?;
-  open_dirs(&root)?;
-
+  let control = control(cfg, &pkg, arch, dev, tree.size())?;
+  let data = deb::build(&control, &tree, mtime(bin)?)?;
   let out = out_dir.join(format!("{}-dev-linux-{arch}.deb", cfg.name));
-  place(&out, |part| {
-    let mut cmd = Command::new("dpkg-deb");
-    apt(cmd.args(["-Zxz", "--root-owner-group", "--build"]).arg(&root).arg(part), "dpkg")?;
-    Ok(())
-  })?;
+  place(&out, |part| fs::write(part, &data))?;
   Ok(out)
 }
 
@@ -321,54 +306,26 @@ fn license(cfg: &Config) -> Option<PathBuf> {
 
 // MARK: Files
 
-/// The file `from` copied to `to`, its folders made, of the Unix mode `mode`; gives its size.
-fn copy(from: &Path, to: &Path, mode: u32) -> io::Result<u64> {
-  if let Some(dir) = to.parent() {
-    fs::create_dir_all(dir)?;
-  }
-
-  let at = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", from.display()));
-  let size = fs::copy(from, to).map_err(at)?;
-  tool::set_mode(to, mode)?;
-  Ok(size)
+/// The bytes of the file at `path`, an error naming it.
+fn read(path: &Path) -> io::Result<Vec<u8>> {
+  fs::read(path).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))
 }
 
-/// `data` in a file at `path`, its folders made, of the Unix mode `mode`.
-fn put(path: &Path, data: &[u8], mode: u32) -> io::Result<()> {
-  if let Some(dir) = path.parent() {
-    fs::create_dir_all(dir)?;
+/// The time of the packages' files: `$SOURCE_DATE_EPOCH` when set, else the binary `bin`'s, so a
+/// build of the same binary packs the same bytes.
+fn mtime(bin: &Path) -> io::Result<u64> {
+  if let Some(epoch) = std::env::var_os("SOURCE_DATE_EPOCH") {
+    let epoch = epoch.to_string_lossy();
+    return epoch
+      .trim()
+      .parse()
+      .map_err(|_| bad(format!("SOURCE_DATE_EPOCH is {epoch:?}, not seconds")));
   }
 
-  fs::write(path, data)?;
-  tool::set_mode(path, mode)
-}
-
-/// A link at `at` to `to`; only on Unix.
-fn symlink(to: &str, at: &Path) -> io::Result<()> {
-  #[cfg(unix)]
-  {
-    std::os::unix::fs::symlink(to, at)
-  }
-
-  #[cfg(not(unix))]
-  {
-    let _ = (to, at);
-    Err(io::Error::new(io::ErrorKind::Unsupported, "the Linux packages are made on Unix"))
-  }
-}
-
-/// Sets `root` and every folder under it to 0755: a new folder takes the umask's mode, and a
-/// package keeps it.
-fn open_dirs(root: &Path) -> io::Result<()> {
-  tool::set_mode(root, 0o755)?;
-  for entry in fs::read_dir(root)? {
-    let entry = entry?;
-    if entry.file_type()?.is_dir() {
-      open_dirs(&entry.path())?;
-    }
-  }
-
-  Ok(())
+  let time = fs::metadata(bin)
+    .and_then(|m| m.modified())
+    .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", bin.display())))?;
+  Ok(time.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs()))
 }
 
 /// The file `out`, made by `make` at `<out>.part` and renamed: on any error the part is removed,
@@ -385,19 +342,19 @@ fn place(out: &Path, make: impl FnOnce(&Path) -> io::Result<()>) -> io::Result<(
   made
 }
 
-/// [run] of `cmd`, a tool apt's `package` installs: its absence an error naming the package.
-fn apt(cmd: &mut Command, package: &str) -> io::Result<Vec<u8>> {
-  run(cmd).map_err(|e| match e.kind() {
-    io::ErrorKind::NotFound => io::Error::new(e.kind(), format!("{e}: apt install {package}")),
-    _ => e,
-  })
-}
-
 #[cfg(test)]
 mod tests {
+  #[cfg(target_os = "linux")]
+  use std::process::Command;
+  use std::time::Duration;
+
   use toml::Table;
 
   use super::*;
+  use crate::tool::Temp;
+  #[cfg(target_os = "linux")]
+  use crate::tool::run;
+  use crate::tree::Node;
 
   /// A config in `dir` with the `[linux]` table `linux`.
   fn config(dir: &Path, linux: &str) -> Config {
@@ -590,40 +547,17 @@ deb-recommends = ["libgtk-3-0t64 | libgtk-3-0", "libasound2t64"]
     }
   }
 
-  /// The files under `dir` by their paths in it, each `<mode>` or `-> <link>`.
-  #[cfg(unix)]
-  fn walk(dir: &Path, root: &Path, out: &mut Vec<String>) {
-    use std::os::unix::fs::PermissionsExt;
-
-    let mut entries: Vec<_> = fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).collect();
-    entries.sort();
-    for path in entries {
-      let name = path.strip_prefix(root).unwrap().display();
-      let meta = fs::symlink_metadata(&path).unwrap();
-      match meta.is_symlink() {
-        true => out.push(format!("{name} -> {}", fs::read_link(&path).unwrap().display())),
-        false => out.push(format!("{name} {:o}", meta.permissions().mode() & 0o777)),
-      }
-
-      if meta.is_dir() {
-        walk(&path, root, out);
-      }
-    }
-  }
-
-  #[cfg(unix)]
   #[test]
   fn appdir_layout() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let tmp = Temp::new().unwrap();
-    let cfg = config(&tmp, LINUX);
-    let (dir, exe) = (tmp.join("AppDir"), tmp.join("exe"));
-    fs::write(&exe, "exe").unwrap();
-    appdir(&cfg, &exe, b"png", &dir).unwrap();
-
-    let mut files = vec![];
-    walk(&dir, &dir, &mut files);
+    let cfg = config(Path::new("/app"), LINUX);
+    let tree = appdir(&cfg, b"exe".to_vec(), b"png".to_vec()).unwrap();
+    let files: Vec<_> = tree
+      .iter()
+      .map(|(path, mode, node)| match node {
+        Node::Link(to) => format!("{path} -> {to}"),
+        _ => format!("{path} {mode:o}"),
+      })
+      .collect();
     let want = [
       ".DirIcon -> com.example.hello.png",
       "AppRun -> usr/bin/hello",
@@ -634,13 +568,26 @@ deb-recommends = ["libgtk-3-0t64 | libgtk-3-0", "libasound2t64"]
       "usr/bin/hello 755",
     ];
     assert_eq!(files, want);
-    assert_eq!(fs::read_to_string(dir.join("AppRun")).unwrap(), "exe");
-    assert_eq!(fs::read(dir.join(".DirIcon")).unwrap(), b"png");
-    assert_eq!(
-      fs::read_to_string(dir.join("com.example.hello.desktop")).unwrap(),
-      desktop(&cfg).unwrap()
-    );
-    assert_eq!(fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o755);
+    assert_eq!(tree.get("usr/bin/hello"), Some((0o755, &Node::File(b"exe".to_vec()))));
+    assert_eq!(tree.get("com.example.hello.png"), Some((0o644, &Node::File(b"png".to_vec()))));
+    let entry = Node::File(desktop(&cfg).unwrap().into_bytes());
+    assert_eq!(tree.get("com.example.hello.desktop"), Some((0o644, &entry)));
+  }
+
+  /// The binary's time, unless `$SOURCE_DATE_EPOCH` gives one.
+  #[test]
+  fn times() {
+    if std::env::var_os("SOURCE_DATE_EPOCH").is_some() {
+      return;
+    }
+
+    let tmp = Temp::new().unwrap();
+    let bin = tmp.join("bin");
+    let file = File::create(&bin).unwrap();
+    file.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)).unwrap();
+    assert_eq!(mtime(&bin).unwrap(), 1_700_000_000);
+    let e = mtime(&tmp.join("none")).unwrap_err().to_string();
+    assert!(e.starts_with(&format!("{}: ", tmp.join("none").display())), "{e}");
   }
 
   #[test]
@@ -681,9 +628,9 @@ deb-recommends = ["libgtk-3-0t64 | libgtk-3-0", "libasound2t64"]
     // Half written, then failed: no part is left, nor the file.
     let e = place(&out, |part| {
       fs::write(part, "half")?;
-      Err(io::Error::other("dpkg-deb failed"))
+      Err(io::Error::other("disk full"))
     });
-    assert_eq!(e.unwrap_err().to_string(), "dpkg-deb failed");
+    assert_eq!(e.unwrap_err().to_string(), "disk full");
     assert!(listed().is_empty());
 
     place(&out, |part| fs::write(part, "whole")).unwrap();

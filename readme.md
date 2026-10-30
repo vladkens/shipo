@@ -34,7 +34,7 @@ deb-depends = ["libc6 (>= 2.35)"]
 deb-recommends = ["libgtk-3-0"]
 ```
 
-With the release builds in `dist/<triple>/<bin>[.exe]`, `shipo release dist --tag v1.2.0` writes the installers and the signed `update.txt` into `dist/`, linked to the GitHub release `v1.2.0`; without `--tag` it writes the installers of a dev build. `shipo feed` signs a feed for files served elsewhere. `shipo --help` lists every command and option. The host needs `nsis`, `squashfs-tools` and `dpkg` from apt; off a Mac, the app is signed by rcodesign with the `APPLE_CERTIFICATE` and `APPLE_CERTIFICATE_PASSWORD` secrets. The DMG is not written yet.
+With the release builds in `dist/<triple>/<bin>[.exe]`, `shipo release dist --tag v1.2.0` writes the installers and the signed `update.txt` into `dist/`, linked to the GitHub release `v1.2.0`; without `--tag` it writes the installers of a dev build. `shipo feed` signs a feed for files served elsewhere. `shipo --help` lists every command and option. The packer writes the AppImage and the .deb itself; the host needs `curl` and, for the Windows setup, `nsis` from apt; off a Mac, the app is signed by rcodesign with the `APPLE_CERTIFICATE` (a base64 `.p12`, which OpenSSL 3 exports for it with `-legacy`) and `APPLE_CERTIFICATE_PASSWORD` secrets. The DMG, also the packer's own, is signed as the app is; a release's is notarized and stapled by rcodesign with the App Store Connect API key's secrets `APPLE_API_KEY` (the `.p8`), `APPLE_API_KEY_ID` and `APPLE_API_ISSUER`.
 
 ## Keys
 

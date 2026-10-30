@@ -476,7 +476,7 @@ fn sign_elsewhere(
 ) -> io::Result<String> {
   let rcodesign = rcodesign(&cfg.target.join("tools"))?;
   let tmp = Temp::new()?;
-  let pem = match signed {
+  let p12 = match signed {
     true => {
       let var = |name| env::var(name).map_err(|e| bad(format!("{name}: {e}")));
       Some(certificate(&tmp, &var(CERT[0])?, &var(CERT[1])?)?)
@@ -484,7 +484,7 @@ fn sign_elsewhere(
     false => None,
   };
 
-  rsign(&rcodesign, bundle, pem.as_deref(), &rcodesign_args(signed, entitlements))?;
+  rsign(&rcodesign, bundle, p12.as_ref(), &rcodesign_args(signed, entitlements))?;
   Ok(if signed { "Developer ID" } else { "ad hoc" }.into())
 }
 
@@ -503,50 +503,71 @@ fn rcodesign_args(signed: bool, entitlements: Option<&Path>) -> Vec<OsString> {
   args
 }
 
-/// Signs `path` in place by `rcodesign` with `args`: by the key and certificate in `pem`, else ad
+/// Signs the disk image `path` as [app] signs the bundle: on a Mac by [identity], elsewhere by
+/// rcodesign with the Developer ID of [CERT], else not at all. Gives who signed it, if one did, and
+/// whether that is a Developer ID, which notarization takes.
+pub fn sign_image(cfg: &Config, path: &Path, tag: Option<&str>) -> io::Result<(String, bool)> {
+  if cfg!(target_os = "macos") {
+    let id = identity(cfg, tag)?;
+    let stamp = if id.developer { "--timestamp" } else { "--timestamp=none" };
+    codesign(path, &["--force", "--sign", &id.id, stamp].map(OsString::from))?;
+    return Ok((id.name, id.developer));
+  }
+
+  if !secrets(&CERT, tag)? {
+    return Ok(("no one".into(), false));
+  }
+
+  let rcodesign = rcodesign(&cfg.target.join("tools"))?;
+  let tmp = Temp::new()?;
+  let var = |name| env::var(name).map_err(|e| bad(format!("{name}: {e}")));
+  let p12 = certificate(&tmp, &var(CERT[0])?, &var(CERT[1])?)?;
+  rsign(&rcodesign, path, Some(&p12), &[])?;
+  Ok(("Developer ID".into(), true))
+}
+
+/// Signs `path` in place by `rcodesign` with `args`: by the key and certificate in `p12`, else ad
 /// hoc.
 pub fn rsign(
   rcodesign: &Path,
   path: &Path,
-  pem: Option<&Path>,
+  p12: Option<&P12>,
   args: &[OsString],
 ) -> io::Result<()> {
   let mut cmd = Command::new(rcodesign);
   cmd.arg("sign");
-  if let Some(pem) = pem {
-    cmd.arg("--pem-file").arg(pem);
+  if let Some(p12) = p12 {
+    cmd.arg("--p12-file").arg(&p12.file).arg("--p12-password-file").arg(&p12.password);
   }
 
-  run(cmd.args(args).arg(path))?;
+  // rcodesign reads a .p12 of 3DES or RC2 only, and takes one of AES (OpenSSL 3's default) for a
+  // wrong password (rcodesign #315), with this error.
+  let wrong = "incorrect password given when decrypting PFX data";
+  let legacy = |e: io::Error| match p12.is_some() && e.to_string().contains(wrong) {
+    true => bad(format!(
+      "{e}: if {} is right, export {} again with `openssl pkcs12 -export -legacy`",
+      CERT[1], CERT[0]
+    )),
+    false => e,
+  };
+
+  run(cmd.args(args).arg(path)).map_err(legacy)?;
   Ok(())
 }
 
-/// The key and certificate of the `.p12` in `p12` (base64), opened by `password`, as a PEM in the
-/// folder `dir`, only its owner reading either: rcodesign rejects a .p12 in OpenSSL 3's defaults
-/// (rcodesign #315), and OpenSSL 3 reads an older one's RC2 only with `-legacy`.
-pub fn certificate(dir: &Path, p12: &str, password: &str) -> io::Result<PathBuf> {
+/// A `.p12` and its password, each in a file only its owner reads, as rcodesign takes them.
+#[derive(Debug)]
+pub struct P12 {
+  file: PathBuf,
+  password: PathBuf,
+}
+
+/// The `.p12` in `p12` (base64) and its `password` in the folder `dir`.
+pub fn certificate(dir: &Path, p12: &str, password: &str) -> io::Result<P12> {
   let data = base64(p12).ok_or_else(|| bad(format!("{} is not base64", CERT[0])))?;
-  let p12 = private(&dir.join("id.p12"), &data)?;
-  let mut last = None;
-  for legacy in [false, true] {
-    let mut cmd = Command::new("openssl");
-    cmd.args(["pkcs12", "-nodes", "-passin", "env:SHIPO_P12_PASSWORD", "-in"]).arg(&p12);
-    cmd.env("SHIPO_P12_PASSWORD", password);
-    if legacy {
-      cmd.arg("-legacy");
-    }
-
-    match run(&mut cmd) {
-      Ok(pem) => return private(&dir.join("id.pem"), &pem),
-      Err(e) if e.kind() == io::ErrorKind::NotFound => {
-        return Err(io::Error::new(e.kind(), "openssl not found: `apt-get install openssl`"));
-      }
-      Err(e) => last = Some(e),
-    }
-  }
-
-  let last = last.map_or_else(String::new, |e| e.to_string());
-  Err(bad(format!("{}: openssl reads no .p12: {last}", CERT[0])))
+  let file = private(&dir.join("id.p12"), &data)?;
+  let password = private(&dir.join("id.password"), password.as_bytes())?;
+  Ok(P12 { file, password })
 }
 
 /// The bytes of standard base64 `text`, whitespace skipped, ending at its first `=`.
@@ -575,11 +596,11 @@ fn base64(text: &str) -> Option<Vec<u8>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
   use super::*;
 
   /// A config in `dir` with the `[macos]` table `macos`.
-  fn config(dir: &Path, macos: &str) -> Config {
+  pub fn config(dir: &Path, macos: &str) -> Config {
     Config {
       id: "com.example.hello".into(),
       name: "Hello".into(),
@@ -1021,9 +1042,10 @@ LSEnvironment = { HELLO_MODE = "quiet" }
     assert!(out.contains("com.apple.security.device.audio-input"), "{out}");
   }
 
-  /// A self-signed certificate's `.p12`, base64, of the password `pw`, made in `dir`.
+  /// A self-signed certificate's `.p12`, base64, of the password `pw`, made in `dir`: in OpenSSL's
+  /// default ciphers, else in 3DES and SHA-1, as `-legacy` makes it.
   #[cfg(unix)]
-  fn p12(dir: &Path, pw: &str) -> String {
+  pub fn p12(dir: &Path, pw: &str, legacy: bool) -> String {
     let (key, cert, p12) = (dir.join("k.pem"), dir.join("c.pem"), dir.join("c.p12"));
     let mut req = Command::new("openssl");
     req.args("req -x509 -newkey rsa:2048 -nodes -days 1".split(' ')).args(["-subj", "/CN=shipo"]);
@@ -1032,6 +1054,10 @@ LSEnvironment = { HELLO_MODE = "quiet" }
     run(req.arg("-keyout").arg(&key).arg("-out").arg(&cert)).unwrap();
     let mut export = Command::new("openssl");
     export.args(["pkcs12", "-export", "-inkey"]).arg(&key).arg("-in").arg(&cert);
+    if legacy {
+      export.args("-certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg sha1".split(' '));
+    }
+
     run(export.arg("-out").arg(&p12).args(["-passout", &format!("pass:{pw}")])).unwrap();
     let out = run(Command::new("openssl").args(["base64", "-in"]).arg(&p12)).unwrap();
     String::from_utf8(out).unwrap()
@@ -1039,18 +1065,18 @@ LSEnvironment = { HELLO_MODE = "quiet" }
 
   #[cfg(unix)]
   #[test]
-  fn certificate_pem() {
-    let tmp = Temp::new().unwrap();
-    let b64 = p12(&tmp, "secret pw");
-    let out = Temp::new().unwrap();
-    let pem = fs::read_to_string(certificate(&out, &b64, "secret pw").unwrap()).unwrap();
-    assert!(pem.contains("-----BEGIN PRIVATE KEY-----"), "{pem}");
-    assert!(pem.contains("-----BEGIN CERTIFICATE-----"), "{pem}");
+  fn certificate_files() {
+    use std::os::unix::fs::PermissionsExt;
 
-    let out = Temp::new().unwrap();
-    let e = certificate(&out, &b64, "wrong").unwrap_err().to_string();
-    assert!(e.starts_with("APPLE_CERTIFICATE: openssl reads no .p12: openssl failed"), "{e}");
-    let e = certificate(&out, "not base64!", "x").unwrap_err().to_string();
+    let tmp = Temp::new().unwrap();
+    let p12 = certificate(&tmp, "aGVs\nbG8=", "secret pw").unwrap();
+    assert_eq!(fs::read(&p12.file).unwrap(), b"hello");
+    assert_eq!(fs::read(&p12.password).unwrap(), b"secret pw");
+    for path in [&p12.file, &p12.password] {
+      assert_eq!(fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    let e = certificate(&tmp, "not base64!", "x").unwrap_err().to_string();
     assert_eq!(e, "APPLE_CERTIFICATE is not base64");
   }
 
@@ -1083,13 +1109,18 @@ LSEnvironment = { HELLO_MODE = "quiet" }
     check(&app);
 
     let app = bundle(&cfg, &bin).unwrap();
-    let pem = certificate(&tmp, &p12(&tmp, "pw"), "pw").unwrap();
-    rsign(&rcodesign, &app, Some(&pem), &args).unwrap();
+    let id = certificate(&tmp, &p12(&tmp, "pw", true), "pw").unwrap();
+    rsign(&rcodesign, &app, Some(&id), &args).unwrap();
     check(&app);
 
     // A release's certificate is Apple's: rcodesign refuses this one for notarization.
     let notarized = rcodesign_args(true, Some(&entitlements));
-    let e = rsign(&rcodesign, &app, Some(&pem), &notarized).unwrap_err().to_string();
+    let e = rsign(&rcodesign, &app, Some(&id), &notarized).unwrap_err().to_string();
     assert!(e.contains("--for-notarization requires use of a Developer ID signing certificate"));
+
+    let dir = Temp::new().unwrap();
+    let id = certificate(&dir, &p12(&dir, "pw", false), "pw").unwrap();
+    let e = rsign(&rcodesign, &app, Some(&id), &args).unwrap_err().to_string();
+    assert!(e.ends_with("export APPLE_CERTIFICATE again with `openssl pkcs12 -export -legacy`"));
   }
 }

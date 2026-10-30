@@ -218,6 +218,7 @@ name = "shipo-cli"
 version = "0.0.1"
 dependencies = [
  "ed25519-compact",
+ "flate2",
  "hmac-sha256",
  "lexopt",
  "png",

@@ -1,7 +1,6 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/shipo
 //! The DMG's `.DS_Store`: the window Finder opens on the volume, the app and the Applications link
 //! side by side, in the format Wim Lewis's DSStoreFormat.pod documents.
-#![cfg_attr(not(test), expect(dead_code, reason = "the DMG step writes it"))]
 
 use std::io;
 
@@ -135,11 +134,11 @@ fn push(out: &mut Vec<u8>, words: &[u32]) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
   use super::*;
 
   /// A big-endian word of `data` at `at`.
-  fn word(data: &[u8], at: usize) -> u32 {
+  pub fn word(data: &[u8], at: usize) -> u32 {
     u32::from_be_bytes(data[at..at + 4].try_into().unwrap())
   }
 
@@ -149,7 +148,7 @@ mod tests {
   /// Reads a `.DS_Store` as Finder does, checking its allocator: the header, the blocks and the
   /// free lists tile the 2 GiB space with buddies, each at an offset of its own size. Gives the
   /// records of its B-tree, which has one leaf.
-  fn parse(file: &[u8]) -> Vec<Parsed> {
+  pub fn parse(file: &[u8]) -> Vec<Parsed> {
     assert_eq!(word(file, 0), 1);
     let space = &file[4..];
     assert_eq!(&space[..4], b"Bud1");

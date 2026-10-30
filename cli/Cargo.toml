@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 ed25519-compact = { version = "2.6.0", default-features = false }
+flate2 = "1.1.10"
 hmac-sha256 = { version = "1.1.15", default-features = false }
 lexopt = "0.3.2"
 png = { version = "0.18.1", default-features = false }

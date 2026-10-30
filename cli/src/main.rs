@@ -2,15 +2,24 @@
 //! The shipo packer: an app's binaries into signed installers and a signed update feed. This file
 //! is its command line; [USAGE] is its documentation.
 
+mod btree;
 mod config;
+mod deb;
+mod dmg;
 mod ds_store;
 mod feed;
+mod hfs;
 mod image;
 mod linux;
 mod macos;
 mod pe;
 mod plist;
+mod squashfs;
+mod tar;
 mod tool;
+mod tree;
+mod udif;
+mod unicode;
 mod windows;
 
 use std::ffi::OsString;
@@ -201,6 +210,10 @@ const ARCHS: [&str; 2] = ["x86_64", "aarch64"];
 /// with `tag` also update.txt there, signed by `key`, of the files as the GitHub release serves
 /// them. The tag and the key are checked before anything is built.
 fn release(cfg: &Config, dir: &Path, tag: Option<&str>, key: Option<&Path>) -> io::Result<()> {
+  if tag.is_none() && key.is_some() {
+    return Err(bad("--key signs the feed, which only --tag writes"));
+  }
+
   let key = match tag {
     Some(tag) => {
       tagged(tag, &cfg.version, &cfg.repository, &cfg.name)?;
@@ -215,10 +228,9 @@ fn release(cfg: &Config, dir: &Path, tag: Option<&str>, key: Option<&Path>) -> i
   for (os, arch, bin) in binaries {
     let made = match os {
       "apple-darwin" => {
-        return Err(io::Error::new(
-          io::ErrorKind::Unsupported,
-          "release: the macOS DMG is not supported yet",
-        ));
+        let notarize = macos::secrets(&dmg::NOTARY, tag)?;
+        let (app, _) = macos::app(cfg, &bin, tag)?;
+        vec![dmg::dmg(cfg, &app, arch, tag, notarize, dir)?]
       }
       "pc-windows-msvc" => vec![windows::setup(cfg, &bin, arch, dir)?],
       _ => vec![
@@ -627,6 +639,10 @@ mod tests {
     let key = tmp.join("missing.key");
     let e = release(&cfg, &dist, Some("v1.2.0"), Some(&key)).unwrap_err();
     assert_eq!(e.kind(), io::ErrorKind::NotFound, "{e}");
+    assert_eq!(listed(&dist), before);
+
+    let e = release(&cfg, &dist, None, Some(&key)).unwrap_err();
+    assert_eq!(e.to_string(), "--key signs the feed, which only --tag writes");
     assert_eq!(listed(&dist), before);
   }
 }
