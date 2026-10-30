@@ -104,11 +104,11 @@ pub fn check(feed: &Feed, current: &str) -> Result<Option<Release>> {
 
 /// Whether the running app can update in place, checked with no network, so an app can hide its
 /// update up front: not without an installed app to replace ([Error::Unsupported]: a build, a
-/// Windows exe outside `%LOCALAPPDATA%\Programs`, a Linux one not run as an AppImage, as a .deb's
-/// in /usr, a translocated app), nor one it can't replace ([Error::Unsupported]: a bundle the user
-/// can't write or on a volume without APFS's swap, an AppImage the user can't write), nor one whose
-/// folder the user can't write ([Error::Io], `PermissionDenied`: `/Applications` for a standard
-/// user, `/opt`).
+/// Windows exe outside `%LOCALAPPDATA%\Programs` and its setup's folder, a Linux one not run as an
+/// AppImage, as a .deb's in /usr, a translocated app), nor one it can't replace
+/// ([Error::Unsupported]: a bundle the user can't write or on a volume without APFS's swap, an
+/// AppImage the user can't write), nor one whose folder the user can't write ([Error::Io],
+/// `PermissionDenied`: `/Applications` for a standard user, `/opt`).
 pub fn supported() -> Result<()> {
   installed().map(drop)
 }
@@ -116,7 +116,7 @@ pub fn supported() -> Result<()> {
 /// The app an update replaces ([target]), [replaceable], its [home] writable: a staging folder
 /// made there.
 fn installed() -> Result<PathBuf> {
-  let target = target(OS, &env::current_exe()?, &|k| env::var_os(k))?;
+  let target = target(OS, &env::current_exe()?, &|k| env::var_os(k), &locations())?;
   #[cfg(unix)]
   replaceable(OS, &target, imp::access(&target))?;
   Folder::new(home(OS, &target))?;
@@ -192,7 +192,8 @@ pub fn finish() -> Option<Error> {
   #[cfg(windows)]
   std::thread::spawn(|| {
     std::thread::sleep(Duration::from_secs(5));
-    let found = env::current_exe().ok().and_then(|exe| target(OS, &exe, &|k| env::var_os(k)).ok());
+    let var = |k: &str| env::var_os(k);
+    let found = env::current_exe().ok().and_then(|exe| target(OS, &exe, &var, &locations()).ok());
     if let Some(target) = found {
       installer::tidy(OS, &target, &imp::alive);
     }
@@ -220,10 +221,18 @@ const OS: Os = match () {
 /// An environment variable by its name: [env::var_os], or a test's.
 type Env<'a> = &'a dyn Fn(&str) -> Option<OsString>;
 
+/// The folders the setup's Uninstall keys name, Windows' only.
+fn locations() -> Vec<String> {
+  #[cfg(windows)]
+  return imp::locations();
+  #[cfg(not(windows))]
+  Vec::new()
+}
+
 /// The app an update replaces, of the running `exe`: [Error::Unsupported] for none (a build) or a
 /// bundle macOS translocated (run from a read-only copy, as it does for one downloaded and not
-/// moved).
-fn target(os: Os, exe: &Path, env: Env) -> Result<PathBuf> {
+/// moved). `keyed`, the folders the setup's Uninstall keys name.
+fn target(os: Os, exe: &Path, env: Env, keyed: &[String]) -> Result<PathBuf> {
   let target = match os {
     // The `.app` bundle, by its layout: `<name>.app/Contents/MacOS/<exe>`.
     Os::Mac => {
@@ -239,15 +248,16 @@ fn target(os: Os, exe: &Path, env: Env) -> Result<PathBuf> {
       }
       _ => None,
     },
-    // The exe's folder under `%LOCALAPPDATA%\Programs`, where the per-user setup installs,
-    // whatever the case.
+    // The exe's folder under `%LOCALAPPDATA%\Programs`, where the per-user setup installs by
+    // default, whatever the case, or the one its key names, picked in its wizard or by `/D=`.
     Os::Windows => {
       let folded = |p: &Path| -> Vec<_> {
         p.components().map(|c| c.as_os_str().to_ascii_lowercase()).collect()
       };
       let programs = env("LOCALAPPDATA").map(|l| folded(&Path::new(&l).join("Programs")));
       let under = |f: &Path| f.ancestors().skip(1).any(|a| Some(folded(a)) == programs);
-      exe.parent().filter(|f| under(f)).map(Path::to_owned)
+      let named = |f: &Path| keyed.iter().any(|l| same(l, f));
+      exe.parent().filter(|f| under(f) || named(f)).map(Path::to_owned)
     }
   };
 
@@ -259,6 +269,25 @@ fn target(os: Os, exe: &Path, env: Env) -> Result<PathBuf> {
     }
     Some(t) => Ok(t),
   }
+}
+
+/// Whether the folder `l`, as an Uninstall key holds it, is `dir`: case, `/`, a trailing separator
+/// and `\\?\` aside, as the setup's `same` compares them.
+fn same(l: &str, dir: &Path) -> bool {
+  let plain = |s: &str| {
+    let s = s.replace('/', "\\");
+    let s = s.trim_end_matches('\\');
+    let prefixed = |p: &str| s.get(..p.len()).is_some_and(|h| h.eq_ignore_ascii_case(p));
+    if prefixed(r"\\?\UNC\") || prefixed(r"\\.\UNC\") {
+      format!(r"\\{}", &s[8..])
+    } else if prefixed(r"\\?\") || prefixed(r"\\.\") {
+      s[4..].to_string()
+    } else {
+      s.to_string()
+    }
+  };
+
+  plain(l).eq_ignore_ascii_case(&plain(&dir.to_string_lossy()))
 }
 
 /// What the user may do to the target, as the OS tells it; Windows' setup replaces its own.
@@ -396,7 +425,7 @@ mod tests {
   #[test]
   fn the_target_is_the_installed_app() {
     let none = |_: &str| None;
-    let target = |os, exe: &str| target(os, Path::new(exe), &none);
+    let target = |os, exe: &str| target(os, Path::new(exe), &none, &[]);
     let app = target(Os::Mac, "/Applications/A.app/Contents/MacOS/a").unwrap();
     assert_eq!(app, Path::new("/Applications/A.app"));
     let moved = "/private/var/folders/x/T/AppTranslocation/1-2/d/A.app/Contents/MacOS/a";
@@ -415,7 +444,7 @@ mod tests {
   #[test]
   fn a_windows_app_is_one_the_setup_installed() {
     let local = |k: &str| (k == "LOCALAPPDATA").then(|| "C:/Users/Me/AppData/Local".into());
-    let target = |exe: &str| target(Os::Windows, Path::new(exe), &local);
+    let target = |exe: &str| target(Os::Windows, Path::new(exe), &local, &[]);
     let programs = "C:/Users/Me/AppData/Local/Programs";
     assert_eq!(target(&format!("{programs}/W/a.exe")).unwrap(), Path::new(programs).join("W"));
     let case = "c:/users/me/appdata/local/PROGRAMS/W";
@@ -431,10 +460,41 @@ mod tests {
     }
   }
 
+  /// The folder picked in the setup's wizard or by `/D=` is the one its key names, as the setup
+  /// (and v0.1's NSIS one) writes it; never another app's folder or a parent of it.
+  #[test]
+  fn a_windows_app_in_its_keys_folder() {
+    let local = |k: &str| (k == "LOCALAPPDATA").then(|| "C:/Users/Me/AppData/Local".into());
+    let keyed = [r"D:\Tools".to_string(), r"C:\Apps\Hello".into()];
+    let target = |exe: &str| target(Os::Windows, Path::new(exe), &local, &keyed).ok();
+    assert_eq!(target("C:/Apps/Hello/Hello.exe"), Some("C:/Apps/Hello".into()));
+    assert_eq!(
+      target("c:/apps/HELLO/Hello.exe"),
+      Some("c:/apps/HELLO".into()),
+      "whatever the case"
+    );
+    assert_eq!(target("C:/Apps/Hello/sub/Hello.exe"), None, "not a folder deeper");
+    assert_eq!(target("C:/Apps/Hello.exe"), None);
+    assert_eq!(target("C:/Apps/Hellos/Hello.exe"), None);
+    let programs = "C:/Users/Me/AppData/Local/Programs/Hello";
+    assert!(target(&format!("{programs}/Hello.exe")).is_some(), "the default folder still");
+
+    let dir = Path::new("C:/Apps/Hello");
+    for l in [r"C:\Apps\Hello", r"c:\apps\hello\", "C:/Apps/Hello/", r"\\?\C:\Apps\Hello"] {
+      assert!(same(l, dir), "{l}");
+    }
+
+    assert!(same(r"\\?\UNC\srv\share\x", Path::new(r"\\srv\share\x")));
+    assert!(same(r"\\.\C:\Apps\Hello", Path::new(r"\\?\C:\Apps\Hello")));
+    for l in ["", "Hello", r"C:\Apps", r"C:\Apps\Hello\sub"] {
+      assert!(!same(l, dir), "{l}");
+    }
+  }
+
   #[test]
   fn the_app_is_the_bundle_or_the_appimage() {
     let none = |_: &str| None;
-    let app = |os, exe: &str, env: Env| target(os, Path::new(exe), env).ok();
+    let app = |os, exe: &str, env: Env| target(os, Path::new(exe), env, &[]).ok();
     let mac = |exe: &str| app(Os::Mac, exe, &none);
     assert_eq!(mac("/Applications/A.app/Contents/MacOS/a"), Some("/Applications/A.app".into()));
     assert_eq!(mac("/Applications/A/Contents/MacOS/a"), None);

@@ -36,7 +36,7 @@ PARTS = {
   # The library: the feed, the download and the install, the public API.
   "library": (800, ("src/*.rs",)),
   # The library's OS code: each OS, the shared Unix code and the dispatch.
-  "library/platform": (500, ("src/platform/*.rs",)),
+  "library/platform": (600, ("src/platform/*.rs",)),
   # The packer's commands, config, tools, feed and icons.
   "packer": (1400, ("src/cli/{main,config,tool,feed,image}.rs",)),
   # The .app bundle, its signing and the DMG with its HFS+ volume, written ourselves.

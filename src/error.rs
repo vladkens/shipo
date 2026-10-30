@@ -49,9 +49,9 @@ pub enum Error {
   #[error("the release can't replace this app: {0}")]
   Bundle(String),
   /// This app can't update in place: a dev build (a pre-release version), not an installed app
-  /// (a build, a Windows exe outside `%LOCALAPPDATA%\Programs`, a Linux one not run as an
-  /// AppImage), a bundle macOS translocated, an app the user can't write, a bundle on a volume
-  /// without APFS's swap, or Linux without libcurl.
+  /// (a build, a Windows exe outside `%LOCALAPPDATA%\Programs` and its setup's folder, a Linux one
+  /// not run as an AppImage), a bundle macOS translocated, an app the user can't write, a bundle on
+  /// a volume without APFS's swap, or Linux without libcurl.
   #[error("can't update in place: {0}")]
   Unsupported(String),
   /// Putting the new version in failed: from [`install`](crate::install) an installer that gave

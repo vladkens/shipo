@@ -1,7 +1,7 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/shipo
 //! The update's calls on Windows: the file fetched by WinHTTP, the installer started apart from
 //! the app and waiting for it to end, the release's per-user setup run silently, the installed exe
-//! started.
+//! started, the folders its Uninstall keys name.
 
 use std::ffi::{OsString, c_void};
 use std::fs::File;
@@ -26,6 +26,10 @@ use windows_sys::Win32::Networking::WinHttp::{
 };
 use windows_sys::Win32::System::Diagnostics::Debug;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::Registry::{
+  HKEY_CURRENT_USER, KEY_READ, RRF_RT_REG_SZ, RegCloseKey, RegEnumKeyExW, RegGetValueW,
+  RegOpenKeyExW,
+};
 use windows_sys::Win32::System::Threading::{
   CREATE_BREAKAWAY_FROM_JOB, CREATE_NO_WINDOW, DETACHED_PROCESS, OpenProcess, PROCESS_SYNCHRONIZE,
   WaitForSingleObject,
@@ -151,6 +155,47 @@ pub fn setup(exe: &Path, to: &Path) -> io::Result<i32> {
   let mut cmd = Command::new(exe);
   cmd.arg("/S").raw_arg(format!("/D={}", to.display())).creation_flags(CREATE_NO_WINDOW);
   Ok(cmd.status()?.code().unwrap_or(-1))
+}
+
+/// The `InstallLocation` of each `{…}` key under HKCU's Uninstall, as the setup names the app's
+/// (v0.1's NSIS one too): the library doesn't know the app's id, so the folder finds its key.
+pub fn locations() -> Vec<String> {
+  let path = wide(r"Software\Microsoft\Windows\CurrentVersion\Uninstall");
+  let (value, mut root, mut found) = (wide("InstallLocation"), null_mut(), vec![]);
+  // SAFETY: a NUL-terminated path; the key closed below.
+  if unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, path.as_ptr(), 0, KEY_READ, &mut root) } != 0 {
+    return found;
+  }
+
+  for i in 0.. {
+    let (mut key, mut n) = ([0u16; 256], 256u32);
+    let at = key.as_mut_ptr();
+    // SAFETY: a buffer of its length in chars, the longest a key's name is; its NUL kept.
+    let next =
+      unsafe { RegEnumKeyExW(root, i, at, &mut n, null(), null_mut(), null_mut(), null_mut()) };
+    if next != 0 {
+      break;
+    }
+
+    let name = String::from_utf16_lossy(&key[..n as usize]);
+    if !name.starts_with('{') || !name.ends_with('}') {
+      continue;
+    }
+
+    let (mut buf, mut len) = ([0u16; 1024], 2048u32);
+    let data = buf.as_mut_ptr().cast();
+    // SAFETY: NUL-terminated names, a buffer of its length in bytes: a longer value fails.
+    let got = unsafe {
+      RegGetValueW(root, key.as_ptr(), value.as_ptr(), RRF_RT_REG_SZ, null_mut(), data, &mut len)
+    };
+    if got == 0 {
+      found.push(String::from_utf16_lossy(&buf[..(len as usize / 2).saturating_sub(1)]));
+    }
+  }
+
+  // SAFETY: the key opened above.
+  unsafe { RegCloseKey(root) };
+  found
 }
 
 /// Whether the process `pid` runs.
