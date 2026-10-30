@@ -45,8 +45,8 @@ use windows_sys::core::{GUID, HRESULT, PWSTR};
 
 use super::payload::{self, Info};
 use super::{
-  Args, RETRY_OWN, Step, UNINSTALL, UNINSTALLER, Value, folder, guid, install, own, placeholder,
-  previous, remove, retry, same, uninstaller, values, wizard,
+  Args, CANCELLED, FAILED, RETRY_OWN, Step, UNINSTALL, UNINSTALLER, Value, destination, guid,
+  install, own, placeholder, previous, remove, retry, same, uninstaller, values, wizard,
 };
 
 const RUN: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -91,7 +91,7 @@ pub fn main() -> ExitCode {
     message(&title, &e);
   }
 
-  ExitCode::from(2)
+  ExitCode::from(FAILED)
 }
 
 /// An error's message box, with no owner window.
@@ -141,7 +141,7 @@ fn run(args: &Args, title: &mut String) -> io::Result<ExitCode> {
     return match args.silent {
       true => work(&|_, _| {}).map(|()| ExitCode::SUCCESS),
       false => match wizard::uninstall(title, &info.name, dir, work) {
-        None => Ok(ExitCode::from(1)),
+        None => Ok(ExitCode::from(CANCELLED)),
         Some(done) => done.map(|()| ExitCode::SUCCESS),
       },
     };
@@ -155,15 +155,8 @@ fn run(args: &Args, title: &mut String) -> io::Result<ExitCode> {
   // An update, `/S` with no `/D=`, goes where the app is, if the key holds a [folder].
   let key = format!(r"{UNINSTALL}\{}", info.app_id);
   let location = text(&key, "InstallLocation");
-  let given = args.folder()?;
-  let update = given.is_none() && location.as_deref().and_then(folder).is_some();
-  let dir = match (given, location.as_deref().and_then(folder)) {
-    (Some(dir), _) | (None, Some(dir)) => dir,
-    (None, None) => {
-      let local = env::var_os("LOCALAPPDATA").ok_or_else(|| io::Error::other("no LOCALAPPDATA"))?;
-      Path::new(&local).join("Programs").join(&info.name)
-    }
-  };
+  let local = env::var_os("LOCALAPPDATA");
+  let (dir, update) = destination(args.folder()?, location.as_deref(), local, &info.name)?;
 
   // The placeholder's magic, read from this exe: a literal would put a second one in it.
   let magic = &placeholder()[..payload::MAGIC.len()];
@@ -193,7 +186,7 @@ fn run(args: &Args, title: &mut String) -> io::Result<ExitCode> {
 
   let size = files.iter().map(|(_, d)| d.len() as u64).sum();
   let Some(done) = wizard::install(title, &info.name, (&dir, update), size, work)? else {
-    return Ok(ExitCode::from(1));
+    return Ok(ExitCode::from(CANCELLED));
   };
 
   let exe = done.dir.join(format!("{}.exe", info.name));
