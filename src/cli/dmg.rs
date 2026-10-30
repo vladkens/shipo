@@ -66,7 +66,11 @@ fn write(
 /// Writes to `out` the UDZO image of the volume `name` holding the bundle `app` as it is on disk,
 /// as [Entry::read] gives it, the link and the `.DS_Store`; these two of the bundle's time.
 fn image(name: &str, app: &Path, out: &mut impl io::Write) -> io::Result<()> {
-  let app = Entry::read(app)?;
+  udzo(&hfs::volume(&root(name, Entry::read(app)?)?)?, "whole disk (Apple_HFS : 0)", out)
+}
+
+/// The volume's root `name`: the bundle `app`, the link and the `.DS_Store`.
+fn root(name: &str, app: Entry) -> io::Result<Entry> {
   if !matches!(app.kind, Kind::Dir(_)) {
     return Err(bad(format!("{}: not a bundle", app.name)));
   }
@@ -78,8 +82,7 @@ fn image(name: &str, app: &Path, out: &mut impl io::Write) -> io::Result<()> {
   let link = entry("Applications", 0o755, Kind::Link("/Applications".into()));
   let store = entry(".DS_Store", 0o644, Kind::File(Data::Bytes(layout)));
   let root = entry(name, 0o755, Kind::Dir(vec![]));
-  let root = Entry { kind: Kind::Dir(vec![app, link, store]), ..root };
-  udzo(&hfs::volume(&root)?, "whole disk (Apple_HFS : 0)", out)
+  Ok(Entry { kind: Kind::Dir(vec![app, link, store]), ..root })
 }
 
 // MARK: UDIF
@@ -491,6 +494,16 @@ pub(crate) mod tests {
       APPLE_API_ISSUER";
     assert_eq!(e, want);
     assert!(!tmp.join("target").exists());
+  }
+
+  /// The DMG holds one top-level `.app`, the bundle an older app's update takes.
+  #[test]
+  fn compat_one_app() {
+    let app = Entry { name: "Hello.app".into(), mode: 0o755, time: 0, kind: Kind::Dir(vec![]) };
+    let Kind::Dir(top) = root("Hello", app).unwrap().kind else { panic!("not a folder") };
+    let apps = top.iter().filter(|e| e.name.ends_with(".app"));
+    let apps: Vec<_> = apps.map(|e| (e.name.as_str(), matches!(e.kind, Kind::Dir(_)))).collect();
+    assert_eq!(apps, [("Hello.app", true)]);
   }
 
   #[test]

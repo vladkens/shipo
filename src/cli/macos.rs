@@ -418,6 +418,16 @@ LSEnvironment = { HELLO_MODE = "quiet" }
     assert!(!keys.contains_key("LSUIElement"));
   }
 
+  /// The bundle id and executable name, which a release keeps for an older app to take it.
+  #[test]
+  fn compat_bundle_id_and_executable() {
+    let info = info(&config(Path::new("/app"), ""), "11.0").unwrap();
+    let keys = info.as_dictionary().unwrap();
+    let get = |k| keys.get(k).and_then(Plist::as_string);
+    assert_eq!(get("CFBundleIdentifier"), Some("com.example.hello"));
+    assert_eq!(get("CFBundleExecutable"), Some("hello"));
+  }
+
   #[test]
   fn info_errors() {
     let e = info(&config(Path::new("/app"), "plist.X = [nan]"), "11.0").unwrap_err();

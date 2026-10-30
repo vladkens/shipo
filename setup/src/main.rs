@@ -42,6 +42,9 @@ const UNINSTALLER: &str = "Uninstall.exe";
 /// The parent of the app's Uninstall key in HKCU, `{<AppId>}`, where an install before this one,
 /// an NSIS setup's too, left `InstallLocation`.
 const UNINSTALL: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
+/// The setup's exit codes besides 0, installed, which an updater reads as a failure.
+const CANCELLED: u8 = 1;
+const FAILED: u8 = 2;
 /// The licence's name in the install folder.
 const LICENSE: &str = "LICENSE.txt";
 /// How long a file in use is tried again: the app that just quit may hold its exe a moment.
@@ -115,6 +118,26 @@ fn folder(dir: &str) -> Option<PathBuf> {
   let parts: Vec<_> = parts.split('\\').collect();
   let named = |p: &&str| !p.trim_matches(['.', ' ']).is_empty();
   (parts.len() >= least && parts.iter().all(named)).then(|| dir.into())
+}
+
+/// Where the setup installs, and whether that folder came from the Uninstall key (the wizard's
+/// update, its folder locked): `/D=`'s folder (`given`), else the key's `InstallLocation`
+/// (`location`) when it is a [folder], else `<local>\Programs\<name>`, `local` being
+/// `%LOCALAPPDATA%`.
+fn destination(
+  given: Option<PathBuf>,
+  location: Option<&str>,
+  local: Option<OsString>,
+  name: &str,
+) -> io::Result<(PathBuf, bool)> {
+  match (given, location.and_then(folder)) {
+    (Some(dir), _) => Ok((dir, false)),
+    (None, Some(dir)) => Ok((dir, true)),
+    (None, None) => {
+      let local = local.ok_or_else(|| io::Error::other("no LOCALAPPDATA"))?;
+      Ok((Path::new(&local).join("Programs").join(name), false))
+    }
+  }
 }
 
 /// The folders of `path` after its drive, `C:\`.
@@ -463,8 +486,8 @@ mod tests {
   }
 
   /// What a newer setup takes from older versions: the key and its `InstallLocation` an install
-  /// left, v0.1's NSIS setup's too, where `/S` alone (v0.1's updater) installs; and `/S /D=<the
-  /// app's folder>`, as later updaters run it, the program's path quoted.
+  /// left, v0.1's NSIS setup's too, where `/S` alone (v0.1's updater) installs; `/S /D=<the app's
+  /// folder>`, as later updaters run it, the program's path quoted; and the exit codes they read.
   #[test]
   fn compat_older_installs_and_updaters() {
     assert_eq!(UNINSTALL, r"Software\Microsoft\Windows\CurrentVersion\Uninstall");
@@ -481,6 +504,19 @@ mod tests {
       &format!("{exe} /S /D={dir}"),
     );
     assert_eq!(args, Args { silent: true, dir: Some(dir.into()) });
+
+    // `/S` alone installs where the key says, a folder an NSIS setup chose too, as an update.
+    let nsis = r"D:\Tools\My App";
+    let local = Some(OsString::from(r"C:\Users\Me\AppData\Local"));
+    let to = |given, location| destination(given, location, local.clone(), "Hello").unwrap();
+    assert_eq!(to(None, Some(nsis)), (PathBuf::from(nsis), true));
+    assert_eq!(to(Some(dir.into()), Some(nsis)), (PathBuf::from(dir), false));
+    let default = Path::new(r"C:\Users\Me\AppData\Local").join("Programs").join("Hello");
+    assert_eq!(to(None, None), (default.clone(), false));
+    assert_eq!(to(None, Some("relative")), (default, false));
+
+    // The updater takes 0 as installed, anything else as a failure.
+    assert_eq!((CANCELLED, FAILED), (1, 2));
   }
 
   #[test]
