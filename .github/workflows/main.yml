@@ -45,9 +45,8 @@ jobs:
         env:
           PYTHONUTF8: 1 # the scripts read the sources as UTF-8 on Windows too
       - run: make test
-      # One at a time: two of them fetch rcodesign to one path. Linux has no Mach-O for rcodesign
-      # to sign: the Mac signs its own, and codesign verifies it.
-      - run: cargo test -- --ignored --test-threads=1 ${{ runner.os == 'Linux' && '--skip rcodesign_signs' || '' }}
+      # Linux has no Mach-O for rcodesign to sign: the Mac signs its own, and codesign verifies it.
+      - run: cargo test -- --ignored ${{ runner.os == 'Linux' && '--skip rcodesign_signs' || '' }}
       - if: runner.os == 'macOS'
         run: cargo install cargo-xwin --locked --version 0.23.1 && uv run scripts/setup-stub.py --check
       - if: failure() && runner.os == 'macOS'

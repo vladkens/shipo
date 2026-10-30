@@ -137,7 +137,8 @@ def pack(out: Path) -> None:
   for version in VERSIONS:
     manifest = out / version / "Cargo.toml"
     manifest.write_text(MANIFEST.format(bin=BIN, version=version, id=ID, name=NAME))
-    shutil.copy2(ROOT / "LICENSE", out / version / "LICENSE")
+    # LF, as git checks it out on Windows with CRLF: the setup and the .deb hold it.
+    (out / version / "LICENSE").write_bytes((ROOT / "LICENSE").read_bytes().replace(b"\r\n", b"\n"))
     print(run(shipo, "release", out / version, "--manifest", manifest, env=env), end="")
 
   newest = out / VERSIONS[-1]

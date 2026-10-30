@@ -284,7 +284,7 @@ mod tests {
     let text = body("1.2.0", Some(notes), url, &names.map(|n| dir.join(n))).unwrap();
     let path = write(&key(), &text, &dir.join("distrib")).unwrap();
     assert_eq!(path, dir.join("distrib/update.txt"));
-    assert!(!dir.join("distrib/update.txt.part").exists());
+    assert_eq!(fs::read_dir(dir.join("distrib")).unwrap().count(), 1, "no part left");
     let base = "https://github.com/me/app/releases/download/v1.2.0";
     let want = format!(
       "version 1.2.0\n\
@@ -563,15 +563,6 @@ mod tests {
     // The longest feed the apps read.
     let longest = "x".repeat(MAX - 133);
     assert_eq!(fs::read(write(&key(), &longest, &out).unwrap()).unwrap().len(), MAX);
-    #[cfg(unix)]
-    {
-      // A link left as the part is replaced, its target untouched.
-      std::os::unix::fs::symlink(dir.join("target"), out.join("update.txt.part")).unwrap();
-      write(&key(), text, &out).unwrap();
-      assert_eq!(fs::read_to_string(dir.join("target")).unwrap(), "old");
-      assert_eq!(fs::read(out.join("update.txt")).unwrap(), small);
-      assert!(!out.join("update.txt.part").exists());
-    }
   }
 
   #[test]

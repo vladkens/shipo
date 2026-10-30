@@ -161,26 +161,30 @@ fn sha256(path: &Path) -> io::Result<String> {
   Ok(hex(&hmac_sha256::Hash::hash(&read(path)?)))
 }
 
-/// The file `member` of the gzipped tarball `tarball` at `path` (0755), [place]d: renamed over
-/// it, so a copy that runs is never rewritten.
+/// The file `member` of the gzipped tarball `tarball` at `path` as [executable] puts it.
 pub fn untar(tarball: &Path, member: &str, path: &Path) -> io::Result<PathBuf> {
   let files = tar_files(&read(tarball)?).map_err(at(tarball))?;
   let Some((_, data)) = files.into_iter().find(|(name, _)| name == member) else {
     return Err(bad(format!("{}: no {member}", tarball.display())));
   };
 
-  place(path, |part| {
-    File::create_new(part)?.write_all(&data)?;
-    set_mode(part, 0o755)
-  })?;
-  Ok(path.to_path_buf())
+  executable(&data, path)
 }
 
-/// The file `member` of the zip `zip` at `path` (0755), [place]d as [untar] does.
+/// The file `member` of the zip `zip` at `path` as [executable] puts it.
 pub fn unzip(zip: &Path, member: &str, path: &Path) -> io::Result<PathBuf> {
-  let data = zip_file(&read(zip)?, member).map_err(at(zip))?;
+  executable(&zip_file(&read(zip)?, member).map_err(at(zip))?, path)
+}
+
+/// `data` at `path` (0755), [place]d: renamed over it, so a copy that runs is never rewritten;
+/// left as it is when it holds `data` already, as Windows renames nothing over a program running.
+fn executable(data: &[u8], path: &Path) -> io::Result<PathBuf> {
+  if fs::read(path).is_ok_and(|had| had == data) {
+    return Ok(path.to_path_buf());
+  }
+
   place(path, |part| {
-    File::create_new(part)?.write_all(&data)?;
+    File::create_new(part)?.write_all(data)?;
     set_mode(part, 0o755)
   })?;
   Ok(path.to_path_buf())
@@ -304,11 +308,7 @@ impl Temp {
   }
 
   pub fn new() -> io::Result<Self> {
-    static COUNT: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
-    let n = COUNT.fetch_add(1, Ordering::Relaxed);
-    let name = format!("shipo-{}-{}-{n}", std::process::id(), nanos.as_nanos());
-    let path = std::env::temp_dir().join(name);
+    let path = std::env::temp_dir().join(format!("shipo-{}", unique()));
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut fs::DirBuilder::new(), 0o700).create(&path)?;
     #[cfg(not(unix))]
@@ -346,19 +346,22 @@ pub fn private(path: &Path, data: &[u8]) -> io::Result<PathBuf> {
   Ok(path.to_path_buf())
 }
 
-/// The file `out`, made by `make` at `<out>.part` and renamed into place. A part there before, or
-/// a link there, is removed first, so `make` makes a new file (`create_new`), never one written
-/// through; on any error the part is removed, so no folder a release uploads or the apps fetch
-/// from holds half a file.
+/// A name no other call gets, in this run or another at once: the pid, the time and a count.
+fn unique() -> String {
+  static COUNT: AtomicU64 = AtomicU64::new(0);
+  let nanos = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
+  let n = COUNT.fetch_add(1, Ordering::Relaxed);
+  format!("{}-{}-{n}", std::process::id(), nanos.as_nanos())
+}
+
+/// The file `out`, made by `make` at a part of this call's own beside it, `<out>.<unique>.part`,
+/// and renamed into place, so two runs that make one file at once (two releases fetching one
+/// tool) each rename a whole one over it; on any error the part is removed, so no folder a release
+/// uploads or the apps fetch from holds half a file.
 pub fn place(out: &Path, make: impl FnOnce(&Path) -> io::Result<()>) -> io::Result<()> {
   let mut name = out.file_name().unwrap_or_default().to_os_string();
-  name.push(".part");
+  name.push(format!(".{}.part", unique()));
   let part = out.with_file_name(name);
-  match fs::remove_file(&part) {
-    Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(at(&part)(e)),
-    _ => {}
-  }
-
   let made = make(&part).and_then(|()| fs::rename(&part, out).map_err(at(out)));
   if made.is_err() {
     let _ = fs::remove_file(&part);
@@ -636,6 +639,13 @@ mod tests {
     assert_eq!(fs::read(&path).unwrap(), b"pinned");
     assert_eq!(listed(), 1);
 
+    // Many at once, as two releases on one machine: each renames a whole file into place.
+    let twice = tools.join("twice");
+    thread::scope(|s| (0..8).for_each(|_| drop(s.spawn(|| fetch(&url, &good, &twice).unwrap()))));
+    assert_eq!(fs::read(&twice).unwrap(), b"pinned");
+    assert_eq!(listed(), 2);
+    fs::remove_file(&twice).unwrap();
+
     // Fetched once: a changed source is not read again, a changed file is refused and removed.
     fs::write(&src, "other").unwrap();
     assert_eq!(fetch(&url, &good, &path).unwrap(), path);
@@ -728,7 +738,8 @@ mod tests {
     untar(&tar, "d/tool", &out).unwrap();
     assert_eq!(io::read_to_string(before).unwrap(), "x");
     assert_eq!(fs::read(&out).unwrap(), b"y");
-    assert!(!tmp.join("tool.part").exists());
+    let parts = fs::read_dir(&*tmp).unwrap().flatten();
+    assert!(parts.filter(|e| e.path().extension().is_some_and(|x| x == "part")).count() == 0);
 
     drop(tmp);
     assert!(!path.exists());
