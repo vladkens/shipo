@@ -262,6 +262,19 @@ jobs:
         env: { GH_TOKEN: "${{ github.token }}" }
 ```
 
+## 🆚 Compared
+
+| | shipo | [cargo-packager](https://github.com/crabnebula-dev/cargo-packager) | [Tauri](https://v2.tauri.app/distribute/) | [Velopack](https://github.com/velopack/velopack) | [dist](https://github.com/axodotdev/cargo-dist) + [axoupdater](https://github.com/axodotdev/axoupdater) |
+|---|---|---|---|---|---|
+| Made for | Rust apps | Rust and JS apps | Tauri apps | C#, Rust, C++, JS… apps | command-line tools |
+| All OSes from one machine | ✅ Linux or a Mac | ❌ each on its OS, NSIS on any | ❌ each on its OS, NSIS on any | ✅ a Mac, MSI on Windows | ❌ a CI runner per OS |
+| macOS release from Linux | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Formats | DMG, NSIS, AppImage, .deb | DMG, NSIS, MSI, AppImage, .deb, pacman | DMG, NSIS, MSI, AppImage, .deb, .rpm | .pkg, Setup.exe, MSI, AppImage | .pkg, MSI, shell, PowerShell, Homebrew, npm |
+| Updater's crates, Linux / Windows / macOS | 8 / 10 / 15 | 114 / 117 / 125 | +42 / +42 / +53 | 107 / 115 / 107 | 117 / 128 / 119 |
+| Signed updates | ✅ Ed25519, a spare key | ✅ minisign | ✅ minisign | ❌ checksums over HTTPS | ❌ checksums over HTTPS |
+| Delta updates | ❌ | ❌ | ❌ | ✅ | ❌ |
+
+Crates are what `cargo tree -e normal` listed on 2026-10-30 for an app with just the updater, itself and build-time macros included, and for Tauri what its updater adds to a Tauri app. The others have years of use behind them and do more: cargo-packager and Tauri also make MSI and pacman or .rpm, Velopack has delta updates and channels, and dist adds Homebrew and npm.
 
 ## 🤝 Contributing
 
