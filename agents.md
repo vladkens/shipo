@@ -1,6 +1,6 @@
 # shipo
 
-Releases and updates for desktop apps. The packer (`cli/`, the `shipo` binary) turns an app's bare binaries for macOS, Windows and Linux into signed installers and a signed update feed, on one Ubuntu host. The library (`src/`, the `shipo` crate) runs inside the app: it checks the feed, downloads the update and installs it in place after the app quits.
+Releases and updates for desktop apps. The packer (`cli/`, the `shipo` binary) turns an app's bare binaries for macOS, Windows and Linux into signed installers and a signed update feed, on a Linux or macOS host. The library (`src/`, the `shipo` crate) runs inside the app: it checks the feed, downloads the update and installs it in place after the app quits.
 
 Each fact has one source: the contract between the two is `spec.md`, the API the rustdoc, the CLI `shipo --help`, checks the `Makefile`, the work under way `docs/plans/`.
 
@@ -8,8 +8,8 @@ Each fact has one source: the contract between the two is `spec.md`, the API the
 
 - Change `spec.md`, the public API or the CLI only with the person's approval; a `spec.md` change lands with both sides' code. A public struct with public fields is `#[non_exhaustive]`.
 - The library has no UI and no state of its own: it never shows a window, dialog or notification or takes the focus; the app draws everything and keeps its settings.
-- Library dependencies are only `ed25519-compact`, the `objc2` family on macOS and `windows-sys` on Windows (Linux loads libcurl at run time): every app builds them. The packer takes a crate only where our own code would be large, each with a stated reason. Change dependencies only with `cargo add`, `cargo remove` or `cargo upgrade`, never by hand.
-- The packer runs on Ubuntu (`shipo app` also on a Mac). It may require a tool apt installs; fetch any other one pinned by version and SHA-256.
+- Library dependencies are only `ed25519-compact`, the `objc2` family on macOS and `windows-sys` on Windows (Linux loads libcurl at run time): every app builds them. The packer takes a crate only where our own code would be large; `docs/dependencies.md` gives each crate's reason and what we write ourselves instead, and changes with them. Change dependencies only with `cargo add`, `cargo remove` or `cargo upgrade`, never by hand.
+- The packer runs the same on Linux (x86_64, aarch64) and macOS (Apple silicon); Windows as its host waits until someone asks. It needs nothing installed but `curl` and `makensis`; write a format ourselves rather than call a host tool, and fetch any other tool pinned by version and SHA-256.
 - The packer ships as prebuilt binaries: a release job with secrets downloads one pinned by SHA-256, never builds crates from source.
 
 ## Code

@@ -15,7 +15,6 @@ mod macos;
 mod pe;
 mod plist;
 mod squashfs;
-mod tar;
 mod tool;
 mod tree;
 mod udif;

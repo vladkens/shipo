@@ -1,7 +1,7 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/shipo
 //! The programs the packer runs: a command whose failure is an error with what it printed, the
-//! pinned tools it fetches by the system's `curl`, checked by their SHA-256 and unpacked by our own
-//! tar reader, and the temporary folders and private files their secrets go through.
+//! pinned tools it fetches by the system's `curl`, checked by their SHA-256 and unpacked from their
+//! tarballs, and the temporary folders and private files their secrets go through.
 
 use std::fmt::Write;
 use std::fs::{self, File, OpenOptions};
@@ -12,7 +12,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::{bad, tar};
+use flate2::read::MultiGzDecoder;
+
+use crate::bad;
 
 /// The secrets a release job holds, kept from every program the packer runs: one that needs a
 /// value gets it under a name of its own.
@@ -184,7 +186,7 @@ pub fn sha256(path: &Path) -> io::Result<String> {
 /// renamed over it, so a copy that runs is never rewritten.
 pub fn untar(tarball: &Path, member: &str, path: &Path) -> io::Result<PathBuf> {
   let at = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", tarball.display()));
-  let files = tar::files(&fs::read(tarball).map_err(at)?).map_err(at)?;
+  let files = tar_files(&fs::read(tarball).map_err(at)?).map_err(at)?;
   let Some((_, data)) = files.into_iter().find(|(name, _)| name == member) else {
     return Err(bad(format!("{}: no {member}", tarball.display())));
   };
@@ -196,6 +198,46 @@ pub fn untar(tarball: &Path, member: &str, path: &Path) -> io::Result<PathBuf> {
   set_mode(&part, 0o755)?;
   fs::rename(&part, path)?;
   Ok(path.to_path_buf())
+}
+
+/// The regular files of the gzipped tarball `gz`, each by its path without a leading `./`; a path
+/// that is absolute or holds `..` is an error, whatever its type, and so is a cut archive.
+fn tar_files(gz: &[u8]) -> io::Result<Vec<(String, Vec<u8>)>> {
+  let mut out = vec![];
+  for entry in tar::Archive::new(MultiGzDecoder::new(gz)).entries()? {
+    let mut entry = entry?;
+    let name = String::from_utf8_lossy(&entry.path_bytes()).into_owned();
+    let name = in_folder(&name)?;
+    // `7` is a contiguous file, read as a regular one.
+    if !matches!(entry.header().entry_type(), tar::EntryType::Regular | tar::EntryType::Continuous)
+    {
+      continue;
+    }
+
+    // The crate reads a cut body short without an error.
+    let mut data = vec![];
+    entry.read_to_end(&mut data)?;
+    if data.len() as u64 != entry.size() {
+      return Err(bad("the tarball is cut short"));
+    }
+
+    out.push((name, data));
+  }
+
+  Ok(out)
+}
+
+/// `name` without its leading `./`; an error when it is absolute or holds `..`.
+fn in_folder(name: &str) -> io::Result<String> {
+  let mut rest = name;
+  while let Some(r) = rest.strip_prefix("./") {
+    rest = r;
+  }
+
+  match rest.starts_with('/') || rest.split('/').any(|part| part == "..") {
+    true => Err(bad(format!("the tarball holds {name:?}, outside its folder"))),
+    false => Ok(rest.to_string()),
+  }
 }
 
 // MARK: Files
@@ -258,7 +300,80 @@ pub fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+  use std::io::Write as _;
+
+  use flate2::Compression;
+  use flate2::write::GzEncoder;
+
   use super::*;
+
+  /// A ustar entry of the raw name `name` and the type `kind` holding `body`, padded to a block.
+  fn entry(name: &str, kind: u8, body: &[u8]) -> Vec<u8> {
+    let mut head = tar::Header::new_ustar();
+    head.as_old_mut().name[..name.len()].copy_from_slice(name.as_bytes());
+    head.set_mode(0o755);
+    head.set_size(body.len() as u64);
+    head.set_entry_type(tar::EntryType::new(kind));
+    head.set_cksum();
+
+    let mut out = head.as_bytes().to_vec();
+    out.extend(body);
+    out.resize(out.len().next_multiple_of(512), 0);
+    out
+  }
+
+  fn gz(data: &[u8]) -> Vec<u8> {
+    let mut enc = GzEncoder::new(vec![], Compression::default());
+    enc.write_all(data).unwrap();
+    enc.finish().unwrap()
+  }
+
+  #[test]
+  fn tarball() {
+    let long = format!("{}/tool", "d".repeat(120));
+    let entries = [
+      entry("./d/", b'5', b""),
+      entry("./d/tool", b'0', b"tool"),
+      entry("d/link", b'2', b""),
+      entry("././@LongLink", b'L', long.as_bytes()),
+      entry("cut", b'0', b"long"),
+      entry("PaxHeader", b'x', b"17 path=pax/tool\n"),
+      entry("cut", b'0', b"pax"),
+      entry("d/empty", 0, b""),
+      entry("d/contiguous", b'7', b"c"),
+      vec![0; 1024],
+    ];
+
+    let want = [
+      ("d/tool", "tool"),
+      (long.as_str(), "long"),
+      ("pax/tool", "pax"),
+      ("d/empty", ""),
+      ("d/contiguous", "c"),
+    ];
+    let want: Vec<_> = want.map(|(n, d)| (n.to_string(), d.as_bytes().to_vec())).into();
+    assert_eq!(tar_files(&gz(&entries.concat())).unwrap(), want);
+
+    for name in ["/etc/passwd", "d/../../x", "..", "./../x"] {
+      let e = tar_files(&gz(&entry(name, b'0', b"x"))).unwrap_err().to_string();
+      assert_eq!(e, format!("the tarball holds {name:?}, outside its folder"));
+    }
+
+    // A link out of the folder is refused too, though only regular files are taken.
+    assert!(tar_files(&gz(&entry("../link", b'2', b""))).is_err());
+
+    let mut wrong = entry("x", b'0', b"x");
+    wrong[0] = b'y';
+    assert!(tar_files(&gz(&wrong)).is_err());
+
+    // Cut inside a body, inside its padding, and inside the next header.
+    let full = [entry("x", b'0', &[1; 600]), entry("y", b'0', b"y")].concat();
+    for at in [512 + 100, 512 + 700, 1536 + 100] {
+      assert!(tar_files(&gz(&full[..at])).is_err(), "cut at {at}");
+    }
+
+    assert!(tar_files(b"not gzip").is_err());
+  }
 
   #[test]
   fn hash() {
