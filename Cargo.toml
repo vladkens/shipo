@@ -1,6 +1,6 @@
 [package]
 name = "shipo"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2024"
 description = "Releases and updates for desktop apps: a packer that makes a signed DMG, Windows setup, AppImage and .deb and a signed update feed on Linux, and a tiny updater that installs from it in place."
 authors = ["vladkens"]
