@@ -45,7 +45,7 @@ The packer writes the records in the order above, each ending in LF, the platfor
 
 ### Reading it
 
-A client checks the signature before it reads a record: the feed is valid when any one of the public keys the app holds verifies it. Then it takes the release when its version is newer than the running one and the feed has a record for its platform; without that record there is no update. A running version that is a pre-release (it holds `-`, as a dev build's `0.1.0-5-gabc` does) takes no update, and the client fetches nothing.
+A client checks the signature before it reads a record: the feed is valid when any one of the public keys the app holds verifies it. Then it takes the release when its version is newer than the running one and the feed has a record for its platform; without that record there is no update. A running version that is a pre-release (it holds `-`, as `1.3.0-rc.1` and a dev build's `0.1.0-5-gabc` do) takes no update, not even its own release, and the client fetches nothing. A running release takes a pre-release the feed offers when it is newer.
 
 A version is newer by its numeric dot parts first (`1.10` after `1.9`, `1.2` equal to `1.2.0`), then a release after its pre-releases (`1.2.0` after `1.2.0-rc.1`), the pre-releases by their dot parts, numbers below words, as semver orders them; a leading `v` and a `+build` are ignored. Two versions that don't both parse so make the feed invalid.
 
@@ -54,6 +54,8 @@ The release's file is taken only when its size and SHA-512 are the feed's: the d
 ### Keys
 
 A public key is Ed25519's 32 bytes in 64 hex digits; the app holds a list of them, built in. The list must hold a key and only valid ones (a point on the curve, not of small order): one malformed key is the app's own mistake, and the client then reads no feed and fetches none. A private key is its 32-byte seed (RFC 8032) in 64 hex digits, given to the packer by `--key <file>` or the environment variable `SHIPO_UPDATE_KEY`, the release job's secret.
+
+Each app has keys of its own: the feed doesn't name its app, and on Windows and Linux the library installs the file of any feed its keys verify.
 
 The list may be of any length; two is the rule, made by `shipo keygen update.key update-spare.key` (a key per file): the working one, whose seed becomes the release job's secret, and the spare, whose seed is kept offline and never reaches CI. Both public keys go into the app, so every release trusts both. readme.md gives the steps.
 
@@ -139,6 +141,6 @@ The setup is a per-user NSIS installer; it asks for no administrator (`RequestEx
 
 ## Linux
 
-The AppImage is the type2 runtime with a squashfs appended, of an AppDir holding `AppRun` (a link to `usr/bin/<bin>`), `usr/bin/<bin>`, `<id>.desktop`, `<id>.png` and `.DirIcon`. The runtime needs no libfuse2 and sets `APPIMAGE` and `APPDIR` for the app.
+The AppImage is the type2 runtime with a squashfs appended, of an AppDir holding `AppRun` (a link to `usr/bin/<bin>`), `usr/bin/<bin>`, `<id>.desktop`, `<id>.png` and `.DirIcon`. The runtime needs no libfuse2 and sets `APPIMAGE` and `APPDIR` for the app. The `.desktop` entry's `StartupWMClass` is `<id>`, and the app sets its window's Wayland app id and X11 WM_CLASS to `<id>`, so a dock matches the window to the entry.
 
-The .deb installs `/usr/bin/<bin>`, the `.desktop` entry and the icon. Its `Depends` is the config's list, with `libc6 (>= <x.y>)` first when the list names no `libc6`; `<x.y>` is the newest `GLIBC_<x.y>` in the binary's version needs (`.gnu.version_r`), which the packer prints. Its version is the app's without the build metadata (`+…`), with the first `-` as `~` and any later one as `.`, and `~dev` after a dev build's, so apt orders both before the release: `1.2.0-rc-3+b5` is `1.2.0~rc.3`.
+The .deb installs `/usr/bin/<bin>`, the `.desktop` entry and the icon. Its `Depends` is the config's list, with `libc6 (>= <x.y>)` first when the list names no `libc6`; `<x.y>` is the newest `GLIBC_<x.y>` in the binary's version needs (`.gnu.version_r`), which the packer prints: the binary runs on that glibc or newer. Its version is the app's without the build metadata (`+…`), with the first `-` as `~` and any later one as `.`, and `~dev` after a dev build's, so apt orders both before the release: `1.2.0-rc-3+b5` is `1.2.0~rc.3`.
