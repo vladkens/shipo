@@ -2,7 +2,6 @@
 //! A 64-bit Windows exe's resources: the resource section built from a tree of them, the tree read
 //! back from an exe, and an exe given a new one, so no Windows tool is needed. The layout is
 //! Microsoft's "PE Format" (learn.microsoft.com/windows/win32/debug/pe-format).
-#![cfg_attr(not(test), expect(dead_code, reason = "release calls the setup in the next step"))]
 
 use std::collections::BTreeMap;
 use std::io;
@@ -200,6 +199,7 @@ fn entries(dir: &[u8], at: usize, sub: bool, budget: &mut usize) -> io::Result<V
 }
 
 /// The resources of the PE32+ file `data`.
+#[cfg_attr(not(test), expect(dead_code, reason = "the tests read the resources back"))]
 pub fn resources(data: &[u8]) -> io::Result<Tree> {
   let pe = Pe::read(data)?;
   pe.resources(data, |_| false)

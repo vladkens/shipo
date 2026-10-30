@@ -1,7 +1,6 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/shipo
 //! The Windows setup: the app's exe given its icon, version and manifest, and the per-user NSIS
 //! setup of it that `makensis` builds, as spec.md's Windows section gives it.
-#![cfg_attr(not(test), expect(dead_code, reason = "release calls it in the next step"))]
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};

@@ -1,7 +1,6 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/shipo
 //! The icon's images: a PNG read into RGBA and written back, resized and cropped, and the `.icns`
 //! and `.ico` made of them, with no `sips` or `iconutil`, so on any OS.
-#![cfg_attr(not(test), expect(dead_code, reason = "app and release use it in the next steps"))]
 
 use std::collections::BTreeMap;
 use std::path::Path;

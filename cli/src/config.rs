@@ -13,7 +13,6 @@ use crate::bad;
 
 /// The app as its `[package.metadata.shipo]` and its package give it.
 #[derive(Debug)]
-#[cfg_attr(not(test), expect(dead_code, reason = "the commands read it in the next steps"))]
 pub struct Config {
   /// The reverse-DNS id: the bundle id, the `.desktop`'s `StartupWMClass`.
   pub id: String,

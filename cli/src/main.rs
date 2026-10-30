@@ -6,10 +6,6 @@ mod config;
 mod ds_store;
 mod feed;
 mod image;
-#[cfg_attr(
-  not(all(test, target_os = "linux")),
-  expect(dead_code, reason = "release calls it in its step; tests build the packages on Linux")
-)]
 mod linux;
 mod macos;
 mod pe;
@@ -19,7 +15,7 @@ mod windows;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::{fmt, io};
+use std::{fmt, fs, io};
 
 use config::Config;
 
@@ -187,7 +183,6 @@ fn twice(opt: &str) -> lexopt::Error {
 }
 
 // MARK: Commands
-// Each comes in a step of its own (docs/plans).
 
 /// Makes and signs the macOS app of the binary `bin`, and prints its path.
 fn app(cfg: &Config, bin: &Path) -> io::Result<()> {
@@ -197,9 +192,135 @@ fn app(cfg: &Config, bin: &Path) -> io::Result<()> {
   Ok(())
 }
 
-/// The installers of the binaries in `dir`, and with `tag` the feed signed by `key`.
-fn release(_cfg: &Config, _dir: &Path, _tag: Option<&str>, _key: Option<&Path>) -> io::Result<()> {
-  Err(not_yet("release"))
+/// The OSes `release` takes binaries for, as their target triples end, in the feed's order.
+const OSES: [&str; 3] = ["apple-darwin", "pc-windows-msvc", "unknown-linux-gnu"];
+/// The archs `release` takes binaries for, as their target triples start.
+const ARCHS: [&str; 2] = ["x86_64", "aarch64"];
+
+/// The installers of the binaries in `dir`, `<Name>-dev-…` at its top level, each path printed;
+/// with `tag` also update.txt there, signed by `key`, of the files as the GitHub release serves
+/// them. The tag and the key are checked before anything is built.
+fn release(cfg: &Config, dir: &Path, tag: Option<&str>, key: Option<&Path>) -> io::Result<()> {
+  let key = match tag {
+    Some(tag) => {
+      tagged(tag, &cfg.version, &cfg.repository, &cfg.name)?;
+      Some(feed::Key::load(key, std::env::var_os("SHIPO_UPDATE_KEY"))?)
+    }
+    None => None,
+  };
+
+  let binaries = binaries(dir, &cfg.bin)?;
+  clean(dir, &cfg.name)?;
+  let mut files = vec![];
+  for (os, arch, bin) in binaries {
+    let made = match os {
+      "apple-darwin" => {
+        return Err(io::Error::new(
+          io::ErrorKind::Unsupported,
+          "release: the macOS DMG is not supported yet",
+        ));
+      }
+      "pc-windows-msvc" => vec![windows::setup(cfg, &bin, arch, dir)?],
+      _ => vec![
+        linux::appimage(cfg, &bin, arch, dir)?,
+        linux::deb(cfg, &bin, arch, tag.is_none(), dir)?,
+      ],
+    };
+
+    for file in made {
+      println!("{}", file.display());
+      files.push(file);
+    }
+  }
+
+  let (Some(tag), Some(key)) = (tag, key) else { return Ok(()) };
+
+  // The feed lists what the library installs: a .deb is apt's.
+  files.retain(|f| f.extension().is_none_or(|e| e != "deb"));
+  let url = format!("{}/releases/download/{tag}", cfg.repository);
+  let notes = format!("{}/releases/tag/{tag}", cfg.repository);
+  let name = |file: &str| renamed(&cfg.name, tag, file);
+  let body = feed::body(&cfg.version, Some(&notes), &url, &files, name)?;
+  println!("{}", feed::write(&key, &body, dir)?.display());
+  Ok(())
+}
+
+/// Checks a release's `tag` against the app's `version`, `repository` and `name`: `v` and the
+/// version, a GitHub repository, whose release serves the files, and a name GitHub keeps in the
+/// files' names: it renames an upload of other characters (a space to `.`), so the feed would miss.
+fn tagged(tag: &str, version: &str, repository: &str, name: &str) -> io::Result<()> {
+  if tag != format!("v{version}") {
+    return Err(bad(format!("the tag {tag} is not the app's version, v{version}")));
+  }
+
+  let repo = repository.strip_prefix("https://github.com/").unwrap_or_default();
+  let parts: Vec<_> = repo.split('/').collect();
+  if parts.len() != 2 || parts.iter().any(|p| p.is_empty()) {
+    return Err(bad(format!(
+      "--tag serves the files from the GitHub release: package.repository is {repository:?}, not \
+       https://github.com/<owner>/<repo>"
+    )));
+  }
+
+  let kept = |c: char| c.is_ascii_alphanumeric() || "._-".contains(c);
+  if name.is_empty() || !name.chars().all(kept) {
+    return Err(bad(format!(
+      "--tag: the name {name:?} is not of [A-Za-z0-9._-] alone, which GitHub keeps in a release's \
+       file names"
+    )));
+  }
+
+  Ok(())
+}
+
+/// Removes `dir`'s update.txt and `<name>-dev-*` files, a previous run's, so no old feed or
+/// package of a triple gone from `dir` is left beside the new ones.
+fn clean(dir: &Path, name: &str) -> io::Result<()> {
+  let prefix = format!("{name}-dev-");
+  for entry in fs::read_dir(dir)? {
+    let entry = entry?;
+    let file = entry.file_name();
+    let stale = file == "update.txt" || file.to_str().is_some_and(|f| f.starts_with(&prefix));
+    if stale && !entry.file_type()?.is_dir() {
+      fs::remove_file(entry.path())?;
+    }
+  }
+
+  Ok(())
+}
+
+/// The binaries in `dir`, `<triple>/<bin>[.exe]` of [OSES] and [ARCHS], each with its OS and
+/// arch, in the feed's order; an error when there is none.
+fn binaries(dir: &Path, bin: &str) -> io::Result<Vec<(&'static str, &'static str, PathBuf)>> {
+  let all = OSES.iter().flat_map(|os| ARCHS.iter().map(move |arch| (*os, *arch)));
+  let found: Vec<_> = all
+    .map(|(os, arch)| {
+      let exe = if os == "pc-windows-msvc" { ".exe" } else { "" };
+      (os, arch, dir.join(format!("{arch}-{os}")).join(format!("{bin}{exe}")))
+    })
+    .filter(|(_, _, path)| path.is_file())
+    .collect();
+
+  if found.is_empty() {
+    let triples: Vec<_> =
+      OSES.iter().flat_map(|os| ARCHS.map(|arch| format!("{arch}-{os}"))).collect();
+    return Err(bad(format!(
+      "{} holds no <triple>/{bin}[.exe], of {}",
+      dir.display(),
+      triples.join(", ")
+    )));
+  }
+
+  Ok(found)
+}
+
+/// The name rust-publish gives the release's `file`: `<name>-dev-…` as `<name>-<tag>-…`, the same
+/// bytes; another name as it is.
+fn renamed(name: &str, tag: &str, file: &str) -> String {
+  match file.strip_prefix(&format!("{name}-dev-")) {
+    Some(rest) => format!("{name}-{tag}-{rest}"),
+    None => file.to_string(),
+  }
 }
 
 /// The feed of `files` served at `url`, signed by `key`, in `<target>/distrib`; prints its path.
@@ -233,11 +354,6 @@ fn public(file: &Path) -> io::Result<()> {
   Ok(())
 }
 
-/// The error of a command still to come.
-fn not_yet(cmd: &str) -> io::Error {
-  io::Error::new(io::ErrorKind::Unsupported, format!("{cmd}: not yet"))
-}
-
 /// An error in what the user gave, `what` its message.
 fn bad(what: impl fmt::Display) -> io::Error {
   io::Error::new(io::ErrorKind::InvalidData, what.to_string())
@@ -245,6 +361,8 @@ fn bad(what: impl fmt::Display) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+  use std::fs;
+
   use super::*;
 
   fn args(line: &str) -> Result<Command, String> {
@@ -334,5 +452,181 @@ mod tests {
     for (line, want) in cases {
       assert_eq!(args(line), Err(want.into()), "{line}");
     }
+  }
+
+  #[test]
+  fn binaries_found() {
+    let tmp = tool::Temp::new().unwrap();
+    assert_eq!(
+      binaries(&tmp, "hello").unwrap_err().to_string(),
+      format!(
+        "{} holds no <triple>/hello[.exe], of x86_64-apple-darwin, aarch64-apple-darwin, \
+         x86_64-pc-windows-msvc, aarch64-pc-windows-msvc, x86_64-unknown-linux-gnu, \
+         aarch64-unknown-linux-gnu",
+        tmp.display()
+      )
+    );
+
+    // A Windows binary without `.exe`, another binary, a folder and a stray triple are not taken.
+    let files = [
+      "aarch64-unknown-linux-gnu/hello",
+      "x86_64-pc-windows-msvc/hello.exe",
+      "aarch64-pc-windows-msvc/hello",
+      "x86_64-unknown-linux-gnu/other",
+      "x86_64-unknown-linux-musl/hello",
+      "x86_64-apple-darwin/hello",
+    ];
+
+    for file in files {
+      fs::create_dir_all(tmp.join(file).parent().unwrap()).unwrap();
+      fs::write(tmp.join(file), b"").unwrap();
+    }
+
+    fs::create_dir_all(tmp.join("aarch64-apple-darwin/hello")).unwrap();
+    let found = binaries(&tmp, "hello").unwrap();
+    let want = [
+      ("apple-darwin", "x86_64", "x86_64-apple-darwin/hello"),
+      ("pc-windows-msvc", "x86_64", "x86_64-pc-windows-msvc/hello.exe"),
+      ("unknown-linux-gnu", "aarch64", "aarch64-unknown-linux-gnu/hello"),
+    ];
+
+    let want: Vec<_> = want.map(|(os, arch, file)| (os, arch, tmp.join(file))).into();
+    assert_eq!(found, want);
+  }
+
+  #[test]
+  fn tags() {
+    let gh = "https://github.com/vladkens/wavo-app";
+    assert!(tagged("v1.2.0", "1.2.0", gh, "Wavo").is_ok());
+    assert!(tagged("v1.2.0-rc.1", "1.2.0-rc.1", gh, "Wavo_App-2.x").is_ok());
+
+    let not_version = "the tag 1.2.0 is not the app's version, v1.2.0";
+    let not_github = |repo: &str| {
+      format!(
+        "--tag serves the files from the GitHub release: package.repository is {repo:?}, not \
+         https://github.com/<owner>/<repo>"
+      )
+    };
+
+    let cases = [
+      ("1.2.0", "1.2.0", gh, not_version.to_string()),
+      ("v1.2.1", "1.2.0", gh, "the tag v1.2.1 is not the app's version, v1.2.0".into()),
+      ("v1.2", "1.2.0", gh, "the tag v1.2 is not the app's version, v1.2.0".into()),
+      ("v1.2.0", "1.2.0", "", not_github("")),
+      ("v1.2.0", "1.2.0", "https://gitlab.com/a/b", not_github("https://gitlab.com/a/b")),
+      ("v1.2.0", "1.2.0", "https://github.com/a", not_github("https://github.com/a")),
+      ("v1.2.0", "1.2.0", "https://github.com/a/b/c", not_github("https://github.com/a/b/c")),
+      ("v1.2.0", "1.2.0", "http://github.com/a/b", not_github("http://github.com/a/b")),
+    ];
+
+    for (tag, version, repo, want) in cases {
+      let e = tagged(tag, version, repo, "Wavo").unwrap_err().to_string();
+      assert_eq!(e, want, "{tag} {repo}");
+    }
+
+    for name in ["Wavo Pro", "Wavo/Pro", "Wavö", "Wavo+", ""] {
+      assert_eq!(
+        tagged("v1.2.0", "1.2.0", gh, name).unwrap_err().to_string(),
+        format!(
+          "--tag: the name {name:?} is not of [A-Za-z0-9._-] alone, which GitHub keeps in a \
+           release's file names"
+        )
+      );
+    }
+  }
+
+  #[test]
+  fn renames() {
+    let cases = [
+      ("Wavo-dev-linux-x86_64.AppImage", "Wavo-v1.2.0-linux-x86_64.AppImage"),
+      ("Wavo-dev-windows-arm64-setup.exe", "Wavo-v1.2.0-windows-arm64-setup.exe"),
+      ("Wavo Pro-dev-macos-aarch64.dmg", "Wavo Pro-dev-macos-aarch64.dmg"),
+      ("Wavo-devx-linux-x86_64.AppImage", "Wavo-devx-linux-x86_64.AppImage"),
+      ("update.txt", "update.txt"),
+    ];
+
+    for (file, want) in cases {
+      assert_eq!(renamed("Wavo", "v1.2.0", file), want, "{file}");
+    }
+
+    assert_eq!(
+      renamed("My-dev-App", "v1.2.0", "My-dev-App-dev-linux-x86_64.AppImage"),
+      "My-dev-App-v1.2.0-linux-x86_64.AppImage"
+    );
+
+    assert_eq!(
+      renamed("Wavo Pro", "v1.2.0", "Wavo Pro-dev-macos-aarch64.dmg"),
+      "Wavo Pro-v1.2.0-macos-aarch64.dmg"
+    );
+  }
+
+  #[test]
+  fn cleans() {
+    let tmp = tool::Temp::new().unwrap();
+    let names = [
+      "Wavo-dev-linux-x86_64.deb",
+      "Wavo-dev-windows-x64-setup.exe",
+      "update.txt",
+      "Wavo-v1.2.0-linux-x86_64.deb",
+      "Wavo-devx.txt",
+      "Other-dev-linux-x86_64.deb",
+      "notes.md",
+    ];
+
+    for name in names {
+      fs::write(tmp.join(name), b"").unwrap();
+    }
+
+    fs::create_dir(tmp.join("Wavo-dev-folder")).unwrap();
+    clean(&tmp, "Wavo").unwrap();
+    let want = [
+      "Other-dev-linux-x86_64.deb",
+      "Wavo-dev-folder",
+      "Wavo-devx.txt",
+      "Wavo-v1.2.0-linux-x86_64.deb",
+      "notes.md",
+    ];
+    assert_eq!(listed(&tmp), want);
+  }
+
+  /// The names in `dir`, sorted, its folders' contents not among them.
+  fn listed(dir: &Path) -> Vec<String> {
+    let names = fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap());
+    let mut names: Vec<_> = names.collect();
+    names.sort();
+    names
+  }
+
+  /// An app `Wavo` of version 1.2.0 on GitHub in `dir`, its binary `wavo`.
+  fn app(dir: &Path) -> Config {
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/main.rs"), "fn main() {}\n").unwrap();
+    let manifest = dir.join("Cargo.toml");
+    let toml = "[package]\nname = \"wavo\"\nversion = \"1.2.0\"\nedition = \"2024\"\n\
+      repository = \"https://github.com/vladkens/wavo-app\"\n\n[package.metadata.shipo]\n\
+      id = \"com.example.wavo\"\nname = \"Wavo\"\nicon = \"icon.png\"\n";
+    fs::write(&manifest, toml).unwrap();
+    Config::load(&manifest).unwrap()
+  }
+
+  #[test]
+  fn release_checks_first() {
+    let tmp = tool::Temp::new().unwrap();
+    let cfg = app(&tmp.join("app"));
+    let dist = tmp.join("dist");
+    fs::create_dir_all(dist.join("x86_64-unknown-linux-gnu")).unwrap();
+    fs::write(dist.join("x86_64-unknown-linux-gnu/wavo"), b"").unwrap();
+    // A previous run's files stay when the checks fail.
+    fs::write(dist.join("update.txt"), b"old").unwrap();
+    let before = listed(&dist);
+
+    let e = release(&cfg, &dist, Some("v9.9.9"), None).unwrap_err();
+    assert_eq!(e.to_string(), "the tag v9.9.9 is not the app's version, v1.2.0");
+    assert_eq!(listed(&dist), before);
+
+    let key = tmp.join("missing.key");
+    let e = release(&cfg, &dist, Some("v1.2.0"), Some(&key)).unwrap_err();
+    assert_eq!(e.kind(), io::ErrorKind::NotFound, "{e}");
+    assert_eq!(listed(&dist), before);
   }
 }
