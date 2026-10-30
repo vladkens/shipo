@@ -8,10 +8,12 @@ installed as a user installs it, then updated in place from 2.0.0's feed served 
 uv run scripts/e2e-update.py build <dir>   the example at both versions, <dir>/<version>/<triple>/hello[.exe]
 uv run scripts/e2e-update.py pack <dir>    `shipo release` of each version, a throwaway key, 2.0.0's feed
 uv run scripts/e2e-update.py run <dir>     1.0.0 installed and updated; checks that 2.0.0 is what runs
+uv run scripts/e2e-update.py all <dir>     the three on this host (`make e2e`)
 
 `pack` packs the binaries `build` left in <dir> for any OS, so one host may pack another's: the
 setup needs makensis, the DMG a Mac (signed by "Hello Local Signing", which v1 and v2 must share).
-`run` takes this OS's files. CI runs all three on each OS (.github/workflows/main.yml).
+`run` takes this OS's files and leaves the app installed: in a temporary folder on macOS and Linux,
+for this user on Windows. CI runs the steps on each OS (.github/workflows/main.yml).
 """
 
 import argparse
@@ -252,12 +254,14 @@ def check(packed: Path) -> None:
 
 def main() -> None:
   ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-  ap.add_argument("step", choices=("build", "pack", "run"))
+  ap.add_argument("step", choices=("build", "pack", "run", "all"))
   ap.add_argument("dir", type=Path)
   args = ap.parse_args()
   out = args.dir.resolve()
   out.mkdir(parents=True, exist_ok=True)
-  {"build": build, "pack": pack, "run": check}[args.step](out)
+  steps = {"build": build, "pack": pack, "run": check}
+  for step in steps if args.step == "all" else [args.step]:
+    steps[step](out)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@
 //! AppImage. `shipo feed` makes a feed of them, `update.txt`, signed by a key of `shipo keygen`.
 //! Then `update` prints the version, `update --check <feed url> <key>...` what the feed offers,
 //! `update --update <feed url> <key>...` updates, printing the download's percentage.
+//! `make e2e` does all of it on this host (scripts/e2e-update.py), as CI does on each OS.
 
 use std::env;
 use std::error::Error;

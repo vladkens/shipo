@@ -27,7 +27,10 @@ update:
 clean:
 	cargo clean
 
-.PHONY: size
+.PHONY: size e2e
 
 size: # code, docs and tests per part; ARGS="--files", "--map" (each file and what it does), "--check" (the budgets) or "--vs main"
 	uv run scripts/size.py $(ARGS)
+
+e2e: # the end-to-end update on this host: the example at 1.0.0 and 2.0.0 packed, 1.0.0 installed and updated
+	uv run scripts/e2e-update.py all target/e2e
