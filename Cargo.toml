@@ -2,11 +2,13 @@
 name = "shipo"
 version = "0.0.1"
 edition = "2024"
-description = "Releases and updates for desktop apps: the shipo packer makes signed installers and an update feed, the library installs updates from it in place."
+description = "Releases and updates for desktop apps: a packer that makes a signed DMG, Windows setup, AppImage and .deb and a signed update feed on Linux, and a tiny updater that installs from it in place."
 authors = ["vladkens"]
 license = "MIT"
 repository = "https://github.com/vladkens/shipo"
 readme = "readme.md"
+keywords = ["updater", "auto-update", "installer", "dmg", "appimage"]
+categories = ["development-tools::build-utils", "command-line-utilities", "gui"]
 include = ["/src/**/*.rs", "/Cargo.toml", "/LICENSE", "/readme.md", "/spec.md"]
 
 [package.metadata.docs.rs]
