@@ -68,15 +68,16 @@ pub struct Finish {
   pub desktop: bool,
 }
 
-/// Installs `name` of `size` bytes by `work` where the user says, `dir` offered; none if cancelled.
+/// Installs `name` of `size` bytes by `work` where the user says, `dir` offered, or in `dir` alone
+/// for an `update`, whose old folder would stay; none if cancelled.
 pub fn install(
   title: &str,
   name: &str,
-  dir: &Path,
+  (dir, update): (&Path, bool),
   size: u64,
   work: impl FnOnce(&Path, Step) -> io::Result<()> + Send,
 ) -> io::Result<Option<Finish>> {
-  let w = Wizard::new(title, name, false, dir, size);
+  let w = Wizard { update, ..Wizard::new(title, name, false, dir, size) };
   let done = w.show(work)?;
   let Some(done) = done else { return Ok(None) };
   done?;
@@ -118,6 +119,7 @@ struct Wizard {
   title: String,
   name: String,
   uninstall: bool,
+  update: bool,
   page: Cell<Page>,
   dir: RefCell<String>,
   size: u64,
@@ -146,6 +148,7 @@ impl Wizard {
       title: title.into(),
       name: name.into(),
       uninstall,
+      update: false,
       page: Cell::new(if uninstall { Page::Confirm } else { Page::Welcome }),
       dir: RefCell::new(dir.display().to_string()),
       size,
@@ -384,14 +387,21 @@ impl Wizard {
       }
       Page::Folder => {
         header("Choose Install Location", &format!("Choose the folder in which to install {n}."));
-        let text = format!(
-          "Setup will install {n} in the following folder. To install in a different folder, click \
-           Browse and select another folder. Click Install to start the installation."
-        );
+        let text = match self.update {
+          true => format!(
+            "Setup will update {n} in the following folder. Click Install to start the installation."
+          ),
+          false => format!(
+            "Setup will install {n} in the following folder. To install in a different folder, \
+             click Browse and select another folder. Click Install to start the installation."
+          ),
+        };
+
+        let fixed = if self.update { (ES_READONLY, off) } else { (0, 0) };
         self.ctl("Static", &text, 0, [22, 72, 453, 48], 0, 0);
         self.ctl("Button", "Destination Folder", BS_GROUPBOX, [22, 160, 453, 58], 0, 0);
-        self.ctl("Edit", &dir, ES_AUTOHSCROLL | tab, [36, 184, 330, 23], EDIT, 0);
-        self.ctl("Button", "Browse...", tab, [376, 183, 88, 25], BROWSE, 0);
+        self.ctl("Edit", &dir, ES_AUTOHSCROLL | fixed.0 | tab, [36, 184, 330, 23], EDIT, 0);
+        self.ctl("Button", "Browse...", fixed.1 | tab, [376, 183, 88, 25], BROWSE, 0);
         let need = format!("Space required: {}", bytes(self.size));
         self.ctl("Static", &need, 0, [22, 240, 453, 16], 0, 0);
         self.ctl("Static", "", 0, [22, 258, 453, 16], FREE, 0);

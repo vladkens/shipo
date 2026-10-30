@@ -142,7 +142,9 @@ fn run(args: &Args, title: &mut String) -> io::Result<ExitCode> {
   // An update, `/S` with no `/D=`, goes where the app is, if the key holds a [folder].
   let key = format!(r"{UNINSTALL}\{}", info.app_id);
   let location = text(&key, "InstallLocation");
-  let dir = match (args.folder()?, location.as_deref().and_then(folder)) {
+  let given = args.folder()?;
+  let update = given.is_none() && location.as_deref().and_then(folder).is_some();
+  let dir = match (given, location.as_deref().and_then(folder)) {
     (Some(dir), _) | (None, Some(dir)) => dir,
     (None, None) => {
       let local = env::var_os("LOCALAPPDATA").ok_or_else(|| io::Error::other("no LOCALAPPDATA"))?;
@@ -177,14 +179,17 @@ fn run(args: &Args, title: &mut String) -> io::Result<ExitCode> {
   }
 
   let size = files.iter().map(|(_, d)| d.len() as u64).sum();
-  let Some(done) = wizard::install(title, &info.name, &dir, size, work)? else {
+  let Some(done) = wizard::install(title, &info.name, (&dir, update), size, work)? else {
     return Ok(ExitCode::from(1));
   };
 
   let exe = done.dir.join(format!("{}.exe", info.name));
   if done.desktop {
-    let _ = known(&FOLDERID_Desktop)
-      .and_then(|d| shortcut(&d.join(&lnk), &exe, &done.dir, &info.comment));
+    // Never over a shortcut of that name to anything else.
+    let lnk = known(&FOLDERID_Desktop).ok().map(|d| d.join(&lnk));
+    if let Some(lnk) = lnk.filter(|l| !l.exists() || ours(l, &exe)) {
+      let _ = shortcut(&lnk, &exe, &done.dir, &info.comment);
+    }
   }
 
   // Installed, whether the app starts or not.
@@ -208,15 +213,22 @@ fn uninstall_from(dir: &Path, path: &Path, info: &Info) -> io::Result<()> {
   // Never over a file there: std's rename on Windows replaces one.
   let moved = |d: &PathBuf| !d.join(&name).exists() && fs::rename(path, d.join(&name)).is_ok();
   let removed = remove(dir, info, || away.iter().any(moved));
-  if dir.join(format!("{}.exe", info.name)).exists() {
+  let exe = dir.join(format!("{}.exe", info.name));
+  if exe.exists() {
     return removed;
   }
 
-  let lnks = [FOLDERID_Programs, FOLDERID_Desktop].map(|id| {
-    known(&id).and_then(|p| match fs::remove_file(p.join(format!("{}.lnk", info.name))) {
+  // The desktop's only when it is the app's: the user may have one of that name to anything else.
+  let lnks = [(FOLDERID_Programs, false), (FOLDERID_Desktop, true)].map(|(id, check)| {
+    let lnk = known(&id)?.join(format!("{}.lnk", info.name));
+    if check && !ours(&lnk, &exe) {
+      return Ok(());
+    }
+
+    match fs::remove_file(&lnk) {
       Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
       _ => Ok(()),
-    })
+    }
   });
 
   let id = wide(&info.id);
@@ -447,6 +459,36 @@ fn shortcut(lnk: &Path, target: &Path, dir: &Path, comment: &str) -> io::Result<
 
     method::<Unary>(link, 2)(link);
     done
+  }
+}
+
+/// Whether the shortcut `lnk` points to `exe`, read by `IShellLinkW`.
+fn ours(lnk: &Path, exe: &Path) -> bool {
+  type Unary = unsafe extern "system" fn(*mut c_void) -> u32;
+  type Query = unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT;
+  type Load = unsafe extern "system" fn(*mut c_void, *const u16, u32) -> HRESULT;
+  type GetPath = unsafe extern "system" fn(*mut c_void, *mut u16, i32, *mut c_void, u32) -> HRESULT;
+  let lnk = wide_path(lnk);
+  let (mut link, mut file, mut buf) = (null_mut(), null_mut(), vec![0u16; 32768]);
+  // SAFETY: as [shortcut]'s; IPersistFile's 5 Load, IShellLinkW's 3 GetPath into `buf`.
+  unsafe {
+    CoInitializeEx(null(), COINIT_APARTMENTTHREADED as u32);
+    if CoCreateInstance(&ShellLink, null_mut(), CLSCTX_INPROC_SERVER, &IID_SHELL_LINK, &mut link)
+      < 0
+    {
+      return false;
+    }
+
+    let mut read = method::<Query>(link, 0)(link, &IID_PERSIST_FILE, &mut file) >= 0;
+    if read {
+      read = method::<Load>(file, 5)(file, lnk.as_ptr(), 0) >= 0;
+      method::<Unary>(file, 2)(file);
+    }
+
+    let len = buf.len() as i32;
+    read = read && method::<GetPath>(link, 3)(link, buf.as_mut_ptr(), len, null_mut(), 0) >= 0;
+    method::<Unary>(link, 2)(link);
+    read && pwstr(buf.as_mut_ptr()).eq_ignore_ascii_case(&exe.display().to_string())
   }
 }
 
