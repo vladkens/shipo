@@ -19,6 +19,7 @@ mod payload;
 mod windows;
 
 use std::ffi::OsString;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use std::{fs, io, thread};
@@ -120,15 +121,16 @@ fn retry<T>(mut op: impl FnMut() -> io::Result<T>) -> io::Result<T> {
   }
 }
 
-/// Writes `files` into `dir`, made if missing, the app's exe first: each written beside as
-/// `.<name>.shipo-new` and renamed over the old one, tried again while it is in use. Gives their
-/// size.
+/// Writes `files` into `dir`, made if missing, the app's exe first: each written beside as a new
+/// `.<name>.shipo-new-<pid>` and renamed over the old one, tried again while it is in use. Gives
+/// their size.
 fn put(dir: &Path, files: &[(String, Vec<u8>)]) -> io::Result<u64> {
   fs::create_dir_all(dir)?;
   let mut size = 0;
   for (name, data) in files {
-    let (path, part) = (dir.join(name), dir.join(format!(".{name}.shipo-new")));
-    fs::write(&part, data)?;
+    let part = dir.join(format!(".{name}.shipo-new-{}", std::process::id()));
+    let path = dir.join(name);
+    fs::File::create_new(&part)?.write_all(data)?;
     if let Err(e) = retry(|| fs::rename(&part, &path)) {
       let _ = fs::remove_file(&part);
       return Err(in_use(&path, e));
@@ -140,8 +142,9 @@ fn put(dir: &Path, files: &[(String, Vec<u8>)]) -> io::Result<u64> {
   Ok(size)
 }
 
-/// Removes the files the setups of `name` write from `dir`, the app's exe first, the updater's
-/// staging folders, then `dir` if it is empty (a `/D=` may share it). The uninstaller, running,
+/// Removes the files the setups of `name` write from `dir`, the app's exe first, an error then
+/// leaving all as it was; the updater's staging folders, then `dir` if it is empty (a `/D=` may
+/// share it), each tried however the others went, the first error given. The uninstaller, running,
 /// is moved out before, if `moved` can; else it stays, and so does the folder.
 fn remove(dir: &Path, name: &str, moved: impl FnOnce() -> bool) -> io::Result<()> {
   let exe = dir.join(format!("{name}.exe"));
@@ -151,22 +154,28 @@ fn remove(dir: &Path, name: &str, moved: impl FnOnce() -> bool) -> io::Result<()
   }
 
   let names: &[&str] = if moved() { &[LICENSE, UNINSTALLER] } else { &[LICENSE] };
-  for name in names {
-    match retry(|| fs::remove_file(dir.join(name))) {
-      Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+  let mut paths: Vec<_> = names.iter().map(|n| dir.join(n)).collect();
+  for entry in fs::read_dir(dir)?.flatten() {
+    if entry.file_name().to_string_lossy().starts_with(".shipo-update-") {
+      paths.push(entry.path());
+    }
+  }
+
+  let mut done = Ok(());
+  for path in paths {
+    let removed = match path.is_dir() {
+      true => retry(|| fs::remove_dir_all(&path)),
+      false => retry(|| fs::remove_file(&path)),
+    };
+
+    match removed {
+      Err(e) if e.kind() != io::ErrorKind::NotFound => done = done.and(Err(e)),
       _ => {}
     }
   }
 
-  for entry in fs::read_dir(dir)? {
-    let entry = entry?;
-    if entry.file_name().to_string_lossy().starts_with(".shipo-update-") {
-      retry(|| fs::remove_dir_all(entry.path()))?;
-    }
-  }
-
   let _ = fs::remove_dir(dir);
-  Ok(())
+  done
 }
 
 fn in_use(path: &Path, e: io::Error) -> io::Error {
@@ -286,6 +295,13 @@ mod tests {
     assert_eq!(listed(&dir), [UNINSTALLER]);
     remove(&dir, "Hello", || true).unwrap();
     assert!(!dir.exists());
+
+    // An exe in use stops it before anything changed (a folder stands for one here).
+    put(&dir, &files).unwrap();
+    fs::remove_file(dir.join("Hello.exe")).unwrap();
+    fs::create_dir_all(dir.join("Hello.exe/x")).unwrap();
+    assert!(remove(&dir, "Hello", || panic!("moved")).is_err());
+    assert_eq!(listed(&dir), ["Hello.exe", LICENSE, UNINSTALLER]);
   }
 
   #[test]

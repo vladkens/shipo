@@ -88,28 +88,33 @@ fn run(args: &Args, title: &mut String) -> io::Result<()> {
 
 /// Removes the app of `info` from `dir`, the uninstaller at `path` moved out first, where it can be
 /// while it runs, so the folder can go: to the temp folder, or the install folder's parent when
-/// that is on another volume; then its shortcut, its launch at login and its key. The app's data
-/// stays.
+/// that is on another volume; then its shortcut, its launch at login and its key, each tried
+/// however the others went, so no key is left of an app gone. The app's data stays.
 fn uninstall_from(dir: &Path, path: &Path, info: &Info) -> io::Result<()> {
   let name = format!("{}-uninstall-{}.exe", info.name, std::process::id());
   let away = [env::temp_dir(), dir.parent().unwrap_or(dir).to_path_buf()];
   // Never over a file there: std's rename on Windows replaces one.
   let moved = |d: &PathBuf| !d.join(&name).exists() && fs::rename(path, d.join(&name)).is_ok();
-  remove(dir, &info.name, || away.iter().any(moved))?;
-  match fs::remove_file(programs()?.join(format!("{}.lnk", info.name))) {
-    Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
-    _ => {}
+  let removed = remove(dir, &info.name, || away.iter().any(moved));
+  if dir.join(format!("{}.exe", info.name)).exists() {
+    return removed;
   }
 
-  for key in [RUN, APPROVED] {
-    let (key, id) = (wide(key), wide(&info.id));
+  let lnk = programs().and_then(|p| match fs::remove_file(p.join(format!("{}.lnk", info.name))) {
+    Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+    _ => Ok(()),
+  });
+
+  let (id, key) = (wide(&info.id), wide(&format!(r"{UNINSTALL}\{}", info.app_id)));
+  let values = [RUN, APPROVED].map(|run| {
+    let run = wide(run);
     // SAFETY: NUL-terminated strings.
-    gone(unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, key.as_ptr(), id.as_ptr()) })?;
-  }
+    gone(unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, run.as_ptr(), id.as_ptr()) })
+  });
 
-  let key = wide(&format!(r"{UNINSTALL}\{}", info.app_id));
   // SAFETY: a NUL-terminated string.
-  gone(unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, key.as_ptr()) })
+  let key = gone(unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, key.as_ptr()) });
+  [removed, lnk].into_iter().chain(values).chain([key]).collect()
 }
 
 /// Whether this exe's arch runs natively, or an x64 one on arm64, which emulates it.
