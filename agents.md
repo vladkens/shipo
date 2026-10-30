@@ -7,7 +7,11 @@ Each fact has one source: the feed's format is the readme's Feed, the API the ru
 ## Scope
 
 - Change the public API or the CLI only with the person's approval. A public struct with public fields is `#[non_exhaustive]`.
-- An app installed with an older library must update to every newer release: the feed, the release file names, the release files' contents the library unpacks (the DMG's one top-level `.app`, its bundle id, executable name and signing identity), the `.deb`'s version order and the installer handoff (the `--shipo-install` command line and staging folder, the setup's `/S /D=`, its exit codes and Uninstall key) change only with the person's approval and never break it. The `compat_*` tests and `tests/fixtures/` pin them, v0.1.0's frozen feed reader among them: a new feed record adds a fixture and keeps that reader's test passing.
+- An app installed with an older library must update to every newer release. What it relies on changes only with the person's approval and never breaks it, each pinned by a `compat_*` test:
+  - the feed and the release file names, also by `tests/fixtures/`: a new feed record adds a fixture and keeps v0.1.0's frozen reader passing;
+  - the DMG's one top-level `.app`, its bundle id and its executable name;
+  - the `.deb`'s version order;
+  - the installer handoff: the `--shipo-install` command line and staging folder, the setup's `/S /D=`, its exit codes and its Uninstall key.
 - The library has no UI and no state of its own: it never shows a window, dialog or notification or takes the focus; the app draws everything and keeps its settings.
 - Library dependencies are only `ed25519-compact`, `thiserror` (the library's `Error`), the `objc2` family on macOS and `windows-sys` on Windows (Linux loads libcurl at run time): every app builds them. The packer's are optional, under the `cli` feature, so an app with `default-features = false` builds none of them. The packer takes a crate only where our own code would be large. Change dependencies only with `cargo add`, `cargo remove` or `cargo upgrade`, never by hand.
 - The packer builds every package on any of the three OSes. It may use only what each OS has or installs by one command on all three (`curl`, `git`); a tool of one platform (an apt package, `hdiutil`, `makensis`) is replaced by our own code, and any other tool is fetched pinned by version and SHA-256.

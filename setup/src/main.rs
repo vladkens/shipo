@@ -120,9 +120,10 @@ fn folder(dir: &str) -> Option<PathBuf> {
   (parts.len() >= least && parts.iter().all(named)).then(|| dir.into())
 }
 
-/// Where the setup installs, and whether it updates the app there: `/D=`'s folder (`given`), else
-/// the app's own, the Uninstall key's `InstallLocation` (`location`) when it is a [folder], else
-/// `<local>\Programs\<name>`, `local` being `%LOCALAPPDATA%`.
+/// Where the setup installs, and whether that folder came from the Uninstall key (the wizard's
+/// update, its folder locked): `/D=`'s folder (`given`), else the key's `InstallLocation`
+/// (`location`) when it is a [folder], else `<local>\Programs\<name>`, `local` being
+/// `%LOCALAPPDATA%`.
 fn destination(
   given: Option<PathBuf>,
   location: Option<&str>,

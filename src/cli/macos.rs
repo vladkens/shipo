@@ -407,8 +407,9 @@ LSEnvironment = { HELLO_MODE = "quiet" }
 </plist>
 "#;
 
+  /// The bundle id (`id`) and executable name (`bin`) a release keeps, for an older app to take it.
   #[test]
-  fn info_plist() {
+  fn compat_info_plist() {
     let cfg = config(Path::new("/app"), MACOS);
     assert_eq!(String::from_utf8(xml(&info(&cfg, "11.0").unwrap()).unwrap()).unwrap(), INFO);
 

@@ -1062,8 +1062,9 @@ deb-recommends = ["libgtk-3-0t64 | libgtk-3-0", "libasound2t64"]
     ("1.10.0", false, "1.10.0"),
   ];
 
+  /// The .deb's version order, by which apt updates an older install.
   #[test]
-  fn deb_versions() {
+  fn compat_deb_versions() {
     for (version, dev, want) in ORDERED {
       assert_eq!(deb_version(version, dev), want, "{version} {dev}");
     }
@@ -1074,7 +1075,7 @@ deb-recommends = ["libgtk-3-0t64 | libgtk-3-0", "libasound2t64"]
   /// [ORDERED] as dpkg orders them, each dev build before the version it builds.
   #[cfg(target_os = "linux")]
   #[test]
-  fn dpkg_orders() {
+  fn compat_dpkg_orders() {
     let mut pairs: Vec<_> = ORDERED.windows(2).map(|w| (w[0].2, w[1].2)).collect();
     pairs.extend([("1.2.0~dev", "1.2.0"), ("1.2.0~rc.1~dev", "1.2.0~rc.1")]);
     // A `-` left in the pre-release would be a revision: `1.2.0~rc-3` is `1.2.0~rc`, revision 3.

@@ -364,10 +364,11 @@ pub(crate) mod tests {
   }
 
   /// A test bundle's image: hdiutil verifies and reads it, fsck_hfs finds no fault, and mounted
-  /// it holds the bundle as it is, the link and the `.DS_Store`.
+  /// it holds the bundle as it is, the link and the `.DS_Store`: one top-level `.app`, which an
+  /// older app's update takes.
   #[cfg(target_os = "macos")]
   #[test]
-  fn read_by_hdiutil() {
+  fn compat_read_by_hdiutil() {
     let tmp = Temp::new().unwrap();
     let app = bundle(&tmp, "Wavö Test.app");
     let dmg = tmp.join("test.dmg");

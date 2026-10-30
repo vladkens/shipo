@@ -230,7 +230,7 @@ sig <signature>
 
 | Line | What it holds |
 |---|---|
-| `version <version>` | the release's version without `v`, such as `1.2.0` or `1.3.0-rc.1` |
+| `version <version>` | the release's version without `v`, such as `1.2.0` or `1.3.0-rc.1`; versions compare in semver order, `1.2` equals `1.2.0` and a `+build` is ignored |
 | `notes <url>` | optional: the release's page |
 | `<os>-<arch> <size> <sha512> <url>` | a platform's file: its size in bytes, its SHA-512 and its URL |
 | `sig <signature>` | the Ed25519 signature of every byte before this line |
@@ -238,7 +238,7 @@ sig <signature>
 A platform is `macos`, `windows` or `linux` and `x86_64` or `aarch64`, as Rust names them, so the record is `windows-x86_64` while the file name says `x64`, as Windows does.
 
 - One record per line, fields split by single spaces, lines ending in LF or CRLF, UTF-8, at most 1 MiB.
-- No empty lines; `version`, `notes` and each platform at most once; `sig` last. Hex is of either case.
+- No empty lines; `version` once; `notes` and each platform at most once; `sig` last. The SHA-512 and the signature are 128 hex digits, either case.
 - URLs are https, or http to `127.0.0.1`, `localhost` or `[::1]` for tests. An app skips a line whose first word it doesn't know, so a newer feed still updates an app on an older shipo.
 
 ## 🚀 Releasing from GitHub Actions

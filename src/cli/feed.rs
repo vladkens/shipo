@@ -291,16 +291,24 @@ mod tests {
   /// installed with v0.1 takes from it.
   #[test]
   fn compat_v0_1_apps_read_the_feed() {
-    let names = PLATFORMS.map(|(_, end)| format!("App-v2.0.0{end}"));
-    let dir = Temp::files(&names.each_ref().map(|n| (n.as_str(), "abc")));
+    // v0.1's platforms and file names, not [PLATFORMS], which may change.
+    let files = [
+      ("macos-x86_64", "App-v2.0.0-macos-x86_64.dmg"),
+      ("macos-aarch64", "App-v2.0.0-macos-aarch64.dmg"),
+      ("windows-x86_64", "App-v2.0.0-windows-x64-setup.exe"),
+      ("windows-aarch64", "App-v2.0.0-windows-arm64-setup.exe"),
+      ("linux-x86_64", "App-v2.0.0-linux-x86_64.AppImage"),
+      ("linux-aarch64", "App-v2.0.0-linux-aarch64.AppImage"),
+    ];
+    let dir = Temp::files(&files.map(|(_, n)| (n, "abc")));
     let notes = "https://h/releases/tag/v2.0.0";
-    let files = names.map(|n| dir.join(n));
-    let text = body("2.0.0", Some(notes), "https://h/{version}", &files).unwrap();
+    let paths = files.map(|(_, n)| dir.join(n));
+    let text = body("2.0.0", Some(notes), "https://h/{version}", &paths).unwrap();
     let feed = fs::read(write(&key(), &text, &dir).unwrap()).unwrap();
-    for (platform, end) in PLATFORMS {
+    for (platform, name) in files {
       let r = crate::feed_v0_1::read(&[PUBLIC], &feed, "1.0.0", platform).unwrap().unwrap();
       assert_eq!((r.version.as_str(), r.notes.as_deref(), r.size), ("2.0.0", Some(notes), 3));
-      let url = format!("https://h/2.0.0/App-v2.0.0{end}");
+      let url = format!("https://h/2.0.0/{name}");
       assert_eq!((r.url, hex(&r.sha512)), (url, ABC.into()), "{platform}");
     }
 

@@ -18,10 +18,10 @@ type Result<T> = std::result::Result<T, Error>;
 /// The release a v0.1 app on `platform` at version `current` takes from the feed `text` signed by
 /// any of `keys`: v0.1.0's `Feed::read` and `public_keys`.
 pub fn read(keys: &[&str], text: &[u8], current: &str, platform: &str) -> Result<Option<Release>> {
+  let (data, sig) = signed(text)?;
   let key = |k: &str| hex(k).map(PublicKey::new).filter(|k| k.validate().is_ok());
   let keys = keys.iter().map(|k| key(k)).collect::<Option<Vec<_>>>();
   let keys = keys.filter(|k| !k.is_empty()).ok_or(Error::Keys)?;
-  let (data, sig) = signed(text)?;
   verify(&keys, data.as_bytes(), sig)?;
   release(data, current, platform)
 }

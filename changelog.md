@@ -3,9 +3,9 @@
 ### Features
 
 - Added a new Windows setup with a classic install wizard, an optional desktop shortcut and a silent `/S` mode.
-- Windows apps installed with v0.1 update to the new setup on their own, with no reinstall.
+- Added updates of v0.1's Windows installs to the new setup, with no reinstall.
 - Added packing on Windows: Linux, macOS or Windows builds every installer, with nothing else to install.
-- Added reproducible packages: with `SOURCE_DATE_EPOCH` set, any host packs the same bytes, except a DMG a Mac signs with its own identity.
+- Added reproducible packages: with `SOURCE_DATE_EPOCH` set, shipo packs the same bytes from any host, except a signed DMG and the feed that lists it.
 
 ### Fixes
 
