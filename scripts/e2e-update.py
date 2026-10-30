@@ -11,12 +11,12 @@ uv run scripts/e2e-update.py run <dir>     1.0.0 installed and updated; checks t
   [--v1 <setup>]                           Windows: 1.0.0 installed by this setup (an NSIS one), not <dir>'s
 uv run scripts/e2e-update.py all <dir>     the three on this host (`make e2e`)
 
-`pack` packs the binaries `build` left in <dir> for any OS, so any host packs every OS's: the
-setup takes the stub `make setup` built from $SHIPO_SETUP_STUB_X64 and $SHIPO_SETUP_STUB_ARM64,
-and a DMG updates only when packed on a Mac (signed by "Hello Local Signing", which v1 and v2 must
-share; elsewhere it is signed ad hoc). `run` takes this OS's files and leaves the app installed: in
-a temporary folder on macOS and Linux; on Windows for this user, then uninstalled by its setup's
-uninstaller, which must leave nothing. CI runs the steps on each OS (.github/workflows/main.yml).
+`pack` packs the binaries `build` left in <dir> for any OS, so any host packs every OS's, and a DMG
+updates only when packed on a Mac (signed by "Hello Local Signing", which v1 and v2 must share;
+elsewhere it is signed ad hoc). `run` takes this OS's files and leaves the app installed: in a
+temporary folder on macOS and Linux; on Windows for this user, then uninstalled by its setup's
+uninstaller, which must leave nothing; before that, with the app running, its setup and uninstaller
+must each exit 2 and change nothing. CI runs the steps on each OS (.github/workflows/main.yml).
 """
 
 import argparse
@@ -25,6 +25,7 @@ import hashlib
 import http.server
 import os
 import shutil
+import socket
 import struct
 import subprocess
 import sys
@@ -215,6 +216,43 @@ def registered() -> str | None:
   return (uninstall_key() or {}).get("DisplayVersion")
 
 
+def lnk_path() -> Path:
+  return Path(os.environ["APPDATA"]) / r"Microsoft\Windows\Start Menu\Programs" / f"{NAME}.lnk"
+
+
+def state(folder: Path):
+  """Windows: what a setup or uninstaller changes: the folder's files, the key, the shortcut; not
+  the updater's staging folder, which the app clears as it starts."""
+  files = folder.iterdir()
+  files = sorted((p.name, p.stat().st_size, p.stat().st_mtime_ns) for p in files if not p.name.startswith(".shipo-update-"))
+  lnk = lnk_path()
+  return files, uninstall_keys(), lnk.is_file() and lnk.stat().st_mtime_ns
+
+
+def in_use(packed: Path, exe: Path) -> None:
+  """Windows: with the app running, its setup and its uninstaller each exit 2 and change nothing."""
+  # A feed that never answers holds the app in its check.
+  hold = socket.create_server(("127.0.0.1", 0))
+  key = (packed / "key.pub").read_text().strip()
+  app = subprocess.Popen([exe, "--check", f"http://127.0.0.1:{hold.getsockname()[1]}/update.txt", key])
+  try:
+    time.sleep(2)
+    if app.poll() is not None:
+      sys.exit(f"e2e: the app held by a silent feed ended: {app.returncode}")
+
+    before = state(exe.parent)
+    for cmd in (one(packed / VERSIONS[1], "*-setup.exe"), exe.parent / "Uninstall.exe"):
+      code = subprocess.run([cmd, "/S"], timeout=60).returncode
+      if code != 2 or (after := state(exe.parent)) != before:
+        sys.exit(f"e2e: {cmd.name} /S with the app running: {code}, {before} -> {after}")
+
+    log("with the app running, the setup and the uninstaller exit 2, nothing changed")
+  finally:
+    app.kill()
+    app.wait()
+    hold.close()
+
+
 def uninstall(exe: Path) -> None:
   """Windows: the install as spec.md has it, then removed by its QuietUninstallString: the folder,
   the key, the Start menu entry and the launch at login all gone."""
@@ -222,7 +260,7 @@ def uninstall(exe: Path) -> None:
 
   key = uninstall_key()
   folder = exe.parent
-  lnk = Path(os.environ["APPDATA"]) / r"Microsoft\Windows\Start Menu\Programs" / f"{NAME}.lnk"
+  lnk = lnk_path()
   want = {
     "InstallLocation": str(folder),
     "DisplayIcon": str(exe),
@@ -318,6 +356,7 @@ def check(packed: Path, v1_setup: Path | None = None) -> None:
 
   log("updated in place")
   if sys.platform == "win32":
+    in_use(packed, exe)
     uninstall(exe)
 
 

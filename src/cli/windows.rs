@@ -3,7 +3,6 @@
 //! of it, our stub (setup/) with the app appended, as spec.md's Windows section gives it.
 
 use std::collections::BTreeMap;
-use std::env;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -39,13 +38,14 @@ const MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?
 </assembly>
 "#;
 
-/// The setup stub of shipo's GitHub release `setup-v1` for each arch (`make setup`, CI), fetched
-/// pinned by SHA-256 as the AppImage's runtime is.
-const STUB: &str =
-  "https://github.com/vladkens/shipo/releases/download/setup-v1/shipo-setup-{arch}.exe";
+/// The setup stubs, built from setup/ by `make setup` into stubs/ with their SHA256SUMS,
+/// which CI checks by building them again from source.
+const STUB_X64: &[u8] = include_bytes!("../../stubs/shipo-setup-x64.exe");
+const STUB_ARM64: &[u8] = include_bytes!("../../stubs/shipo-setup-arm64.exe");
 
 /// `<Name>-<label>-windows-<x64|arm64>-setup.exe` in `out_dir`, [named](crate::out) by `tag`: the
-/// per-user setup of `binary`, the app's exe for `arch`, our stub ([stub]) with the app appended.
+/// per-user setup of `binary`, the app's exe for `arch`, our stub ([STUB_X64], [STUB_ARM64]) with
+/// the app appended.
 pub fn setup(
   cfg: &Config,
   binary: &Path,
@@ -53,32 +53,12 @@ pub fn setup(
   tag: Option<&str>,
   out_dir: &Path,
 ) -> io::Result<PathBuf> {
-  build(cfg, binary, arch, tag, out_dir, &stub(cfg, arch)?)
-}
-
-/// The setup stub for `arch`: the file `$SHIPO_SETUP_STUB_<X64|ARM64>` names (one `make setup`
-/// built, as CI does), else the release's, fetched into `<target>/tools` once.
-fn stub(cfg: &Config, arch: Arch) -> io::Result<Vec<u8>> {
-  let var = format!("SHIPO_SETUP_STUB_{}", arch.windows().to_ascii_uppercase());
-  if let Some(path) = env::var_os(&var) {
-    return tool::read(Path::new(&path));
-  }
-
-  // TODO: the SHA-256 of each once `setup-v1` is published; until then only the variable serves.
-  let sha256 = match arch {
-    Arch::X86_64 => "",
-    Arch::Aarch64 => "",
+  let stub = match arch {
+    Arch::X86_64 => STUB_X64,
+    Arch::Aarch64 => STUB_ARM64,
   };
 
-  if sha256.is_empty() {
-    return Err(bad(format!(
-      "no setup stub is published yet: set {var} to one `make setup` built"
-    )));
-  }
-
-  let url = STUB.replace("{arch}", arch.windows());
-  let name = format!("shipo-setup-v1-{}.exe", arch.windows());
-  tool::read(&tool::fetch(&url, sha256, &cfg.target.join("tools").join(name))?)
+  build(cfg, binary, arch, tag, out_dir, stub)
 }
 
 /// [setup] of the stub `stub`: given the app's icon, its version as the setup's and [MANIFEST],
@@ -688,6 +668,8 @@ fn u32_at(data: &[u8], at: usize) -> io::Result<u32> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+  use std::env;
+
   use super::*;
   use crate::tool::Temp;
 
@@ -963,10 +945,9 @@ pub(crate) mod tests {
     assert_eq!(tree[&RT_VERSION][&1][&LANG], version_info(cfg, false).unwrap());
   }
 
-  /// The setup of the real stub `$SHIPO_SETUP_STUB_X64`, `make setup`'s, and of
-  /// `$SHIPO_TEST_EXE`, else a stand-in exe; left in `$SHIPO_TEST_OUT` when it is set.
+  /// The setup of the embedded stub and of `$SHIPO_TEST_EXE`, else a stand-in exe; left in
+  /// `$SHIPO_TEST_OUT` when it is set.
   #[test]
-  #[ignore = "needs the stub of `make setup` in $SHIPO_SETUP_STUB_X64"]
   fn setup_of_the_stub() {
     let tmp = Temp::new().unwrap();
     icon(&tmp.join("icon.png"));

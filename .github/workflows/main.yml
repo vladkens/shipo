@@ -39,36 +39,27 @@ jobs:
           PYTHONUTF8: 1 # the scripts read the sources as UTF-8 on Windows too
       - run: make test
 
-  # The setup stub (setup/) for x64 and arm64 Windows, which the packer appends the app to; the
-  # packer takes these by $SHIPO_SETUP_STUB_<ARCH>, a release's from shipo's `setup-v<N>` release.
+  # The setup stubs the packer embeds, stubs/, built again from source as `make setup` builds
+  # them (scripts/setup-stub.py): the same bytes as stubs/SHA256SUMS, or the job fails. On a Mac,
+  # as `make setup` runs: Windows' and Linux's rustc lay the functions out in another order.
   setup:
-    runs-on: windows-latest
+    runs-on: macos-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - run: cargo install cargo-xwin --locked --version 0.23.1
+      - run: uv run scripts/setup-stub.py --check
+      - if: failure()
+        uses: actions/upload-artifact@v7
         with:
-          key: setup
-          workspaces: setup
-          save-if: ${{ github.event_name != 'pull_request' }}
-      - run: rustup target add aarch64-pc-windows-msvc
-      - run: make setup
-      - run: |
-          mkdir stub
-          cp setup/target/x86_64-pc-windows-msvc/release/shipo-setup.exe stub/shipo-setup-x64.exe
-          cp setup/target/aarch64-pc-windows-msvc/release/shipo-setup.exe stub/shipo-setup-arm64.exe
-          ls -l stub && sha256sum stub/*
-      - uses: actions/upload-artifact@v7
-        with:
-          name: setup-stub
-          path: stub/
-          if-no-files-found: error
+          name: setup-stub-built
+          path: setup/target/bin/
 
-  # On Ubuntu with the tools apt has: the packer's ignored tests (the setup of the real stub, the
-  # .deb and the AppImage read back, rcodesign fetched pinned, signing the Mac's binary), and the
+  # On Ubuntu with the tools apt has: the packer's ignored tests (the and the AppImage read back, rcodesign fetched pinned, signing the Mac's binary), and the
   # DMGs and .debs each host packed, read by dmg2img and fsck.hfsplus (hfsprogs) and dpkg-deb.
   packages:
-    needs: [setup, e2e-pack]
+    needs: e2e-pack
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -77,10 +68,6 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' }}
       - run: sudo apt-get update && sudo apt-get install -y squashfs-tools desktop-file-utils hfsprogs dmg2img
-      - uses: actions/download-artifact@v8
-        with:
-          name: setup-stub
-          path: stub
       - uses: actions/download-artifact@v8
         with:
           name: e2e-bin-macOS
@@ -92,7 +79,6 @@ jobs:
       - run: cargo test -- --include-ignored
         env:
           SHIPO_TEST_MACHO: ${{ github.workspace }}/macos/1.0.0/aarch64-apple-darwin/hello
-          SHIPO_SETUP_STUB_X64: ${{ github.workspace }}/stub/shipo-setup-x64.exe
       - run: |
           for dmg in packed/*/*/*.dmg; do
             dmg2img -i "$dmg" -o "${dmg%.dmg}.img"
@@ -127,7 +113,7 @@ jobs:
           if-no-files-found: error
 
   e2e-pack:
-    needs: [setup, e2e-bin]
+    needs: e2e-bin
     strategy:
       fail-fast: false
       matrix:
@@ -146,14 +132,7 @@ jobs:
           pattern: e2e-bin-*
           merge-multiple: true
           path: e2e
-      - uses: actions/download-artifact@v8
-        with:
-          name: setup-stub
-          path: stub
       - run: uv run scripts/e2e-update.py pack e2e
-        env:
-          SHIPO_SETUP_STUB_X64: ${{ github.workspace }}/stub/shipo-setup-x64.exe
-          SHIPO_SETUP_STUB_ARM64: ${{ github.workspace }}/stub/shipo-setup-arm64.exe
       - uses: actions/upload-artifact@v7
         with:
           name: e2e-packed-${{ runner.os }}
@@ -183,50 +162,6 @@ jobs:
           name: e2e-packed-${{ matrix.packer }}
           path: e2e
       - run: uv run scripts/e2e-update.py run e2e
-
-  # An install of the NSIS setup before ours updated by ours: 1.0.0 packed by main's last packer
-  # with NSIS (cbceb52) and apt's nsis, installed, then updated to the 2.0.0 this branch packed.
-  e2e-nsis:
-    needs: e2e-pack
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - run: sudo apt-get update && sudo apt-get install -y nsis
-      - run: git worktree add old cbceb52 && cargo build --release --bin shipo --manifest-path old/Cargo.toml
-      - uses: actions/download-artifact@v8
-        with:
-          name: e2e-packed-Linux
-          path: e2e
-      - run: |
-          mkdir -p nsis/1.0.0/x86_64-pc-windows-msvc
-          cp e2e/1.0.0/x86_64-pc-windows-msvc/hello.exe nsis/1.0.0/x86_64-pc-windows-msvc/
-          cp e2e/1.0.0/Cargo.toml e2e/1.0.0/LICENSE nsis/1.0.0/ && cp e2e/icon.png nsis/
-          old/target/release/shipo release nsis/1.0.0 --manifest nsis/1.0.0/Cargo.toml
-      - uses: actions/upload-artifact@v7
-        with:
-          name: e2e-nsis
-          path: nsis/1.0.0/Hello-dev-windows-x64-setup.exe
-          if-no-files-found: error
-
-  e2e-migrate:
-    needs: e2e-nsis
-    runs-on: windows-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-      - uses: actions/download-artifact@v8
-        with:
-          name: e2e-packed-Linux
-          path: e2e
-      - uses: actions/download-artifact@v8
-        with:
-          name: e2e-nsis
-          path: nsis
-      - run: uv run scripts/e2e-update.py run e2e --v1 nsis/Hello-dev-windows-x64-setup.exe
 
   # The DMGs packed off a Mac, signed ad hoc: read by hdiutil, the app run from the image.
   e2e-dmg:
@@ -263,7 +198,7 @@ jobs:
 
   publish:
     if: github.ref == 'refs/heads/main' # write rights only for main's own workflow
-    needs: [test, packages, e2e, e2e-pack, e2e-dmg, e2e-migrate, build]
+    needs: [test, setup, packages, e2e, e2e-pack, e2e-dmg, build]
     runs-on: ubuntu-latest # no build here, and Linux runners start faster
     permissions:
       attestations: write

@@ -43,5 +43,5 @@ size: # code, docs and tests per part; ARGS="--files", "--map" (each file and wh
 e2e: # the end-to-end update on this host: the example at 1.0.0 and 2.0.0 packed, 1.0.0 installed and updated
 	uv run scripts/e2e-update.py all target/e2e
 
-setup: # the Windows setup stub per arch, setup/target/<triple>/release/shipo-setup.exe: on Windows, elsewhere by cargo-xwin
-	RUSTFLAGS="-C target-feature=+crt-static" cargo $(if $(filter Windows_NT,$(OS)),build,xwin build) --manifest-path setup/Cargo.toml --release --target x86_64-pc-windows-msvc --target aarch64-pc-windows-msvc
+setup: # the Windows setup stubs the packer embeds, built on a Mac by cargo-xwin into stubs/, the same bytes on any Mac, with their SHA256SUMS: commit the three together
+	uv run scripts/setup-stub.py
