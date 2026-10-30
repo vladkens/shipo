@@ -56,18 +56,23 @@ jobs:
           name: setup-stub-built
           path: setup/target/bin/
 
-  # The egui example app, a project of its own: built, and its update steps tested with no window.
+  # The example apps, each a project of its own: built, and their update steps tested with no
+  # window. Not gpui: its build is the heaviest by far and needs the system's graphics libraries.
   examples:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [egui, nimbo]
     defaults:
       run:
-        working-directory: examples/egui
+        working-directory: examples/${{ matrix.app }}
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: examples/egui
+          workspaces: examples/${{ matrix.app }}
           save-if: ${{ github.event_name != 'pull_request' }}
       - run: cargo build --locked
       - run: cargo test --locked
