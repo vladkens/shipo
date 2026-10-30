@@ -293,6 +293,8 @@ Every crate an updater pulls in ships inside your app and must be trusted: shipo
 | Packs every OS from one machine | ✅ | ❌ | ❌ | ✅ on a Mac | ➖ updater only | ✅ |
 | macOS release from Linux | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ |
 | Crates in your app, Linux / Windows / macOS | **8 / 10 / 15** | 114 / 117 / 125 | +42 / +42 / +53 | 107 / 115 / 107 | — | — |
+| Signs and notarizes macOS | ✅ | ✅ | ✅ | ✅ | ➖ left to the developer | ✅ |
+| Signs Windows (Authenticode) | ❌ | ✅ signtool or own command | ✅ signtool or own command | ✅ signtool, Azure | — macOS only | ✅ any OS, cloud HSMs |
 | Signed updates | ✅ with a spare key | ✅ one key | ✅ one key | ❌ HTTPS only | ✅ one key | ✅ |
 | Delta updates | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
 | License | MIT | MIT/Apache-2.0 | MIT/Apache-2.0 | MIT | MIT | paid (free for open source) |
