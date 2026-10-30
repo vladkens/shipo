@@ -129,11 +129,12 @@ def check(files: dict[str, str]) -> bool:
 def braces(line: str) -> int:
   """How much a line deepens the braces, outside strings, chars and comments.
 
-  >>> [braces(s) for s in ("fn a() {", '}', 'let s = "{";', "let c = '}'; // {")]
-  [1, -1, 0, 0]
+  >>> [braces(s) for s in ("fn a() {", '}', 'let s = "{";', "let c = '}'; // {", 'for u in ["https://a"] {')]
+  [1, -1, 0, 0, 1]
   """
-  line = re.sub(r'"(\\.|[^"\\])*"', "", line.split("//")[0])
+  line = re.sub(r'"(\\.|[^"\\])*"', "", line)
   line = re.sub(r"'(\\.|[^'\\])'", "", line)
+  line = line.split("//")[0]
   return line.count("{") - line.count("}")
 
 
