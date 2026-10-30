@@ -12,3 +12,5 @@ name = "shipo"
 path = "src/main.rs"
 
 [dependencies]
+lexopt = "0.3.2"
+toml = { version = "1.1.8", default-features = false, features = ["parse", "serde"] }

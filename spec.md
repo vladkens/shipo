@@ -55,7 +55,7 @@ The release's file is taken only when its size and SHA-512 are the feed's: the d
 
 A public key is Ed25519's 32 bytes in 64 hex digits; the app holds a list of them, built in. The list must hold a key and only valid ones (a point on the curve, not of small order): one malformed key is the app's own mistake, and the client then reads no feed and fetches none. A private key is its 32-byte seed (RFC 8032) in 64 hex digits, the release job's secret `UPDATE_KEY`.
 
-`shipo keygen` makes two keys at once: the working one, whose seed becomes the repository's secret, and the spare, whose seed is kept offline and never reaches CI. Both public keys go into the app, so every release trusts both.
+The list may be of any length; two is the rule, made by `shipo keygen update.key update-spare.key` (a key per file): the working one, whose seed becomes the release job's secret, and the spare, whose seed is kept offline and never reaches CI. Both public keys go into the app, so every release trusts both. readme.md gives the steps.
 
 When a private key leaks (the secret was read, a CI log printed it):
 
