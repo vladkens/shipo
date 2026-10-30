@@ -20,7 +20,7 @@ defaults:
     shell: bash
 
 jobs:
-  # checks, tests, and the e2e app; on a Mac also the setup stubs from source
+  # checks, tests, and the e2e app
   test:
     strategy:
       fail-fast: false
@@ -43,19 +43,29 @@ jobs:
       - run: make test
       # Linux has no Mach-O to sign; the Mac runs that one
       - run: cargo test -- --ignored ${{ runner.os == 'Linux' && '--skip rcodesign_signs' || '' }}
-      - if: runner.os == 'macOS'
-        run: cargo install cargo-xwin --locked --version 0.23.1 && uv run scripts/setup-stub.py --check
-      - if: failure() && runner.os == 'macOS'
-        uses: actions/upload-artifact@v7
-        with:
-          name: setup-stub-built
-          path: setup/target/bin/
       - run: uv run scripts/e2e-update.py build e2e
       - uses: actions/upload-artifact@v7
         with:
           name: e2e-bin-${{ runner.os }}
           path: e2e/
           if-no-files-found: error
+
+  # the setup stubs the packer embeds, rebuilt from source to the same bytes
+  setup:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-xwin@0.23.1
+      - run: uv run scripts/setup-stub.py --check
+      - if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: setup-stub-built
+          path: setup/target/bin/
 
   # each OS packs every OS's packages, then updates its own from 1.0.0 to 2.0.0
   e2e:
@@ -151,7 +161,7 @@ jobs:
 
   publish:
     if: github.ref == 'refs/heads/main' # write rights only for main's own workflow
-    needs: [test, e2e, same, build]
+    needs: [test, setup, e2e, same, build]
     runs-on: ubuntu-latest # no build here, and Linux runners start faster
     permissions:
       attestations: write
