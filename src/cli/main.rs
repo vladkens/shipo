@@ -6,7 +6,6 @@ mod config;
 mod dmg;
 mod feed;
 #[cfg(test)]
-#[path = "../../tests/fixtures/feed_v0_1.rs"]
 mod feed_v0_1;
 mod hfs;
 mod image;

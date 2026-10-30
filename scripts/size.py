@@ -5,7 +5,8 @@
 """Lines per part: code, docs, comments and inline tests, apart.
 
 A part is a set of files (PARTS) with a budget of code lines; examples/ and tests/ are one row
-each, and generated files (GENERATED) one row with no budget. Code is every line that is not
+each (tests/ with the modules only tests build, TESTS), and generated files (GENERATED) one row
+with no budget. Code is every line that is not
 blank, a comment, a doc comment or inside a `#[cfg(test)]` item. With a git ref, a column shows
 how code moved since it.
 `--map` lists the files with the first sentence of each one's module doc (`//!`): what it does.
@@ -50,6 +51,8 @@ PARTS = {
 }
 # Files a script writes (scripts/hfs-unicode.py: the HFS+ decomposition tables): no budget.
 GENERATED = ("src/cli/unicode.rs",)
+# Modules declared `#[cfg(test)]` as a whole (v0.1.0's frozen feed reader): test code, no budget.
+TESTS = ("src/cli/feed_v0_1.rs",)
 
 
 def matches(pattern: str, path: str) -> bool:
@@ -85,14 +88,17 @@ def module(path: str, files: bool) -> str:
 
   >>> [module(p, False) for p in ("src/feed.rs", "src/cli/feed.rs", "examples/update.rs")]
   ['library', 'packer', 'examples']
-  >>> [module(p, False) for p in ("src/cli/unicode.rs", "src/cli/new.rs")]
-  ['generated', 'src/cli/new.rs']
+  >>> [module(p, False) for p in ("src/cli/unicode.rs", "src/cli/feed_v0_1.rs", "src/cli/new.rs")]
+  ['generated', 'tests', 'src/cli/new.rs']
   """
   if files:
     return path
 
   if path in GENERATED:
     return "generated"
+
+  if path in TESTS:
+    return "tests"
 
   if path.split("/")[0] in ("examples", "tests"):
     return path.split("/")[0]
