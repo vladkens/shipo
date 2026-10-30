@@ -3,6 +3,7 @@
 //! is its command line; [USAGE] is its documentation.
 
 mod config;
+mod image;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
