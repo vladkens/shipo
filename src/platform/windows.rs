@@ -38,7 +38,8 @@ use windows_sys::core::BOOL;
 
 use super::{Big, Progress};
 use crate::installer::NOTE;
-use crate::{Error, Result};
+use crate::uninstall::{UNINSTALL, text};
+use crate::{Error, Key, Result};
 
 // MARK: HTTP
 
@@ -157,11 +158,10 @@ pub fn setup(exe: &Path, to: &Path) -> io::Result<i32> {
   Ok(cmd.status()?.code().unwrap_or(-1))
 }
 
-/// The `InstallLocation` and `DisplayIcon` (the exe) of each `{…}` key under HKCU's Uninstall, as
-/// the setup names the app's (v0.1's NSIS one too): the library doesn't know the app's id, so the
-/// exe and its folder find its key.
-pub fn installs() -> Vec<(String, String)> {
-  let path = wide(r"Software\Microsoft\Windows\CurrentVersion\Uninstall");
+/// The `{…}` keys under HKCU's Uninstall, as the setup names the app's (v0.1's NSIS one too): the
+/// library doesn't know the app's id, so the exe and its folder find its key.
+pub fn installs() -> Vec<Key> {
+  let path = wide(UNINSTALL);
   let (mut root, mut found, mut buf) = (null_mut(), vec![], vec![0u16; 1 << 15]);
   // SAFETY: a NUL-terminated path; the key closed below.
   if unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, path.as_ptr(), 0, KEY_READ, &mut root) } != 0 {
@@ -190,10 +190,12 @@ pub fn installs() -> Vec<(String, String)> {
       let got = unsafe {
         RegGetValueW(root, key.as_ptr(), value.as_ptr(), RRF_RT_REG_SZ, null_mut(), data, &mut len)
       };
-      (got == 0).then(|| String::from_utf16_lossy(&buf[..(len as usize / 2).saturating_sub(1)]))
+      (got == 0).then(|| text(&buf[..len as usize / 2])).flatten()
     };
-    if let (Some(dir), Some(exe)) = (get("InstallLocation"), get("DisplayIcon")) {
-      found.push((dir, exe));
+    let (location, icon, uninstall) =
+      (get("InstallLocation"), get("DisplayIcon"), get("UninstallString"));
+    if let (Some(location), Some(icon), Some(uninstall)) = (location, icon, uninstall) {
+      found.push(Key { location, icon, uninstall });
     }
   }
 

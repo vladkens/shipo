@@ -44,9 +44,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use windows_sys::core::{GUID, HRESULT, PWSTR};
 
 use super::payload::{self, Info};
+use super::uninstall::UNINSTALL;
 use super::{
-  Args, CANCELLED, FAILED, RETRY_OWN, Step, UNINSTALL, UNINSTALLER, Value, destination, guid,
-  install, own, placeholder, previous, remove, retry, same, uninstaller, values, wizard,
+  Args, CANCELLED, FAILED, RETRY_OWN, Step, UNINSTALLER, Value, destination, guid, install, own,
+  placeholder, previous, remove, retry, same, uninstaller, values, wizard,
 };
 
 const RUN: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -373,8 +374,7 @@ fn text(key: &str, name: &str) -> Option<String> {
     ok(get(null_mut(), &mut len)).ok()?;
     let mut buf = vec![0u16; (len as usize).div_ceil(2)];
     ok(get(buf.as_mut_ptr().cast(), &mut len)).ok()?;
-    let end = buf.iter().position(|&u| u == 0).unwrap_or(buf.len());
-    String::from_utf16(&buf[..end]).ok()
+    super::uninstall::text(&buf)
   }
 }
 

@@ -15,6 +15,8 @@
 
 #[path = "../../src/cli/payload.rs"]
 mod payload;
+#[path = "../../src/uninstall.rs"]
+mod uninstall;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
@@ -29,6 +31,7 @@ use std::time::{Duration, Instant};
 use std::{fs, io, thread};
 
 use payload::{Files, Info, PLACEHOLDER};
+use uninstall::{UNINSTALLER, folder, same};
 #[cfg(windows)]
 use windows::{delete_file, move_file};
 
@@ -36,12 +39,6 @@ use windows::{delete_file, move_file};
 #[used]
 static PLACEHOLDER_DATA: [u8; PLACEHOLDER] = payload::placeholder();
 
-/// The uninstaller's name in the install folder, as NSIS setups name theirs, so an install over
-/// one of those replaces it.
-const UNINSTALLER: &str = "Uninstall.exe";
-/// The parent of the app's Uninstall key in HKCU, `{<AppId>}`, where an install before this one,
-/// an NSIS setup's too, left `InstallLocation`.
-const UNINSTALL: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
 /// The setup's exit codes besides 0, installed, which an updater reads as a failure.
 const CANCELLED: u8 = 1;
 const FAILED: u8 = 2;
@@ -98,28 +95,6 @@ impl Args {
   }
 }
 
-/// `dir` without a trailing separator if it is an absolute folder below a drive's root (`C:\…`,
-/// `\\?\C:\…`) or a share's (`\\server\share\…`, `\\?\UNC\server\share\…`), never the root
-/// itself, which an uninstall would empty: no part of it empty, `.`, `..`, or dots and spaces
-/// alone, which Windows drops or climbs by. Its `/` made `\`, so the key holds it as Windows does.
-fn folder(dir: &str) -> Option<PathBuf> {
-  let dir = dir.replace('/', "\\");
-  let dir = dir.trim_end_matches('\\');
-  let prefixed = |p: &str| dir.get(..p.len()).is_some_and(|h| h.eq_ignore_ascii_case(p));
-  let (parts, least) = match [r"\\?\UNC\", r"\\.\UNC\"].into_iter().find(|p| prefixed(p)) {
-    Some(p) => (&dir[p.len()..], 3),
-    None if prefixed(r"\\?\") || prefixed(r"\\.\") => (drive(&dir[4..])?, 1),
-    None => match dir.strip_prefix(r"\\") {
-      Some(share) => (share, 3),
-      None => (drive(dir)?, 1),
-    },
-  };
-
-  let parts: Vec<_> = parts.split('\\').collect();
-  let named = |p: &&str| !p.trim_matches(['.', ' ']).is_empty();
-  (parts.len() >= least && parts.iter().all(named)).then(|| dir.into())
-}
-
 /// Where the setup installs, and whether that folder came from the Uninstall key (the wizard's
 /// update, its folder locked): `/D=`'s folder (`given`), else the key's `InstallLocation`
 /// (`location`) when it is a [folder], else `<local>\Programs\<name>`, `local` being
@@ -138,14 +113,6 @@ fn destination(
       Ok((Path::new(&local).join("Programs").join(name), false))
     }
   }
-}
-
-/// The folders of `path` after its drive, `C:\`.
-fn drive(path: &str) -> Option<&str> {
-  let b = path.as_bytes();
-  let drive =
-    b.len() > 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/');
-  drive.then(|| &path[3..])
 }
 
 /// Whether `id` is a GUID in braces, as the packer writes the Uninstall key's name.
@@ -378,29 +345,6 @@ fn remove(dir: &Path, info: &Info, moved: impl FnOnce() -> bool) -> io::Result<(
   done
 }
 
-/// Whether the folder `l`, as the Uninstall key holds it, is `dir`: by their text, case, `/`, a
-/// trailing separator and `\\?\` aside, else as the file system resolves them (a mapped drive,
-/// 8.3).
-fn same(l: &str, dir: &Path) -> bool {
-  let plain = |s: &str| {
-    let s = s.replace('/', "\\");
-    let s = s.trim_end_matches('\\');
-    let prefixed = |p: &str| s.get(..p.len()).is_some_and(|h| h.eq_ignore_ascii_case(p));
-    if prefixed(r"\\?\UNC\") || prefixed(r"\\.\UNC\") {
-      format!(r"\\{}", &s[8..])
-    } else if prefixed(r"\\?\") || prefixed(r"\\.\") {
-      s[4..].to_string()
-    } else {
-      s.to_string()
-    }
-  };
-
-  // Only an absolute folder resolves: a relative one would by the current folder.
-  let real = |p: &Path| fs::canonicalize(p).ok();
-  plain(l).eq_ignore_ascii_case(&plain(&dir.to_string_lossy()))
-    || folder(l).and_then(|l| real(&l)).is_some_and(|l| real(dir) == Some(l))
-}
-
 fn in_use(path: &Path, e: io::Error) -> io::Error {
   io::Error::new(e.kind(), format!("{} is in use or can't be written: {e}", path.display()))
 }
@@ -415,7 +359,7 @@ enum Value {
 /// The Uninstall key's values for Settings › Apps of `info` installed in `dir`, `kib` its size.
 fn values(info: &Info, dir: &Path, kib: u64) -> Vec<(&'static str, Value)> {
   let dir = dir.display().to_string();
-  let uninstall = format!(r#""{dir}\{UNINSTALLER}""#);
+  let uninstall = uninstall::command(&dir);
   let text = |s: &str| Value::Text(s.into());
   vec![
     ("DisplayName", text(&info.name)),
@@ -490,10 +434,15 @@ mod tests {
   /// folder>`, as later updaters run it, the program's path quoted; and the exit codes they read.
   #[test]
   fn compat_older_installs_and_updaters() {
-    assert_eq!(UNINSTALL, r"Software\Microsoft\Windows\CurrentVersion\Uninstall");
+    assert_eq!(uninstall::UNINSTALL, r"Software\Microsoft\Windows\CurrentVersion\Uninstall");
     let dir = r"C:\Users\Me\AppData\Local\Programs\My  App";
-    let location = ("InstallLocation", Value::Text(dir.into()));
-    assert!(values(&info(), Path::new(dir), 1).contains(&location));
+    // The values the library finds the app by, as v0.1's NSIS setup wrote them too: the exe
+    // unquoted, the uninstaller quoted.
+    let values = values(&info(), Path::new(dir), 1);
+    let text = |k, v: String| values.contains(&(k, Value::Text(v)));
+    assert!(text("InstallLocation", dir.into()));
+    assert!(text("DisplayIcon", format!(r"{dir}\Hello.exe")));
+    assert!(text("UninstallString", format!(r#""{dir}\Uninstall.exe""#)));
     assert_eq!(folder(dir), Some(dir.into()));
 
     let exe = format!(r#""{dir}\.shipo-update-41-17\Hello-v2-windows-x64-setup.exe""#);
@@ -517,44 +466,6 @@ mod tests {
 
     // The updater takes 0 as installed, anything else as a failure.
     assert_eq!((CANCELLED, FAILED), (1, 2));
-  }
-
-  #[test]
-  fn folders() {
-    let oks = [
-      (r"C:\Apps\", r"C:\Apps"),
-      (r"C:\Apps\Hello\\", r"C:\Apps\Hello"),
-      (r"\\?\C:\Apps", r"\\?\C:\Apps"),
-      (r"\\?\UNC\server\share\Apps\", r"\\?\UNC\server\share\Apps"),
-      (r"\\.\unc\server\share\Apps", r"\\.\unc\server\share\Apps"),
-      (r"C:\.Apps\a.b", r"C:\.Apps\a.b"),
-      ("C:/Apps/Hello/", r"C:\Apps\Hello"),
-    ];
-    for (dir, want) in oks {
-      assert_eq!(folder(dir), Some(PathBuf::from(want)), "{dir}");
-    }
-
-    // Roots by another name, and parts Windows drops or climbs by.
-    let roots = [r"\\?\UNC\server\share", r"\\.\UNC\server\share", r"\\?\C:\", r"\\?\UNC\"];
-    let dots = [r"C:\.", r"C:\..", r"C:\Apps\..", r"C:\ .", r"C:\Apps\. \x", r"\\server\share\."];
-    let other = [r"\\?\Volume{x}\Apps", r"\\.\pipe\x", r"\\?\Apps", r"C:\Apps\\x", r"\\server\\x"];
-    for dir in roots.into_iter().chain(dots).chain(other) {
-      assert_eq!(folder(dir), None, "{dir}");
-    }
-  }
-
-  #[test]
-  fn same_folders() {
-    let dir = Path::new(r"C:\Apps\Hello");
-    assert!(same(r"C:\Apps\Hello", dir) && same(r"c:\apps\hello\", dir));
-    assert!(same("C:/Apps/Hello/", dir) && same(r"\\?\C:\Apps\Hello", dir));
-    assert!(same(r"\\?\UNC\srv\share\x", Path::new(r"\\srv\share\x")));
-    assert!(same(r"\\.\C:\Apps\Hello", dir));
-    assert!(same(r"\\.\UNC\srv\share\x", Path::new(r"\\srv\share\x")));
-    // A relative folder never matches by the current folder.
-    let here = std::env::current_dir().unwrap();
-    assert!(!same(".", &here) && !same("", &here));
-    assert!(!same(r"C:\Users\Me\AppData\Local\Temp", dir) && !same(r"C:\Apps", dir));
   }
 
   #[test]

@@ -48,6 +48,7 @@ mod installer;
 mod platform;
 #[cfg(test)]
 mod testing;
+mod uninstall;
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -116,7 +117,7 @@ pub fn supported() -> Result<()> {
 /// The app an update replaces ([target]), [replaceable], its [home] writable: a staging folder
 /// made there.
 fn installed() -> Result<PathBuf> {
-  let target = target(OS, &env::current_exe()?, &|k| env::var_os(k), &installs())?;
+  let target = target(OS, &env::current_exe()?, &|k| env::var_os(k), &installs)?;
   #[cfg(unix)]
   replaceable(OS, &target, imp::access(&target))?;
   Folder::new(home(OS, &target))?;
@@ -193,7 +194,7 @@ pub fn finish() -> Option<Error> {
   std::thread::spawn(|| {
     std::thread::sleep(Duration::from_secs(5));
     let var = |k: &str| env::var_os(k);
-    let found = env::current_exe().ok().and_then(|exe| target(OS, &exe, &var, &installs()).ok());
+    let found = env::current_exe().ok().and_then(|exe| target(OS, &exe, &var, &installs).ok());
     if let Some(target) = found {
       installer::tidy(OS, &target, &imp::alive);
     }
@@ -221,8 +222,17 @@ const OS: Os = match () {
 /// An environment variable by its name: [env::var_os], or a test's.
 type Env<'a> = &'a dyn Fn(&str) -> Option<OsString>;
 
-/// The folders and exes the setup's Uninstall keys name, Windows' only.
-fn installs() -> Vec<(String, String)> {
+/// The values of an HKCU `{…}` Uninstall key the app is found by: `InstallLocation`,
+/// `DisplayIcon`, `UninstallString`.
+#[derive(Clone)]
+struct Key {
+  location: String,
+  icon: String,
+  uninstall: String,
+}
+
+/// The Uninstall keys, Windows' only.
+fn installs() -> Vec<Key> {
   #[cfg(windows)]
   return imp::installs();
   #[cfg(not(windows))]
@@ -231,8 +241,8 @@ fn installs() -> Vec<(String, String)> {
 
 /// The app an update replaces, of the running `exe`: [Error::Unsupported] for none (a build) or a
 /// bundle macOS translocated (run from a read-only copy, as it does for one downloaded and not
-/// moved). `keyed`, the folders and exes the setup's Uninstall keys name.
-fn target(os: Os, exe: &Path, env: Env, keyed: &[(String, String)]) -> Result<PathBuf> {
+/// moved). `keys`, the Uninstall keys, read only when the exe isn't in the default folder.
+fn target(os: Os, exe: &Path, env: Env, keys: &dyn Fn() -> Vec<Key>) -> Result<PathBuf> {
   let target = match os {
     // The `.app` bundle, by its layout: `<name>.app/Contents/MacOS/<exe>`.
     Os::Mac => {
@@ -257,8 +267,10 @@ fn target(os: Os, exe: &Path, env: Env, keyed: &[(String, String)]) -> Result<Pa
       };
       let programs = env("LOCALAPPDATA").map(|l| folded(&Path::new(&l).join("Programs")));
       let under = |f: &Path| f.ancestors().skip(1).any(|a| Some(folded(a)) == programs);
-      let named = |f: &Path| keyed.iter().any(|(l, e)| same(l, f) && same(e, exe));
-      exe.parent().filter(|f| under(f) || named(f)).map(Path::to_owned)
+      match exe.parent() {
+        Some(dir) if under(dir) => Some(dir.to_owned()),
+        dir => dir.and_then(|dir| keyed(dir, exe, &keys())),
+      }
     }
   };
 
@@ -272,27 +284,24 @@ fn target(os: Os, exe: &Path, env: Env, keyed: &[(String, String)]) -> Result<Pa
   }
 }
 
-/// Whether the path `l`, as an Uninstall key holds it, is `dir`: by their text, case, `/`, a
-/// trailing separator and `\\?\` aside, else as the file system resolves them (a mapped drive,
-/// 8.3), as the setup's `same` compares them.
-fn same(l: &str, dir: &Path) -> bool {
-  let plain = |s: &str| {
-    let s = s.replace('/', "\\");
-    let s = s.trim_end_matches('\\');
-    let prefixed = |p: &str| s.get(..p.len()).is_some_and(|h| h.eq_ignore_ascii_case(p));
-    if prefixed(r"\\?\UNC\") || prefixed(r"\\.\UNC\") {
-      format!(r"\\{}", &s[8..])
-    } else if prefixed(r"\\?\") || prefixed(r"\\.\") {
-      s[4..].to_string()
-    } else {
-      s.to_string()
-    }
-  };
+/// The folder of the key the setup (or v0.1's NSIS one) wrote for the running `exe` in `dir`, as
+/// the key holds it, so `/D=` keeps it so: a [folder](uninstall::folder) with this exe in it and
+/// its uninstaller, which an MSI's or another app's key isn't. By the text first; only a key of
+/// this exe is resolved on disk, where a share gone may block.
+fn keyed(dir: &Path, exe: &Path, keys: &[Key]) -> Option<PathBuf> {
+  let name = exe.file_name()?.to_str()?;
+  let ours: Vec<_> = keys
+    .iter()
+    .filter(|k| {
+      uninstall::folder(&k.location).is_some()
+        && k.icon.eq_ignore_ascii_case(&format!(r"{}\{name}", k.location))
+        && k.uninstall == uninstall::command(&k.location)
+    })
+    .collect();
 
-  // Only an absolute path resolves: a relative one would by the current folder.
-  let real = |p: &Path| p.is_absolute().then(|| fs::canonicalize(p).ok()).flatten();
-  plain(l).eq_ignore_ascii_case(&plain(&dir.to_string_lossy()))
-    || real(Path::new(l)).is_some_and(|l| real(dir) == Some(l))
+  let found = ours.iter().find(|k| uninstall::alike(&k.location, dir));
+  let found = found.or_else(|| ours.iter().find(|k| uninstall::same(&k.location, dir)));
+  found.map(|k| PathBuf::from(&k.location))
 }
 
 /// What the user may do to the target, as the OS tells it; Windows' setup replaces its own.
@@ -430,7 +439,7 @@ mod tests {
   #[test]
   fn the_target_is_the_installed_app() {
     let none = |_: &str| None;
-    let target = |os, exe: &str| target(os, Path::new(exe), &none, &[]);
+    let target = |os, exe: &str| target(os, Path::new(exe), &none, &Vec::new);
     let app = target(Os::Mac, "/Applications/A.app/Contents/MacOS/a").unwrap();
     assert_eq!(app, Path::new("/Applications/A.app"));
     let moved = "/private/var/folders/x/T/AppTranslocation/1-2/d/A.app/Contents/MacOS/a";
@@ -449,7 +458,7 @@ mod tests {
   #[test]
   fn a_windows_app_is_one_the_setup_installed() {
     let local = |k: &str| (k == "LOCALAPPDATA").then(|| "C:/Users/Me/AppData/Local".into());
-    let target = |exe: &str| target(Os::Windows, Path::new(exe), &local, &[]);
+    let target = |exe: &str| target(Os::Windows, Path::new(exe), &local, &Vec::new);
     let programs = "C:/Users/Me/AppData/Local/Programs";
     assert_eq!(target(&format!("{programs}/W/a.exe")).unwrap(), Path::new(programs).join("W"));
     let case = "c:/users/me/appdata/local/PROGRAMS/W";
@@ -466,53 +475,58 @@ mod tests {
   }
 
   /// The folder picked in the setup's wizard or by `/D=` is the one its key names, as the setup
-  /// (and v0.1's NSIS one) writes it with the exe; never another app's folder or a parent of it.
+  /// (and v0.1's NSIS one) writes it with the exe; never another app's folder or a parent of it,
+  /// nor a key another installer wrote.
   #[test]
   fn a_windows_app_in_its_keys_folder() {
     let local = |k: &str| (k == "LOCALAPPDATA").then(|| "C:/Users/Me/AppData/Local".into());
-    let key = |l: &str, e: &str| (l.to_string(), e.to_string());
-    let keyed =
-      [key(r"D:\Tools", r"D:\Tools\T.exe"), key(r"C:\Apps\Hello", r"C:\Apps\Hello\Hello.exe")];
-    let target = |exe: &str| target(Os::Windows, Path::new(exe), &local, &keyed).ok();
-    assert_eq!(target("C:/Apps/Hello/Hello.exe"), Some("C:/Apps/Hello".into()));
-    assert_eq!(
-      target("c:/apps/HELLO/Hello.exe"),
-      Some("c:/apps/HELLO".into()),
-      "whatever the case"
-    );
-    assert_eq!(target("C:/Apps/Hello/sub/Hello.exe"), None, "not a folder deeper");
-    assert_eq!(target("C:/Apps/Hello.exe"), None);
-    assert_eq!(target("C:/Apps/Hellos/Hello.exe"), None);
-    assert_eq!(target("C:/Apps/Hello/Other.exe"), None, "another app's exe in its folder");
-    assert_eq!(target("D:/Tools/Hello.exe"), None);
-    let programs = "C:/Users/Me/AppData/Local/Programs/Hello";
-    assert!(target(&format!("{programs}/Hello.exe")).is_some(), "the default folder still");
+    let key = |l: &str, name: &str| Key {
+      location: l.into(),
+      icon: format!(r"{l}\{name}"),
+      uninstall: format!(r#""{l}\Uninstall.exe""#),
+    };
+    let hello = key(r"C:\Apps\Hello", "Hello.exe");
+    let found =
+      |exe: &str, keys: &[Key]| target(Os::Windows, Path::new(exe), &local, &|| keys.to_vec()).ok();
+    let keyed = [key(r"D:\Tools", "T.exe"), hello.clone()];
+    let at = |exe: &str| found(exe, &keyed);
+    assert_eq!(at("C:/Apps/Hello/Hello.exe"), Some(r"C:\Apps\Hello".into()));
+    let case = at("c:/apps/HELLO/hello.EXE");
+    assert_eq!(case, Some(r"C:\Apps\Hello".into()), "the key's folder, whatever the case");
+    assert_eq!(at("C:/Apps/Hello/sub/Hello.exe"), None, "not a folder deeper");
+    assert_eq!(at("C:/Apps/Hello.exe"), None);
+    assert_eq!(at("C:/Apps/Hellos/Hello.exe"), None);
+    assert_eq!(at("C:/Apps/Hello/Other.exe"), None, "another app's exe in its folder");
+    assert_eq!(at("D:/Tools/Hello.exe"), None);
 
-    let hello = Path::new("C:/Apps/Hello");
-    for l in [r"C:\Apps\Hello", r"c:\apps\hello\", "C:/Apps/Hello/", r"\\?\C:\Apps\Hello"] {
-      assert!(same(l, hello), "{l}");
+    // The default folder reads no key.
+    let programs = "C:/Users/Me/AppData/Local/Programs/Hello/Hello.exe";
+    let unread = || -> Vec<Key> { panic!("keys read") };
+    assert!(target(Os::Windows, Path::new(programs), &local, &unread).is_ok());
+
+    // Not the setup's key: an MSI's, an icon of its own, a root or a folder Windows climbs by.
+    let msi = Key { uninstall: "MsiExec.exe /X{x}".into(), ..hello.clone() };
+    let icon = Key { icon: r#""C:\Apps\Hello\Hello.exe",0"#.into(), ..hello.clone() };
+    for k in [msi, icon] {
+      assert_eq!(found("C:/Apps/Hello/Hello.exe", &[k]), None);
     }
 
-    assert!(same(r"\\?\UNC\srv\share\x", Path::new(r"\\srv\share\x")));
-    assert!(same(r"\\.\C:\Apps\Hello", Path::new(r"\\?\C:\Apps\Hello")));
-    for l in ["", "Hello", r"C:\Apps", r"C:\Apps\Hello\sub"] {
-      assert!(!same(l, hello), "{l}");
-    }
-
-    // A folder by another path, as the file system resolves it (a link needs no privilege on Unix).
-    #[cfg(unix)]
-    {
-      let root = dir("same");
-      fs::create_dir(root.join("real")).unwrap();
-      std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
-      assert!(same(&root.join("link").to_string_lossy(), &root.join("real")));
+    let odd = [
+      ("C:/Hello.exe", r"C:\"),
+      ("C:/Apps/../Hello/Hello.exe", r"C:\Apps\..\Hello"),
+      ("C:/Apps/. /Hello.exe", r"C:\Apps\. "),
+      ("//?/Volume{x}/Apps/Hello.exe", r"\\?\Volume{x}\Apps"),
+    ];
+    for (exe, l) in odd {
+      assert!(uninstall::alike(l, Path::new(exe).parent().unwrap()), "{l}");
+      assert_eq!(found(exe, &[key(l, "Hello.exe")]), None, "{l}");
     }
   }
 
   #[test]
   fn the_app_is_the_bundle_or_the_appimage() {
     let none = |_: &str| None;
-    let app = |os, exe: &str, env: Env| target(os, Path::new(exe), env, &[]).ok();
+    let app = |os, exe: &str, env: Env| target(os, Path::new(exe), env, &Vec::new).ok();
     let mac = |exe: &str| app(Os::Mac, exe, &none);
     assert_eq!(mac("/Applications/A.app/Contents/MacOS/a"), Some("/Applications/A.app".into()));
     assert_eq!(mac("/Applications/A/Contents/MacOS/a"), None);
