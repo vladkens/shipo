@@ -264,17 +264,17 @@ jobs:
 
 ## 🆚 Compared
 
-| | shipo | [cargo-packager](https://github.com/crabnebula-dev/cargo-packager) | [Tauri](https://v2.tauri.app/distribute/) | [Velopack](https://github.com/velopack/velopack) | [dist](https://github.com/axodotdev/cargo-dist) + [axoupdater](https://github.com/axodotdev/axoupdater) |
-|---|---|---|---|---|---|
-| Made for | Rust apps | Rust and JS apps | Tauri apps | C#, Rust, C++, JS… apps | command-line tools |
-| All OSes from one machine | ✅ Linux or a Mac | ❌ each on its OS, NSIS on any | ❌ each on its OS, NSIS on any | ✅ a Mac, MSI on Windows | ❌ a CI runner per OS |
-| macOS release from Linux | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Formats | DMG, NSIS, AppImage, .deb | DMG, NSIS, MSI, AppImage, .deb, pacman | DMG, NSIS, MSI, AppImage, .deb, .rpm | .pkg, Setup.exe, MSI, AppImage | .pkg, MSI, shell, PowerShell, Homebrew, npm |
-| Updater's crates, Linux / Windows / macOS | 8 / 10 / 15 | 114 / 117 / 125 | +42 / +42 / +53 | 107 / 115 / 107 | 117 / 128 / 119 |
-| Signed updates | ✅ Ed25519, a spare key | ✅ minisign | ✅ minisign | ❌ checksums over HTTPS | ❌ checksums over HTTPS |
-| Delta updates | ❌ | ❌ | ❌ | ✅ | ❌ |
+| | shipo | [cargo-packager](https://github.com/crabnebula-dev/cargo-packager) | [Tauri](https://v2.tauri.app/distribute/) | [Velopack](https://github.com/velopack/velopack) | [Sparkle](https://sparkle-project.org) / [WinSparkle](https://winsparkle.org) | [Conveyor](https://conveyor.hydraulic.dev) |
+|---|---|---|---|---|---|---|
+| Made for | Rust apps | Rust and JS apps | Tauri apps | C#, Rust, C++, JS… apps | macOS / Windows apps | JVM, Electron, Flutter, native apps |
+| Packs every OS on | ✅ Linux or a Mac | ❌ each OS on its own, NSIS on any | ❌ each OS on its own, NSIS on any | ✅ a Mac, MSI on Windows | ➖ updaters only | ✅ any OS |
+| Formats | DMG, NSIS, AppImage, .deb | DMG, NSIS, MSI, AppImage, .deb, pacman | DMG, NSIS, MSI, AppImage, .deb, .rpm | .pkg, Setup.exe, MSI, AppImage | none, updates from your zip, DMG, .pkg / setup.exe | zip, MSIX, .deb with an apt repo |
+| Updater's crates, Linux / Windows / macOS | 8 / 10 / 15 | 114 / 117 / 125 | +42 / +42 / +53 | 107 / 115 / 107 | n/a, Objective-C / C++ libraries | n/a: MSIX, Sparkle, apt |
+| Signed updates | ✅ Ed25519, a spare key | ✅ minisign | ✅ minisign | ❌ checksums over HTTPS | ✅ Ed25519 | ✅ each OS's signing |
+| Delta updates | ❌ | ❌ | ❌ | ✅ | ✅ on macOS | ✅ on Windows and macOS |
+| License | MIT | MIT or Apache-2.0 | MIT or Apache-2.0 | MIT | MIT | paid, free for open source |
 
-Crates are what `cargo tree -e normal` listed on 2026-10-30 for an app with just the updater, itself and build-time macros included, and for Tauri what its updater adds to a Tauri app. The others have years of use behind them and do more: cargo-packager and Tauri also make MSI and pacman or .rpm, Velopack has delta updates and channels, and dist adds Homebrew and npm.
+Crates are what `cargo tree -e normal` listed on 2026-10-30 for an app with just the updater, itself and build-time macros included, and for Tauri what its updater adds to a Tauri app. The others have years of use behind them and lead elsewhere: Sparkle is the reference on macOS, Sparkle, Velopack and Conveyor send delta updates, Conveyor packs and notarizes from any OS, and cargo-packager and Tauri also make MSI, pacman or .rpm.
 
 ## 🤝 Contributing
 
