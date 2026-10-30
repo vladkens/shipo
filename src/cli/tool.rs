@@ -176,9 +176,7 @@ pub fn unzip(zip: &Path, member: &str, path: &Path) -> io::Result<PathBuf> {
   executable(&zip_file(&read(zip)?, member).map_err(at(zip))?, path)
 }
 
-/// `data` at `path` (0755), [place]d: renamed over it, so a copy that runs is never rewritten.
-/// Left as it is when it holds `data` already, or another run put it there meanwhile: Windows
-/// renames nothing over a program running.
+/// `data` at `path` (0755), [place]d, or kept when it holds `data` (Windows can't rename over it).
 fn executable(data: &[u8], path: &Path) -> io::Result<PathBuf> {
   let there = || fs::read(path).is_ok_and(|had| had == data);
   if !there() {
@@ -346,7 +344,7 @@ pub fn private(path: &Path, data: &[u8]) -> io::Result<PathBuf> {
   Ok(path.to_path_buf())
 }
 
-/// A name no other call gets, in this run or another at once: the pid, the time and a count.
+/// A name no other call gets, in this run or another: the pid, the time and a count.
 fn unique() -> String {
   static COUNT: AtomicU64 = AtomicU64::new(0);
   let nanos = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
@@ -354,10 +352,8 @@ fn unique() -> String {
   format!("{}-{}-{n}", std::process::id(), nanos.as_nanos())
 }
 
-/// The file `out`, made by `make` at a part of this call's own beside it, `<out>.<unique>.part`,
-/// and renamed into place, so two runs that make one file at once (two releases fetching one
-/// tool) each rename a whole one over it; on any error the part is removed, so no folder a release
-/// uploads or the apps fetch from holds half a file.
+/// The file `out`, made by `make` at a part of its own, `<out>.<unique>.part`, and renamed into
+/// place; on any error the part is removed, so no folder holds half a file.
 pub fn place(out: &Path, make: impl FnOnce(&Path) -> io::Result<()>) -> io::Result<()> {
   let mut name = out.file_name().unwrap_or_default().to_os_string();
   name.push(format!(".{}.part", unique()));
@@ -390,8 +386,7 @@ pub fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
   }
 }
 
-/// The time a package gives its files: `$SOURCE_DATE_EPOCH` when set, so the same binaries pack
-/// the same bytes at any time on any host, else `meta`'s, the file's on disk.
+/// The time of a package's files: `$SOURCE_DATE_EPOCH` when set, else `meta`'s.
 pub fn time(meta: &fs::Metadata) -> io::Result<u64> {
   if let Some(epoch) = std::env::var_os("SOURCE_DATE_EPOCH") {
     let epoch = epoch.to_string_lossy();
@@ -639,7 +634,7 @@ mod tests {
     assert_eq!(fs::read(&path).unwrap(), b"pinned");
     assert_eq!(listed(), 1);
 
-    // Many at once, as two releases on one machine: each renames a whole file into place.
+    // Many at once, as two releases on one machine.
     let twice = tools.join("twice");
     thread::scope(|s| (0..8).for_each(|_| drop(s.spawn(|| fetch(&url, &good, &twice).unwrap()))));
     assert_eq!(fs::read(&twice).unwrap(), b"pinned");
@@ -730,7 +725,7 @@ mod tests {
     assert_eq!(fs::read(&out).unwrap(), b"x");
     assert_eq!(fs::metadata(&out).unwrap().permissions().mode() & 0o777, 0o755);
     assert!(untar(&tar, "d/none", &tmp.join("none")).is_err());
-    // There already, its mode lost: given back.
+    // Its mode lost: given back.
     set_mode(&out, 0o644).unwrap();
     untar(&tar, "d/tool", &out).unwrap();
     assert_eq!(fs::metadata(&out).unwrap().permissions().mode() & 0o777, 0o755);

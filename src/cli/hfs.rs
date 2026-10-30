@@ -64,9 +64,8 @@ pub enum Data {
 }
 
 impl Entry {
-  /// The tree at `path` as it is on disk: names, and symlinks as links, each folder's entries by
-  /// name, whatever order the host lists them in; the times [tool::time]'s, the modes the writer's
-  /// ([mode]), the owners root's, so any host writes the same bytes of the same tree.
+  /// The tree at `path` as it is on disk: names, [tool::time]s, and symlinks as links, sorted by
+  /// name; the modes the writer's ([mode]), the owners root, the same on any host.
   pub fn read(path: &Path) -> io::Result<Entry> {
     let at = at(path);
     let meta = fs::symlink_metadata(path).map_err(&at)?;
@@ -828,8 +827,7 @@ pub(crate) mod tests {
     assert_eq!(e, format!("{}: not a file, folder or symlink", fifo.display()));
   }
 
-  /// A tree made under a `umask` of 077 reads as the writer's modes, a link keeping its own, each
-  /// folder's entries by name.
+  /// A tree made under a `umask` of 077 reads as the writer's modes, a link keeps its own, by name.
   #[cfg(unix)]
   #[test]
   fn modes() {

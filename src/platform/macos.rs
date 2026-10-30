@@ -82,8 +82,8 @@ pub fn get(url: &str, to: &Path, max: u64, big: Big, progress: Progress) -> Resu
 
 /// Copies the one bundle at the top of the disk image `file` into `file`'s folder, as
 /// `<folder>/new/<name>.app`, once it [accepts] it in place of `app`: the image attached read-only
-/// at `<folder>/volume`, unseen by Finder, a second later again while DiskImages is busy, five
-/// tries in all, and detached again, forced if it must be.
+/// at `<folder>/volume`, unseen by Finder, up to five tries a second apart, and detached again,
+/// forced if it must be.
 /// [Error::Bundle] for an image with more than one `.app` at its top, or none.
 pub fn unpack(file: &Path, app: &Path) -> Result<PathBuf> {
   let dir = file.parent().unwrap_or(file);

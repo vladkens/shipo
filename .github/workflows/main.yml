@@ -20,11 +20,7 @@ defaults:
     shell: bash
 
 jobs:
-  # Each OS: the checks and the tests, those that fetch pinned tools too, and the test app of the
-  # end-to-end update (examples/update.rs) built at 1.0.0 and 2.0.0 for `e2e`. On a Mac also the
-  # setup stubs the packer embeds, stubs/, built again from source as `make setup` builds them
-  # (scripts/setup-stub.py): the same bytes as stubs/SHA256SUMS, or the job fails. Only on a Mac:
-  # Windows' and Linux's rustc lay the functions out in another order.
+  # checks, tests, and the e2e app; on a Mac also the setup stubs from source
   test:
     strategy:
       fail-fast: false
@@ -45,7 +41,7 @@ jobs:
         env:
           PYTHONUTF8: 1 # the scripts read the sources as UTF-8 on Windows too
       - run: make test
-      # Linux has no Mach-O for rcodesign to sign: the Mac signs its own, and codesign verifies it.
+      # Linux has no Mach-O to sign; the Mac runs that one
       - run: cargo test -- --ignored ${{ runner.os == 'Linux' && '--skip rcodesign_signs' || '' }}
       - if: runner.os == 'macOS'
         run: cargo install cargo-xwin --locked --version 0.23.1 && uv run scripts/setup-stub.py --check
@@ -61,11 +57,7 @@ jobs:
           path: e2e/
           if-no-files-found: error
 
-  # The end-to-end update (scripts/e2e-update.py): each OS packs every OS's packages of the test
-  # app, then installs its own 1.0.0 and has it update itself in place from 2.0.0's feed served on
-  # loopback. The DMG updates on the Mac that packed it: 1.0.0 takes only a 2.0.0 signed by its own
-  # identity, here "Hello Local Signing", made by the script in a keychain codesign uses without a
-  # prompt. The DMG is read back by the Mac's own tools and by Linux's, the .deb by dpkg-deb.
+  # each OS packs every OS's packages, then updates its own from 1.0.0 to 2.0.0
   e2e:
     needs: test
     strategy:
@@ -118,10 +110,7 @@ jobs:
           path: e2e/*/*.dmg
           if-no-files-found: error
 
-  # Each package is the same bytes whichever host packed it, so the one an OS installed above is
-  # the one every host packs. A Mac's DMG is its own, and so the feed that lists it: codesign signs
-  # it by that Mac's keychain identity, which its update needs; Linux and Windows sign it ad hoc,
-  # and that DMG opens on a Mac: hdiutil reads it, codesign verifies the app, the app runs.
+  # every host packs the same bytes (a Mac signs its DMG with its own identity)
   same:
     needs: e2e
     runs-on: macos-latest
@@ -139,6 +128,7 @@ jobs:
           diff e2e-sums-Linux/SHA256SUMS e2e-sums-Windows/SHA256SUMS
           own() { grep -v -e '\.dmg$' -e ' update\.txt$' "$1"; }
           diff <(own e2e-sums-Linux/SHA256SUMS) <(own e2e-sums-macOS/SHA256SUMS)
+      # the ad-hoc DMG of Linux and Windows opens and runs on a Mac
       - run: |
           for dmg in dmg/*/*.dmg; do
             hdiutil verify -quiet "$dmg"
@@ -148,9 +138,7 @@ jobs:
             hdiutil detach mnt
           done
 
-  # The shared release steps, as in wavo: `build` builds the packer's binaries read-only; on main
-  # `publish` puts them up as the `dev` pre-release, and a `release: vX.Y.Z (#N)` commit publishes
-  # the crate and the same archives as the version. `publish` never compiles.
+  # the shared release steps, as in wavo: `build` read-only, `publish` never compiles
   build:
     if: "github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' || startsWith(github.event.pull_request.title, 'release: v')"
     runs-on: macos-latest # the macOS binary needs a Mac; Linux and Windows cross-compile

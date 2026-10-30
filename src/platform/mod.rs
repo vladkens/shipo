@@ -53,8 +53,7 @@ fn http(url: &str, message: impl ToString) -> Error {
   Error::Http { url: url.into(), status: None, message: message.to_string() }
 }
 
-/// Whether macOS's `hdiutil attach` failed as it does while DiskImages is busy for a moment, so a
-/// try a second later may pass.
+/// Whether `hdiutil attach` failed as it does while DiskImages is busy for a moment.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn attach_again(e: &std::io::Error) -> bool {
   e.to_string().ends_with("Resource temporarily unavailable")
@@ -146,7 +145,7 @@ mod unix {
 
 #[cfg(test)]
 mod tests {
-  /// Only DiskImages' busy error, as `run` gives hdiutil's stderr, tries the attach again.
+  /// Only DiskImages' busy error tries the attach again.
   #[test]
   fn attach_again_while_busy() {
     let e = |why: &str| {

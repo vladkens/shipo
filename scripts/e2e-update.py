@@ -6,16 +6,14 @@
 installed as a user installs it, then updated in place from 2.0.0's feed served on loopback.
 
 uv run scripts/e2e-update.py build <dir>   the example at both versions, <dir>/<version>/<triple>/hello[.exe]
-uv run scripts/e2e-update.py pack <dir>    `shipo release` of each version, a throwaway key, 2.0.0's feed,
-                                           and <dir>/SHA256SUMS of what it packed
+uv run scripts/e2e-update.py pack <dir>    `shipo release` of each version, a fixed key, 2.0.0's feed, SHA256SUMS
 uv run scripts/e2e-update.py run <dir>     1.0.0 installed and updated; checks that 2.0.0 is what runs
   [--v1 <setup>]                           Windows: 1.0.0 installed by this setup (an NSIS one), not <dir>'s
 uv run scripts/e2e-update.py all <dir>     the three on this host (`make e2e`)
 
-`pack` packs the binaries `build` left in <dir> for any OS, so any host packs every OS's, the same
-bytes on each: the files' times are the commit's ($SOURCE_DATE_EPOCH) and the key is fixed. Only a
-DMG differs, as it updates only when packed on a Mac (signed by "Hello Local Signing", which v1 and
-v2 must share; elsewhere it is signed ad hoc), and with it the feed. `run` takes this OS's files and leaves the app installed: in a
+`pack` packs the binaries `build` left in <dir> for any OS, so any host packs every OS's, and a DMG
+updates only when packed on a Mac (signed by "Hello Local Signing", which v1 and v2 must share;
+elsewhere it is signed ad hoc). `run` takes this OS's files and leaves the app installed: in a
 temporary folder on macOS and Linux; on Windows for this user, then uninstalled by its setup's
 uninstaller, which must leave nothing; before that, with the app running, its setup and uninstaller
 must each exit 2 and change nothing. CI runs the steps on each OS (.github/workflows/main.yml).
@@ -118,12 +116,13 @@ def keychain(out: Path) -> None:
 
 
 def pack(out: Path) -> None:
-  """Each version's installers, a throwaway key (key.pub its public half) and 2.0.0's feed,
-  out/update.txt, of the files served at http://127.0.0.1:<port>/<version>/."""
+  """Each version's installers, a fixed key (key.pub its public half), 2.0.0's feed,
+  out/update.txt, of the files served at http://127.0.0.1:<port>/<version>/, and their SHA256SUMS."""
   run("cargo", "build", "--release", "--bin", "shipo", cwd=ROOT)
   shipo = target_dir() / "release" / f"shipo{EXE}"
   # The tools shipo fetches (rcodesign, the AppImage runtime) once for both versions.
   env = os.environ | {"CARGO_TARGET_DIR": str(out / "target")}
+  # the commit's time, so every host packs the same bytes
   env.setdefault("SOURCE_DATE_EPOCH", run("git", "log", "-1", "--format=%ct", cwd=ROOT).strip())
   (out / "icon.png").write_bytes(png(1024))
 
@@ -137,7 +136,7 @@ def pack(out: Path) -> None:
   for version in VERSIONS:
     manifest = out / version / "Cargo.toml"
     manifest.write_text(MANIFEST.format(bin=BIN, version=version, id=ID, name=NAME))
-    # LF, as git checks it out on Windows with CRLF: the setup and the .deb hold it.
+    # LF: git checks it out with CRLF on Windows
     (out / version / "LICENSE").write_bytes((ROOT / "LICENSE").read_bytes().replace(b"\r\n", b"\n"))
     print(run(shipo, "release", out / version, "--manifest", manifest, env=env), end="")
 
