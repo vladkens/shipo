@@ -945,6 +945,16 @@ pub(crate) mod tests {
     assert_eq!(tree[&RT_VERSION][&1][&LANG], version_info(cfg, false).unwrap());
   }
 
+  /// The embedded stubs are the bytes stubs/SHA256SUMS names, which CI builds again from source.
+  #[test]
+  fn stubs_summed() {
+    let sums = include_str!("../../stubs/SHA256SUMS");
+    for (name, stub) in [("shipo-setup-x64.exe", STUB_X64), ("shipo-setup-arm64.exe", STUB_ARM64)] {
+      let line = format!("{}  {name}", tool::hex(&hmac_sha256::Hash::hash(stub)));
+      assert!(sums.lines().any(|l| l == line), "{line} not in stubs/SHA256SUMS");
+    }
+  }
+
   /// The setup of the embedded stub and of `$SHIPO_TEST_EXE`, else a stand-in exe; left in
   /// `$SHIPO_TEST_OUT` when it is set.
   #[test]

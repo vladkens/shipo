@@ -56,8 +56,9 @@ jobs:
           name: setup-stub-built
           path: setup/target/bin/
 
-  # On Ubuntu with the tools apt has: the packer's ignored tests (the and the AppImage read back, rcodesign fetched pinned, signing the Mac's binary), and the
-  # DMGs and .debs each host packed, read by dmg2img and fsck.hfsplus (hfsprogs) and dpkg-deb.
+  # On Ubuntu with the tools apt has: the packer's ignored tests (the .deb and the AppImage read
+  # back, rcodesign fetched pinned, signing the Mac's binary), and the DMGs and .debs each host
+  # packed, read by dmg2img and fsck.hfsplus (hfsprogs) and dpkg-deb.
   packages:
     needs: e2e-pack
     runs-on: ubuntu-latest

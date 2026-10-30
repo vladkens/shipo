@@ -25,8 +25,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SETUP = ROOT / "setup"
-BIN = ROOT / "stubs"
-SUMS = BIN / "SHA256SUMS"
+STUBS = ROOT / "stubs"
+SUMS = STUBS / "SHA256SUMS"
 TARGETS = {"x64": "x86_64-pc-windows-msvc", "arm64": "aarch64-pc-windows-msvc"}
 CRT, SDK = "14.44.17.14", "10.0.26100"
 
@@ -95,18 +95,20 @@ def main() -> None:
   if sys.platform != "darwin":
     sys.exit("make setup runs on a Mac: a Windows or Linux host builds the stubs in other bytes")
 
-
   if not args.check:
-    sums = build(BIN)
+    sums = build(STUBS)
     SUMS.write_text(sums_text(sums), newline="\n")
     print(sums_text(sums), end="")
     return
 
-  built = sums_text(build(SETUP / "target" / "bin"))
+  # The listed sums and the files include_bytes! embeds, each against a build from source.
+  built = build(SETUP / "target" / "bin")
   committed = SUMS.read_text()
-  print(f"committed (stubs/SHA256SUMS):\n{committed}built from source:\n{built}", end="")
-  if built != committed:
-    sys.exit("the stubs built from source differ from stubs/: run `make setup` and commit both")
+  embedded = {name: hashlib.sha256((STUBS / name).read_bytes()).hexdigest() for name in built}
+  print(f"stubs/SHA256SUMS:\n{committed}stubs/*.exe:\n{sums_text(embedded)}", end="")
+  print(f"built from source:\n{sums_text(built)}", end="")
+  if committed != sums_text(built) or embedded != built:
+    sys.exit("stubs/ differs from the stubs built from source: run `make setup` and commit all three")
 
 
 if __name__ == "__main__":

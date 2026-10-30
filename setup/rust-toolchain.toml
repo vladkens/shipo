@@ -1,5 +1,5 @@
-# The exact rustc of the stubs in bin/, so any host builds the same bytes (scripts/setup-stub.py);
-# nightly for -Zlocation-detail=none.
+# The exact rustc of the stubs in stubs/, so any Mac builds the same bytes (scripts/setup-stub.py;
+# Windows' and Linux's rustc lay them out otherwise); nightly for -Zlocation-detail=none.
 [toolchain]
 channel = "nightly-2026-09-27"
 profile = "minimal"
