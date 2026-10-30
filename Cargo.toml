@@ -6,10 +6,12 @@ description = "Releases and updates for desktop apps: a packer that makes a sign
 authors = ["vladkens"]
 license = "MIT"
 repository = "https://github.com/vladkens/shipo"
+homepage = "https://github.com/vladkens/shipo"
+documentation = "https://docs.rs/shipo"
 readme = "readme.md"
 keywords = ["updater", "auto-update", "installer", "dmg", "appimage"]
-categories = ["development-tools::build-utils", "command-line-utilities", "gui"]
-include = ["/src/**/*.rs", "/Cargo.toml", "/LICENSE", "/readme.md", "/spec.md"]
+categories = ["development-tools::build-utils", "command-line-utilities"]
+include = ["/src/**/*.rs", "/examples/update.rs", "/Cargo.toml", "/Cargo.lock", "/LICENSE", "/readme.md", "/spec.md"]
 
 [package.metadata.docs.rs]
 no-default-features = true
