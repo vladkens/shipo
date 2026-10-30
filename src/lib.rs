@@ -43,6 +43,7 @@
 //! requirement is its own build, so [download] refuses the next one.
 
 mod error;
+mod fake;
 mod feed;
 mod installer;
 mod platform;
@@ -72,7 +73,8 @@ pub struct Staged {
   new: PathBuf,
   /// The app it replaces ([target]).
   target: PathBuf,
-  dir: Folder,
+  /// `None` of a fake update's.
+  dir: Option<Folder>,
 }
 
 // What an app's thread sends back to its main one.
@@ -85,8 +87,18 @@ const _: () = {
 /// The release `feed` offers this platform when it is newer than `current`: the feed fetched over
 /// the OS's HTTP, then [Feed::read]; `None` when it is up to date. Nothing is fetched for a
 /// pre-release `current` (a dev build, `0.1.0-5-gabc`: [Error::Unsupported]), a feed URL not https
-/// ([Error::Feed]) or a feed of no key or a malformed one ([Error::Keys]).
+/// ([Error::Feed]) or a feed of no key or a malformed one ([Error::Keys]). A [Feed::fakeable]
+/// feed's is faked while [faking].
 pub fn check(feed: &Feed, current: &str) -> Result<Option<Release>> {
+  check_or_fake(feed, current, fake::var().as_deref())
+}
+
+/// [check], faked by `SHIPO_FAKE_UPDATE`'s value `fake` for a fakeable feed.
+fn check_or_fake(feed: &Feed, current: &str, fake: Option<&str>) -> Result<Option<Release>> {
+  if let Some(value) = fake.filter(|_| feed.fakeable) {
+    return fake::check(feed, value);
+  }
+
   if current.contains('-') {
     return Err(Error::Unsupported(format!("{current} is a dev build, which takes no update")));
   }
@@ -109,8 +121,17 @@ pub fn check(feed: &Feed, current: &str) -> Result<Option<Release>> {
 /// AppImage, as a .deb's in /usr, a translocated app), nor one it can't replace
 /// ([Error::Unsupported]: a bundle the user can't write or on a volume without APFS's swap, an
 /// AppImage the user can't write), nor one whose folder the user can't write ([Error::Io],
-/// `PermissionDenied`: `/Applications` for a standard user, `/opt`).
+/// `PermissionDenied`: `/Applications` for a standard user, `/opt`). `Ok` while [faking], whatever
+/// the feed: it knows none.
 pub fn supported() -> Result<()> {
+  supported_or_fake(faking())
+}
+
+fn supported_or_fake(faking: bool) -> Result<()> {
+  if faking {
+    return Ok(());
+  }
+
   installed().map(drop)
 }
 
@@ -131,12 +152,19 @@ fn installed() -> Result<PathBuf> {
 ///
 /// `progress` gets the bytes done and the total, `release.size`, on the calling thread: at most
 /// about 4 times a second while the file comes, then once with the total when it is verified.
+///
+/// A fake release, of a fakeable feed while [faking], is not fetched: its progress goes to the end
+/// in about 5 s, or it fails as `SHIPO_FAKE_UPDATE` asks.
 pub fn download(release: &Release, mut progress: impl FnMut(u64, u64)) -> Result<Staged> {
+  if let Some(fake) = &release.fake {
+    return fake::download(fake, release.size, &mut progress);
+  }
+
   let target = installed()?;
   installer::tidy(OS, &target, &imp::alive);
   let (dir, file) = fetch(release, home(OS, &target), &mut progress)?;
   let new = imp::unpack(&file, &target)?;
-  Ok(Staged { new, target, dir })
+  Ok(Staged { new, target, dir: Some(dir) })
 }
 
 /// Starts the [Staged] app's installer, the new version's [finish] (on Windows this one's), and
@@ -145,9 +173,11 @@ pub fn download(release: &Release, mut progress: impl FnMut(u64, u64)) -> Result
 /// for this process to end, puts the new version in, starts it with this process's arguments and
 /// removes what is left; an error of those comes from [finish] in the app it starts.
 /// [Error::Install] when the installer gives no sign in 10 s, nothing swapped. The staging folder
-/// is the installer's from here on: on an error the next [download] removes it.
+/// is the installer's from here on: on an error the next [download] removes it. A fake update's is
+/// [Error::Unsupported], nothing installed.
 pub fn install(staged: Staged) -> Result<()> {
   let Staged { new, target, dir } = staged;
+  let Some(dir) = dir else { return fake::install() };
   let (dir, exe) = (dir.keep(), env::current_exe()?);
   let name = exe.file_name().unwrap_or_default();
   let installer = match OS {
@@ -201,6 +231,12 @@ pub fn finish() -> Option<Error> {
   });
 
   env::var(NOTE).ok().map(Error::Install)
+}
+
+/// Whether `SHIPO_FAKE_UPDATE` is set (and not empty), so a [Feed::fakeable] feed's updates are
+/// faked: for an app's own gates of its update, such as a build's.
+pub fn faking() -> bool {
+  fake::var().is_some()
 }
 
 // MARK: The installed app
@@ -686,6 +722,39 @@ mod tests {
   }
 
   #[test]
+  fn a_fakeable_feed_is_faked_to_the_install() {
+    let url = "http://example.com/releases/latest/download/update.txt";
+    let (real, fake) = (Feed::new(url, &[KEY]), Feed::new(url, &[KEY]).fakeable());
+    let e = check_or_fake(&real, "1.0", Some("2.0")).unwrap_err();
+    assert!(matches!(e, Error::Feed(m) if m.contains("not https")), "a real check");
+    let r = check_or_fake(&fake, "1.0-dev", Some("2.0")).unwrap().unwrap();
+    assert_eq!(r.notes.as_deref(), Some("http://example.com/releases/tag/v2.0"), "a dev build's");
+    assert!(supported_or_fake(true).is_ok());
+
+    let mut seen = Vec::new();
+    let staged = download(&r, |done, total| seen.push((done, total))).unwrap();
+    assert_eq!((seen.len(), seen[0], seen[19]), (20, (2_500_000, r.size), (r.size, r.size)));
+    assert!(seen.is_sorted());
+    let e = install(staged).unwrap_err();
+    assert!(matches!(&e, Error::Unsupported(m) if m.contains("fake")), "{e}");
+
+    let fails = check_or_fake(&fake, "1.0", Some("2.0:fail-download")).unwrap().unwrap();
+    let mut seen = Vec::new();
+    let e = download(&fails, |done, _| seen.push(done)).unwrap_err();
+    assert!(matches!(&e, Error::Mismatch(m) if m.contains("fake")), "{e}");
+    assert_eq!(seen.len(), 8, "midway");
+
+    let huge = Release { size: u64::MAX, ..r.clone() };
+    let mut last = 0;
+    download(&huge, |done, _| last = done).unwrap();
+    assert_eq!(last, u64::MAX, "no overflow");
+
+    // A real release changed to the fake's file stays real.
+    let real = Release { url: r.url.clone(), size: r.size, ..Release::test("2") };
+    assert!(download(&real, |_, _| {}).is_err(), "a build, and no fake");
+  }
+
+  #[test]
   fn an_app_the_installer_cant_replace_is_unsupported() {
     let access = |writable, swap| Access { writable, swap };
     let cases = [
@@ -720,6 +789,6 @@ mod tests {
 
   #[test]
   fn a_build_is_unsupported() {
-    assert!(matches!(supported().unwrap_err(), Error::Unsupported(_)));
+    assert!(matches!(supported_or_fake(false).unwrap_err(), Error::Unsupported(_)));
   }
 }

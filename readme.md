@@ -99,6 +99,18 @@ A pre-release (a version with `-`, such as `1.3.0-rc.1`) doesn't update itself, 
 
 The updater uses the system's HTTP; the dependency counts above leave out 6 crates that derive the error type at build time.
 
+### Fake update
+
+To see your updater's offer, progress and error screens with no release, mark the feed fakeable and run the app with `SHIPO_FAKE_UPDATE` set: `check` offers that version (`none`: nothing newer) after a second with no network, `download` counts to 100% in about 5 s, fetching nothing, and `install` fails with `Error::Unsupported`, nothing installed. A suffix `:fail-check` or `:fail-download` fails that step. `check` ignores the variable for a feed not marked; `shipo::supported()`, which knows no feed, is `Ok` while it is set, and `shipo::faking()` tells whether it is.
+
+```rust
+const FEED: shipo::Feed = shipo::Feed::new(URL, KEYS).fakeable();
+```
+
+```sh
+SHIPO_FAKE_UPDATE=1.2.0 ./app   # or none, 1.2.0:fail-check, 1.2.0:fail-download
+```
+
 ## 📦 Packer
 
 shipo packs on Linux (x86_64 or aarch64), an Apple silicon Mac or x64 Windows. It needs `curl`; on a Mac it also uses the tools macOS ships.
