@@ -24,7 +24,7 @@ Each fact has one source: the contract between the two is `spec.md`, the API the
 
 ## Workflow
 
-- Keep multi-step work as a checklist in `docs/plans/yyyymmdd-<name>.md`, only ticking it during the work; when done, add `Done: yyyy-mm-dd` on top and a short `## Result`, and move it to `docs/plans/completed/`.
+- Keep multi-step work as a checklist in `docs/plans/yyyymmdd-<name>.md`, only ticking it during the work; when done, add `Done: yyyy-mm-dd` on top and a short `## Result`, and move it to `docs/plans/completed/`; a release commit moves every finished plan there (`make check` refuses one left behind).
 - A step is done when `make check` and `make test` pass.
 - A commit is one short lowercase line, `<area>: <what changed>` (`cli: …`, `library: …`), no body, with its docs.
 - CI runners are `ubuntu-latest`, `macos-latest`, `windows-latest`, never pinned.
