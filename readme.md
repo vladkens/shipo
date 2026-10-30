@@ -97,7 +97,9 @@ The updater uses the system's HTTP; the dependency counts above leave out 6 crat
 
 ## 📦 Packer
 
-The machine that packs is Linux (x86_64 or aarch64) or an Apple silicon Mac, with `curl` and, for the Windows setup, NSIS (`apt install nsis`, `brew install makensis`); on a Mac shipo uses the tools macOS ships. Your app's `Cargo.toml` describes it:
+shipo packs on Linux (x86_64 or aarch64) or an Apple silicon Mac. It needs `curl`, and NSIS for the Windows setup (`apt install nsis`, `brew install makensis`); on a Mac it also uses the tools macOS ships.
+
+Your app's `Cargo.toml` describes the app:
 
 ```toml
 [package]
@@ -129,46 +131,46 @@ deb-depends = ["libc6 (>= 2.35)"]
 deb-recommends = ["libgtk-3-0"]
 ```
 
-From `[package]` shipo reads these; `version`, `authors` and `repository` can come from `[workspace.package]`:
+shipo reads these from `[package]`, or from `[workspace.package]` for `version`, `authors` and `repository`:
 
-- `version`: the release's version; `--tag` is `v` and it, and macOS and Windows take its leading numbers (1.2.0 of 1.2.0-beta.1)
-- `authors`: the first one's name is the publisher when `publisher` isn't set, and the first one with a mail gives the .deb's maintainer its mail, which the .deb needs
-- `repository`: with `--tag`, `https://github.com/<owner>/<repo>`, whose release the feed links
-- `name`, `default-run` and the bin targets: the binary to pack, the only one, else `default-run`, else the one named as the package
+- `version`: the release's version, so its tag is `v1.2.0`; macOS and Windows keep its numbers (1.2.0 of 1.2.0-beta.1)
+- `authors`: the first is the publisher by default; the .deb needs one with a mail, `Name <mail>`
+- `repository`: the GitHub repository whose release the feed links, for `--tag`
+- `name`, `default-run`, the bin targets: the binary to pack, the only one, else `default-run`, else the one named as the package
 
-`[package.metadata.shipo]` and its tables take these keys; any other is an error:
+`[package.metadata.shipo]` takes these keys, any other is an error; paths are from the `Cargo.toml`'s folder:
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
-| `id` | string | required | the reverse-DNS id: the bundle id the macOS updater checks a release by, the `.desktop`'s name and `StartupWMClass`, the source of the Windows `app-id` |
-| `name` | string | required | the name people see: the app's, the DMG's, the Start menu entry's, the install folder's, and the files' prefix; with `--tag` only `A-Z a-z 0-9 . _ -` |
-| `icon` | path | required | a square PNG of 1024 px or more, from the `Cargo.toml`'s folder |
-| `comment` | string | none | a line about the app: the `.desktop`'s Comment, the .deb's description (else `name`), the Start menu shortcut's tip |
-| `publisher` | string | the first author's name, else the id's owner (`example` of `com.example.hello`) | the Windows exe's, setup's and Apps list's publisher, the .deb's maintainer name |
+| `id` | string | required | the reverse-DNS bundle id: never change it |
+| `name` | string | required | the name people see, and the files' prefix |
+| `icon` | path | required | a square PNG, 1024 px or more |
+| `comment` | string | none | a line about the app, for the menus and the .deb |
+| `publisher` | string | the first author, else from `id` | who makes the app, on Windows and in the .deb |
 
 `[package.metadata.shipo.macos]`:
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
-| `accessory` | bool | `false` | a menu bar app: no Dock icon (`LSUIElement`), never quit by macOS on its own |
-| `entitlements` | path | none | the entitlements plist the app is signed with, from the `Cargo.toml`'s folder |
-| `plist` | table | none | any Info.plist keys, usage strings among them, over shipo's own; all but `CFBundleExecutable`, `CFBundleIdentifier`, `CFBundleIconFile` and `CFBundlePackageType` |
+| `accessory` | bool | `false` | a menu bar app, without a Dock icon |
+| `entitlements` | path | none | the entitlements plist to sign with |
+| `plist` | table | none | Info.plist keys to add or override, like usage strings |
 
 `[package.metadata.shipo.windows]`:
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
-| `app-id` | string, a GUID | the UUID v5 of `id` | the setup's AppId, by which a newer setup replaces the install: never change it |
-| `copyright` | string | `© <publisher>` | the exe's and setup's LegalCopyright |
+| `app-id` | string, a GUID | made from `id` | the setup's AppId: never change it |
+| `copyright` | string | `© <publisher>` | the exe's and setup's copyright |
 
 `[package.metadata.shipo.linux]`:
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
-| `categories` | list | `["Utility"]` | the `.desktop`'s Categories |
+| `categories` | list | `["Utility"]` | the app menu's categories |
 | `deb-package` | string | the binary's name, lowercase, `_` as `-` | the .deb's package name |
-| `deb-depends` | list | none | the .deb's Depends |
-| `deb-recommends` | list | none | the .deb's Recommends |
+| `deb-depends` | list | none | the packages the .deb needs |
+| `deb-recommends` | list | none | the packages the .deb recommends |
 
 Put the release builds, x86_64 or aarch64, in `dist/<target>/<bin>[.exe]`, such as `dist/aarch64-apple-darwin/hello`, and run:
 
@@ -179,7 +181,7 @@ shipo feed --url https://example.com/hello/{version} dist/*.dmg dist/*-setup.exe
 shipo app --bin target/release/hello # the signed Hello.app alone, to try it on a Mac
 ```
 
-It writes the installers and the signed feed, `update.txt`, into `dist/`:
+It writes the installers into `dist/`, and with `--tag` the signed feed, `update.txt`:
 
 | File | Updated by |
 |---|---|
@@ -188,7 +190,9 @@ It writes the installers and the signed feed, `update.txt`, into `dist/`:
 | `Hello-dev-linux-x86_64.AppImage` | shipo |
 | `Hello-dev-linux-x86_64.deb` | apt or the user |
 
-With `--tag v1.2.0` (`v` and the app's version) the files are `Hello-v1.2.0-…`, and the feed links them in that GitHub release: upload them as they are. `shipo feed` signs a feed for files served elsewhere and writes it to `target/distrib/update.txt`. `shipo --help` lists every option.
+With `--tag v1.2.0`, `v` and the app's version, the files are `Hello-v1.2.0-…` and the feed links them in that GitHub release: upload them as they are. GitHub keeps only `A-Z a-z 0-9 . _ -` in file names, so a release's `name` takes only these.
+
+`shipo feed` signs a feed for files served elsewhere and writes it to `target/distrib/update.txt`. `shipo --help` lists every option.
 
 macOS releases need a paid Apple Developer ID, and an App Store Connect API key for notarization. A release takes these secrets:
 
@@ -201,7 +205,9 @@ macOS releases need a paid Apple Developer ID, and an App Store Connect API key 
 | `APPLE_API_KEY_ID` | its key id |
 | `APPLE_API_ISSUER` | its issuer id |
 
-On Linux shipo signs the app and the DMG with the certificate and notarizes the DMG. On a Mac the keychain's Developer ID signs, and the `APPLE_CERTIFICATE*` secrets go unused. Without `--tag` the secrets are optional: the app is signed ad hoc on Linux, or on a Mac by a local identity shipo creates in the login keychain; the DMG is notarized only when the `APPLE_API_*` secrets are set, and `--key` needs `--tag`. On macOS the updater installs only a release signed with the same Developer ID as the running app.
+On Linux shipo signs the app and the DMG with the certificate and notarizes the DMG. On a Mac the keychain's Developer ID signs, and the `APPLE_CERTIFICATE*` secrets go unused. On macOS the updater installs only a release signed with the same Developer ID as the running app.
+
+A dev build, without `--tag`, needs no secrets. The app is signed ad hoc on Linux, or on a Mac by a local identity shipo creates in the login keychain. The DMG is notarized only when the `APPLE_API_*` secrets are set.
 
 ## 🚀 Releasing from GitHub Actions
 
