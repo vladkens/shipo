@@ -64,7 +64,8 @@ fn write(
 }
 
 /// Writes to `out` the UDZO image of the volume `name` holding the bundle `app` as it is on disk,
-/// the link and the `.DS_Store`; these two of the bundle's owners and time.
+/// its modes the writer's ([Entry::read]), the link and the `.DS_Store`; these two of the bundle's
+/// owners and time.
 fn image(name: &str, app: &Path, out: &mut impl io::Write) -> io::Result<()> {
   let app = Entry::read(app)?;
   if !matches!(app.kind, Kind::Dir(_)) {

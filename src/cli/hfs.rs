@@ -66,7 +66,8 @@ pub enum Data {
 }
 
 impl Entry {
-  /// The tree at `path` as it is on disk: names, modes, owners, times, and symlinks as links.
+  /// The tree at `path` as it is on disk: names, owners, times, and symlinks as links; the modes
+  /// the writer's ([owner]).
   pub fn read(path: &Path) -> io::Result<Entry> {
     let at = at(path);
     let meta = fs::symlink_metadata(path).map_err(&at)?;
@@ -104,21 +105,25 @@ impl Entry {
   }
 }
 
-/// The permission bits and owners of `meta`; off Unix 0755 for folders and links, else 0644.
+/// The permission bits and owners of `meta`, the bits set as the writer's own, never the build
+/// host's `umask` (a 0700 bundle opens for its owner alone): folders and files with an execute
+/// bit 0755, other files 0644, links as they are. Off Unix the owners are 0 and no file executes.
 fn owner(meta: &fs::Metadata, kind: &Kind) -> (u16, u32, u32) {
   #[cfg(unix)]
-  {
+  let (mode, uid, gid) = {
     use std::os::unix::fs::MetadataExt;
-    let _ = kind;
     ((meta.mode() & 0o7777) as u16, meta.uid(), meta.gid())
-  }
-
+  };
   #[cfg(not(unix))]
-  {
-    let _ = meta;
-    let mode = if matches!(kind, Kind::File(_)) { 0o644 } else { 0o755 };
-    (mode, 0, 0)
-  }
+  let (mode, uid, gid, _) = (if matches!(kind, Kind::File(_)) { 0o644 } else { 0o755 }, 0, 0, meta);
+
+  let mode = match kind {
+    Kind::Link(_) => mode,
+    Kind::File(_) if mode & 0o111 == 0 => 0o644,
+    Kind::File(_) | Kind::Dir(_) => 0o755,
+  };
+
+  (mode, uid, gid)
 }
 
 // MARK: Names
@@ -773,6 +778,46 @@ pub(crate) mod tests {
     crate::tool::run(std::process::Command::new("mkfifo").arg(&fifo)).unwrap();
     let e = Entry::read(&tmp.join("app")).unwrap_err().to_string();
     assert_eq!(e, format!("{}: not a file, folder or symlink", fifo.display()));
+  }
+
+  /// A tree made under a `umask` of 077 reads as the writer's modes; a link keeps its own.
+  #[cfg(unix)]
+  #[test]
+  fn modes() {
+    use std::os::unix::fs::MetadataExt;
+
+    let tmp = crate::tool::Temp::new().unwrap();
+    let app = tmp.join("app");
+    let modes =
+      [("bin", 0o700), ("data", 0o600), ("group", 0o750), ("odd", 0o4711), ("dir", 0o700)];
+    fs::create_dir(&app).unwrap();
+    for (name, mode) in modes {
+      match name {
+        "dir" => fs::create_dir(app.join(name)).unwrap(),
+        _ => fs::write(app.join(name), name).unwrap(),
+      }
+
+      crate::tool::set_mode(&app.join(name), mode).unwrap();
+    }
+
+    std::os::unix::fs::symlink("data", app.join("link")).unwrap();
+    crate::tool::set_mode(&app, 0o700).unwrap();
+    let root = Entry::read(&app).unwrap();
+    crate::tool::set_mode(&app, 0o755).unwrap();
+    let link = fs::symlink_metadata(app.join("link")).unwrap().mode() as u16 & 0o7777;
+    let Kind::Dir(entries) = &root.kind else { panic!("{root:?}") };
+    let mut got: Vec<_> = entries.iter().map(|e| (e.name.as_str(), e.mode)).collect();
+    got.sort();
+    let want = [
+      ("bin", 0o755),
+      ("data", 0o644),
+      ("dir", 0o755),
+      ("group", 0o755),
+      ("link", link),
+      ("odd", 0o755),
+    ];
+    assert_eq!(got, want);
+    assert_eq!(root.mode, 0o755);
   }
 
   /// The volume's id is of all it holds: another file's data gives another.
