@@ -32,6 +32,8 @@ use windows_sys::core::BOOL;
 
 use crate::installer::NOTE;
 
+// MARK: HTTP
+
 /// A WinHTTP handle, closed on drop.
 struct Handle(*mut c_void);
 
@@ -115,6 +117,8 @@ fn read(req: &Handle, to: &Path, url: &str, max: u64, tell: &mut dyn FnMut(u64))
   }
 }
 
+// MARK: Install
+
 /// The setup downloaded as `file`, run as it came: the new app, for any target.
 pub fn unpack(file: &Path, _: &Path) -> io::Result<PathBuf> {
   Ok(file.to_owned())
@@ -129,17 +133,17 @@ pub fn setup(exe: &Path) -> io::Result<i32> {
 
 /// Whether the process `pid` runs.
 pub fn alive(pid: u32) -> bool {
-  !wait_exit(pid)(pid, Duration::ZERO)
+  !wait_exit(pid)(Duration::ZERO)
 }
 
 /// The wait for the process `pid` to end, its handle opened now so that a pid reused later can't
 /// fool it: whether it ended within the time, its handle signalled, or there was none to open
 /// (gone, or another user's).
-pub fn wait_exit(pid: u32) -> impl Fn(u32, Duration) -> bool {
+pub fn wait_exit(pid: u32) -> impl Fn(Duration) -> bool {
   // SAFETY: a handle of ours, closed on drop; a pid that is gone gives none.
   let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
   let process = (!process.is_null()).then(|| unsafe { OwnedHandle::from_raw_handle(process) });
-  move |_, cap| {
+  move |cap| {
     let ms = u32::try_from(cap.as_millis()).unwrap_or(u32::MAX - 1);
     // SAFETY: the handle is open.
     let ended = |p: &OwnedHandle| unsafe { WaitForSingleObject(p.as_raw_handle(), ms) };

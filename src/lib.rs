@@ -1,9 +1,9 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/shipo
 //! In-place updates for desktop apps from a signed feed, as Sparkle does: [check] fetches the feed
 //! the shipo packer writes and gives the newer [Release] for this platform, [download] fetches its
-//! file beside the running app, [Release::verify]s and stages it, [install] hands it to an
-//! installer that puts it in once the app has quit, and [finish], first in `main`, is that
-//! installer. They block: an app runs them on a thread of its own and posts the result back.
+//! file beside the running app, verifies and stages it, [install] hands it to an installer that
+//! puts it in once the app has quit, and [finish], first in `main`, is that installer. They block:
+//! an app runs them on a thread of its own and posts the result back.
 //!
 //! The library has no UI and no state of its own: the app draws the menu item, the popup, the
 //! progress and the setting, and keeps the check time and a skipped version. It never shows a
@@ -61,6 +61,8 @@ pub use feed::{Feed, Release};
 use installer::{Folder, INSTALL, NOTE, READY, home};
 use platform::imp;
 
+// MARK: Public API
+
 /// A release's app downloaded, verified and staged beside the running one, for [install]; its
 /// folder is removed on drop, unless [install] handed it to the installer.
 #[derive(Debug)]
@@ -77,7 +79,6 @@ const _: () = {
   const fn send<T: Send>() {}
   send::<Staged>();
   send::<Release>();
-  send::<io::Result<Option<Release>>>();
 };
 
 /// The release `feed` offers this platform when it is newer than `current`: the feed fetched over
@@ -113,7 +114,7 @@ pub fn supported() -> io::Result<()> {
 /// The app an update replaces ([target]), its [home] writable: a staging folder made there.
 fn installed() -> io::Result<PathBuf> {
   let target = target(OS, &env::current_exe()?, &|k| env::var_os(k))?;
-  Folder::new(home(OS, &target).unwrap_or(&target))?;
+  Folder::new(home(OS, &target))?;
   Ok(target)
 }
 
@@ -127,7 +128,7 @@ fn installed() -> io::Result<PathBuf> {
 pub fn download(release: &Release, mut progress: impl FnMut(u64, u64)) -> io::Result<Staged> {
   let target = installed()?;
   installer::tidy(OS, &target, &imp::alive);
-  let (dir, file) = fetch(release, home(OS, &target).unwrap_or(&target), &mut progress)?;
+  let (dir, file) = fetch(release, home(OS, &target), &mut progress)?;
   let new = imp::unpack(&file, &target)?;
   Ok(Staged { new, target, dir })
 }
@@ -171,28 +172,30 @@ pub fn install(staged: Staged) -> io::Result<()> {
 /// too.
 pub fn finish() -> Option<io::Error> {
   static DONE: AtomicBool = AtomicBool::new(false);
-  let Some(job) = installer::job(OS, &env::args_os().skip(1).collect::<Vec<_>>()) else {
-    if DONE.swap(true, Ordering::Relaxed) {
-      return None;
+  match installer::job(OS, &env::args_os().skip(1).collect::<Vec<_>>()) {
+    Some(Some(job)) => installer::run(&job),
+    Some(None) => std::process::exit(2),
+    None => {}
+  }
+
+  if DONE.swap(true, Ordering::Relaxed) {
+    return None;
+  }
+
+  // Windows' installer can't remove the folder it runs from: the app does, once it has ended.
+  #[cfg(windows)]
+  std::thread::spawn(|| {
+    std::thread::sleep(Duration::from_secs(5));
+    let found = env::current_exe().and_then(|exe| target(OS, &exe, &|k| env::var_os(k)));
+    if let Ok(target) = found {
+      installer::tidy(OS, &target, &imp::alive);
     }
+  });
 
-    let note = env::var(NOTE).ok();
-    // Windows' installer can't remove the folder it runs from: the app does, once it has ended.
-    #[cfg(windows)]
-    std::thread::spawn(|| {
-      std::thread::sleep(Duration::from_secs(5));
-      let found = env::current_exe().and_then(|exe| target(OS, &exe, &|k| env::var_os(k)));
-      if let Ok(target) = found {
-        installer::tidy(OS, &target, &imp::alive);
-      }
-    });
-
-    return note.map(io::Error::other);
-  };
-
-  let Some(job) = job else { std::process::exit(2) };
-  installer::run(&job)
+  env::var(NOTE).ok().map(io::Error::other)
 }
+
+// MARK: The installed app
 
 /// The OS whose rules a path follows: [OS] in use, another in tests.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -211,19 +214,35 @@ const OS: Os = match () {
 /// An environment variable by its name: [env::var_os], or a test's.
 type Env<'a> = &'a dyn Fn(&str) -> Option<OsString>;
 
-/// The app an update replaces, of the running `exe`: the `.app` bundle on macOS and the AppImage
-/// on Linux ([app_of]), on Windows the exe's folder under `%LOCALAPPDATA%\Programs`, where the
-/// per-user setup installs, whatever the case; `Unsupported` for none (a build),
+/// The app an update replaces, of the running `exe`: `Unsupported` for none (a build),
 /// `PermissionDenied` for a bundle macOS translocated (run from a read-only copy, as it does for
 /// one downloaded and not moved).
 fn target(os: Os, exe: &Path, env: Env) -> io::Result<PathBuf> {
-  let folded =
-    |p: &Path| -> Vec<_> { p.components().map(|c| c.as_os_str().to_ascii_lowercase()).collect() };
-  let programs = env("LOCALAPPDATA").map(|l| folded(&Path::new(&l).join("Programs")));
-  let under = |f: &Path| f.ancestors().skip(1).any(|a| Some(folded(a)) == programs);
   let target = match os {
-    Os::Windows => exe.parent().filter(|f| under(f)).map(Path::to_owned),
-    _ => app_of(os, exe, env),
+    // The `.app` bundle, by its layout: `<name>.app/Contents/MacOS/<exe>`.
+    Os::Mac => {
+      let macos = exe.parent().filter(|p| p.ends_with("Contents/MacOS"));
+      let app = macos.and_then(|p| p.parent()?.parent());
+      app.filter(|a| a.extension().is_some_and(|e| e == "app")).map(Path::to_owned)
+    }
+    // The AppImage, whose runtime sets both; one inherited from another AppImage (a terminal that
+    // is one) is not where this runs.
+    Os::Linux => match (env("APPIMAGE"), env("APPDIR")) {
+      (Some(image), Some(mount)) if exe.starts_with(&mount) => {
+        Some(PathBuf::from(image)).filter(|i| i.is_file())
+      }
+      _ => None,
+    },
+    // The exe's folder under `%LOCALAPPDATA%\Programs`, where the per-user setup installs,
+    // whatever the case.
+    Os::Windows => {
+      let folded = |p: &Path| -> Vec<_> {
+        p.components().map(|c| c.as_os_str().to_ascii_lowercase()).collect()
+      };
+      let programs = env("LOCALAPPDATA").map(|l| folded(&Path::new(&l).join("Programs")));
+      let under = |f: &Path| f.ancestors().skip(1).any(|a| Some(folded(a)) == programs);
+      exe.parent().filter(|f| under(f)).map(Path::to_owned)
+    }
   };
 
   let what = format!("{} is not an installed app", exe.display());
@@ -236,24 +255,7 @@ fn target(os: Os, exe: &Path, env: Env) -> io::Result<PathBuf> {
   }
 }
 
-/// The app the executable `exe` belongs to: macOS's `.app` bundle, Linux's AppImage; `None` for a
-/// bare binary (a build) and on Windows.
-fn app_of(os: Os, exe: &Path, env: Env) -> Option<PathBuf> {
-  match os {
-    // By its layout: `<name>.app/Contents/MacOS/<exe>`.
-    Os::Mac => {
-      let app = exe.parent().filter(|p| p.ends_with("Contents/MacOS"))?.parent()?.parent()?;
-      app.extension().is_some_and(|e| e == "app").then(|| app.to_owned())
-    }
-    // The AppImage's runtime sets both; one inherited from another AppImage (a terminal that is
-    // one) is not where this runs.
-    Os::Linux => {
-      let (image, mount) = (PathBuf::from(env("APPIMAGE")?), PathBuf::from(env("APPDIR")?));
-      (exe.starts_with(mount) && image.is_file()).then_some(image)
-    }
-    Os::Windows => None,
-  }
-}
+// MARK: Download
 
 /// [download]'s progress: the bytes done, the total.
 type Progress<'a> = &'a mut dyn FnMut(u64, u64);
@@ -270,7 +272,7 @@ fn fetch(release: &Release, parent: &Path, progress: Progress) -> io::Result<(Fo
   }
 
   let exe = env::current_exe()?;
-  let name = staged(OS, &release.url, exe.file_name().unwrap_or_default())?;
+  let name = stage_name(OS, &release.url, exe.file_name().unwrap_or_default())?;
   let dir = Folder::new(parent)?;
   let file = dir.0.join(name);
   let (total, mut told) = (release.size, None::<Instant>);
@@ -290,21 +292,23 @@ fn fetch(release: &Release, parent: &Path, progress: Progress) -> io::Result<(Fo
 /// URL's path: a plain `<name>.exe` other than the running `exe`'s, whose copy, the installer,
 /// goes beside it (`InvalidData` else). Windows loads compatibility shims into an exe named
 /// `setup.exe` (makensis' warning 9000), and the packer names none so.
-fn staged<'a>(os: Os, url: &'a str, exe: &OsStr) -> io::Result<&'a str> {
-  let path = url.split(['?', '#']).next().unwrap_or_default();
-  let name = match os {
-    Os::Mac => return Ok("update.dmg"),
-    Os::Linux => return Ok("app.AppImage"),
-    Os::Windows => path.rsplit('/').next().unwrap_or_default(),
-  };
-
-  let plain = !name.contains(|c: char| c.is_control() || r#"\:*?"<>|"#.contains(c));
-  let ext = Path::new(name).extension().is_some_and(|e| e.eq_ignore_ascii_case("exe"));
-  match plain && ext && !OsStr::new(name).eq_ignore_ascii_case(exe) {
-    true => Ok(name),
-    false => Err(bad(format!("{url} names no setup to stage"))),
+fn stage_name<'a>(os: Os, url: &'a str, exe: &OsStr) -> io::Result<&'a str> {
+  match os {
+    Os::Mac => Ok("update.dmg"),
+    Os::Linux => Ok("app.AppImage"),
+    Os::Windows => {
+      let path = url.split(['?', '#']).next().unwrap_or_default();
+      let name = path.rsplit('/').next().unwrap_or_default();
+      let plain = !name.contains(|c: char| c.is_control() || r#"\:*?"<>|"#.contains(c));
+      let ext = Path::new(name).extension().is_some_and(|e| e.eq_ignore_ascii_case("exe"));
+      let own = OsStr::new(name).eq_ignore_ascii_case(exe);
+      let ok = plain && ext && !own;
+      ok.then_some(name).ok_or_else(|| bad(format!("{url} names no setup to stage")))
+    }
   }
 }
+
+// MARK: Errors
 
 /// An `InvalidData` error of the update.
 fn bad(what: impl fmt::Display) -> io::Error {
@@ -330,7 +334,7 @@ mod tests {
   fn serve() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
-    let mut bad = FEED.to_vec();
+    let mut bad = FEED.as_bytes().to_vec();
     bad[20] ^= 1;
     let spare = format!("version 2\nnotes {url}/v2\n{} 3 {ABC} {url}/abc.exe\n", feed::platform());
     let spare = format!("{spare}sig {}\n", sign(spare.as_bytes()));
@@ -347,7 +351,7 @@ mod tests {
         let req = String::from_utf8_lossy(&req);
         let (status, body): (_, &[u8]) = match req.split(' ').nth(1).unwrap_or_default() {
           "/update.txt" => ("302 Found\r\nLocation: /feed/update.txt", b""),
-          "/feed/update.txt" => ("200 OK", FEED),
+          "/feed/update.txt" => ("200 OK", FEED.as_bytes()),
           "/bad.txt" => ("200 OK", bad.as_slice()),
           "/spare.txt" => ("200 OK", spare.as_bytes()),
           "/abc.exe" => ("200 OK", b"abc"),
@@ -400,12 +404,13 @@ mod tests {
   #[test]
   fn the_app_is_the_bundle_or_the_appimage() {
     let none = |_: &str| None;
-    let mac = |exe: &str| app_of(Os::Mac, Path::new(exe), &none);
+    let app = |os, exe: &str, env: Env| target(os, Path::new(exe), env).ok();
+    let mac = |exe: &str| app(Os::Mac, exe, &none);
     assert_eq!(mac("/Applications/A.app/Contents/MacOS/a"), Some("/Applications/A.app".into()));
     assert_eq!(mac("/Applications/A/Contents/MacOS/a"), None);
     assert_eq!(mac("/Users/me/a/target/debug/a"), None);
     assert_eq!(mac("/A.app/Contents/Resources/a"), None);
-    assert_eq!(app_of(Os::Windows, Path::new("C:/A/a.exe"), &none), None);
+    assert_eq!(app(Os::Windows, "C:/A/a.exe", &none), None);
 
     let dir = dir("app-of");
     let image = dir.join("A.AppImage");
@@ -416,13 +421,13 @@ mod tests {
         "APPDIR" => Some("/tmp/.mount_A1".into()),
         _ => None,
       };
-      app_of(Os::Linux, Path::new(exe), &env)
+      app(Os::Linux, exe, &env)
     };
     assert_eq!(linux("/tmp/.mount_A1/usr/bin/a", &image), Some(image.clone()));
     // Another AppImage's variables, inherited; one that is gone.
     assert_eq!(linux("/home/me/bin/a", &image), None);
     assert_eq!(linux("/tmp/.mount_A1/usr/bin/a", &dir.join("gone")), None);
-    assert_eq!(app_of(Os::Linux, Path::new("/tmp/.mount_A1/usr/bin/a"), &none), None);
+    assert_eq!(app(Os::Linux, "/tmp/.mount_A1/usr/bin/a", &none), None);
     fs::remove_dir_all(&dir).unwrap();
   }
 
@@ -445,7 +450,7 @@ mod tests {
     let to = root.join("update.txt");
     let mut seen = Vec::new();
     imp::get(&format!("{url}/update.txt"), &to, FEED.len() as u64, &mut |n| seen.push(n)).unwrap();
-    assert_eq!(fs::read(&to).unwrap(), FEED);
+    assert_eq!(fs::read_to_string(&to).unwrap(), FEED);
     assert!(seen.is_sorted() && seen.last() == Some(&(FEED.len() as u64)), "{seen:?}");
     let none = &mut |_| {};
     let missing = imp::get(&format!("{url}/none"), &to, 1 << 10, none).unwrap_err();
@@ -518,14 +523,15 @@ mod tests {
   #[test]
   fn a_setup_is_staged_by_its_own_name() {
     let (url, exe) = ("https://h/d/v2/A-v2-windows-x64-setup.exe?x=1#y", OsStr::new("A.exe"));
-    assert_eq!(staged(Os::Windows, url, exe).unwrap(), "A-v2-windows-x64-setup.exe");
-    assert_eq!(staged(Os::Windows, "https://h/B.EXE", exe).unwrap(), "B.EXE");
-    assert_eq!(staged(Os::Mac, url, exe).unwrap(), "update.dmg");
-    assert_eq!(staged(Os::Linux, url, exe).unwrap(), "app.AppImage");
+    assert_eq!(stage_name(Os::Windows, url, exe).unwrap(), "A-v2-windows-x64-setup.exe");
+    assert_eq!(stage_name(Os::Windows, "https://h/B.EXE", exe).unwrap(), "B.EXE");
+    assert_eq!(stage_name(Os::Mac, url, exe).unwrap(), "update.dmg");
+    assert_eq!(stage_name(Os::Linux, url, exe).unwrap(), "app.AppImage");
     // Not an exe, the app's own name (its installer's copy), a name Windows refuses, none.
     let bad = ["a.zip", "a.exe/", ".exe", "a.exe.", "a.EXE", "a:b.exe", "a\\b.exe", "a\n.exe"];
     for name in bad {
-      let e = staged(Os::Windows, &format!("https://h/{name}"), OsStr::new("a.exe")).unwrap_err();
+      let url = format!("https://h/{name}");
+      let e = stage_name(Os::Windows, &url, OsStr::new("a.exe")).unwrap_err();
       assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{name:?}");
     }
   }

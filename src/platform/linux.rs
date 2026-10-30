@@ -9,13 +9,16 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::mem::transmute_copy;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command};
 use std::sync::OnceLock;
 
-pub use super::unix::{alive, detach, wait_exit};
+pub use super::unix::{alive, busy, wait_exit};
 use crate::installer::NOTE;
+
+// MARK: libcurl
 
 type P = *mut c_void;
 
@@ -94,21 +97,30 @@ unsafe fn sym<T: Copy>(lib: P, name: &CStr) -> Option<T> {
   (!p.is_null()).then(|| unsafe { transmute_copy::<P, T>(&p) })
 }
 
-/// The file a transfer writes to, the error that stopped it (a bare `InvalidData` past the
-/// bytes it may take), those bytes, what is told the bytes left after each write, and its panic.
-type Out<'a> = (File, Option<io::Error>, u64, &'a mut dyn FnMut(u64), Option<Box<dyn Any + Send>>);
+/// What a transfer's write callback, [fn@write], works with.
+struct Out<'a> {
+  file: File,
+  /// The error that stopped it: a bare `InvalidData` past the bytes it may take.
+  err: Option<io::Error>,
+  /// The bytes it may still take.
+  left: u64,
+  /// Told the bytes left after each write.
+  tell: &'a mut dyn FnMut(u64),
+  /// A panic of `tell`, resumed once curl returns.
+  panicked: Option<Box<dyn Any + Send>>,
+}
 
 /// curl's `CURLOPT_WRITEFUNCTION`: `size × n` bytes at `data`, all taken or the transfer stops.
 unsafe extern "C" fn write(data: *const u8, size: usize, n: usize, out: P) -> usize {
   // SAFETY: curl passes the `Out` set as `CURLOPT_WRITEDATA` and that many bytes.
-  let ((file, err, left, tell, panicked), data) =
+  let (out, data) =
     unsafe { (&mut *out.cast::<Out>(), std::slice::from_raw_parts(data, size * n)) };
-  let fits = left.checked_sub(data.len() as u64).ok_or(io::ErrorKind::InvalidData.into());
+  let fits = out.left.checked_sub(data.len() as u64).ok_or(io::ErrorKind::InvalidData.into());
   // Called no more once it took nothing.
-  *err = fits.and_then(|l| file.write_all(data).map(|()| *left = l)).err();
+  out.err = fits.and_then(|l| out.file.write_all(data).map(|()| out.left = l)).err();
   // A panic can't unwind through curl: it stops the transfer and goes on past it.
-  *panicked = panic::catch_unwind(AssertUnwindSafe(|| tell(*left))).err();
-  if err.is_some() || panicked.is_some() { 0 } else { size * n }
+  out.panicked = panic::catch_unwind(AssertUnwindSafe(|| (out.tell)(out.left))).err();
+  if out.err.is_some() || out.panicked.is_some() { 0 } else { size * n }
 }
 
 /// The body of `url` into `to` by libcurl's easy API, its write callback into the file, redirects
@@ -119,7 +131,8 @@ pub fn get(url: &str, to: &Path, max: u64, progress: &mut dyn FnMut(u64)) -> io:
   let c = curl().ok_or_else(none)?;
   let c_url = CString::new(url).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, url))?;
   let tell = &mut |left| progress(max - left);
-  let (mut out, mut code): (Out, c_long) = ((File::create(to)?, None, max, tell, None), 0);
+  let mut out = Out { file: File::create(to)?, err: None, left: max, tell, panicked: None };
+  let mut code: c_long = 0;
   // SAFETY: a handle of its own, its options of their documented types, cleaned up before `out`
   // and the URL go.
   let done = unsafe {
@@ -149,7 +162,7 @@ pub fn get(url: &str, to: &Path, max: u64, progress: &mut dyn FnMut(u64)) -> io:
     done
   };
 
-  if let Some(p) = out.4 {
+  if let Some(p) = out.panicked {
     panic::resume_unwind(p);
   }
 
@@ -158,8 +171,8 @@ pub fn get(url: &str, to: &Path, max: u64, progress: &mut dyn FnMut(u64)) -> io:
     super::status(url, code as u32)?;
   }
 
-  let big = out.1.as_ref().is_some_and(|e| e.kind() == io::ErrorKind::InvalidData);
-  out.1.map_or(Ok(()), |e| Err(if big { super::too_big(url, max) } else { e }))?;
+  let big = out.err.as_ref().is_some_and(|e| e.kind() == io::ErrorKind::InvalidData);
+  out.err.map_or(Ok(()), |e| Err(if big { super::too_big(url, max) } else { e }))?;
 
   if done != 0 {
     // SAFETY: curl's static message for its code.
@@ -168,8 +181,10 @@ pub fn get(url: &str, to: &Path, max: u64, progress: &mut dyn FnMut(u64)) -> io:
   }
 
   super::status(url, code as u32)?;
-  out.0.sync_all()
+  out.file.sync_all()
 }
+
+// MARK: Install
 
 /// Makes the AppImage downloaded as `file` executable: the new app, for any target.
 pub fn unpack(file: &Path, _: &Path) -> io::Result<PathBuf> {
@@ -181,13 +196,34 @@ pub fn unpack(file: &Path, _: &Path) -> io::Result<PathBuf> {
 pub fn start(app: &Path, args: &[OsString], note: Option<&str>) -> io::Result<()> {
   let (mut cmd, vars) = (Command::new(app), ["APPIMAGE", "APPDIR", "ARGV0", "OWD", NOTE]);
   let cmd = vars.iter().fold(&mut cmd, |c, k| c.env_remove(k));
-  let cmd = super::unix::closed(cmd);
-  cmd.envs(note.map(|n| (NOTE, n))).args(args).spawn().map(drop)
+  closed(cmd).envs(note.map(|n| (NOTE, n))).args(args).spawn().map(drop)
 }
 
-/// A folder not empty yet, as a file came into it while it was emptied.
-pub fn busy(e: &io::Error) -> bool {
-  e.kind() == io::ErrorKind::DirectoryNotEmpty
+/// Spawns `cmd` as every Unix does ([super::unix::detach]), with nothing inherited past stderr
+/// ([closed]).
+pub fn detach(cmd: &mut Command) -> io::Result<Child> {
+  super::unix::detach(closed(cmd))
+}
+
+/// `cmd` started with no descriptor past stderr: an AppImage's runtime leaves its FUSE daemon's
+/// pipe open in the app, and the app started by the update would keep the old one mounted.
+fn closed(cmd: &mut Command) -> &mut Command {
+  unsafe extern "C" {
+    fn close_range(first: u32, last: u32, flags: i32) -> i32;
+    fn close(fd: i32) -> i32;
+  }
+
+  // SAFETY: only `close`, async-signal-safe, between fork and exec; close_range is glibc 2.34's,
+  // the loop the older kernels' way.
+  unsafe {
+    cmd.pre_exec(|| {
+      if close_range(3, u32::MAX, 0) != 0 {
+        (3..1024).for_each(|fd| _ = close(fd));
+      }
+
+      Ok(())
+    })
+  }
 }
 
 #[cfg(test)]

@@ -15,8 +15,8 @@ Each fact has one source: the contract between the two is `spec.md`, the API the
 ## Code
 
 - Start every `.rs` file with `// Copyright (c) vladkens | MIT License | https://github.com/vladkens/shipo`, then a `//!` doc whose first sentence says what the file does.
-- Split a file before it passes ~800 lines of code (tests, docs, comments and blanks not counted).
-- Put the library's OS code in `src/platform/<os>.rs` (shared Unix code in `unix.rs`); the rest stays testable on any host.
+- A file holds one feature (the DMG, the Linux packages, signing), not one helper or format each; split it only before it passes ~800 lines of code (tests, docs, comments and blanks not counted). `make size` shows each part against its budget. Inside a file, `// MARK: <name>` separates its blocks.
+- Put the library's OS code in `src/platform/<os>.rs` (code shared by macOS and Linux in `platform/mod.rs`'s Unix block); the rest stays testable on any host.
 - Helper scripts go in `scripts/`, kebab-case, Python run with `uv run`.
 - A comment adds what the code doesn't say, briefly; it never restates the code. Code taken from another project names it in the file's header (project, licence, link to the file), so it can be compared and updated; code moved from the person's own projects says nothing of where it came from.
 - A test never shows a window.

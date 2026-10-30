@@ -12,6 +12,8 @@ use ed25519_compact::{PublicKey, Signature};
 
 use crate::{bad, error};
 
+// MARK: Feed and release
+
 /// Where an app's updates come from: its feed's URL and the Ed25519 public keys that may sign it,
 /// a const in the app made by [Feed::new].
 #[derive(Clone, Copy, Debug)]
@@ -39,7 +41,7 @@ impl<'a> Feed<'a> {
   /// none for this platform, is `None`.
   pub fn read(&self, text: &[u8], current: &str) -> io::Result<Option<Release>> {
     let (data, sig) = signed(text)?;
-    verify(&self.public_keys()?, data, sig)?;
+    verify(&self.public_keys()?, data.as_bytes(), sig)?;
     release(data, current, &platform())
   }
 
@@ -79,7 +81,7 @@ impl Release {
 
   /// Checks the file downloaded for the release against its size and SHA-512: `InvalidData` if
   /// either differs.
-  pub fn verify(&self, file: &Path) -> io::Result<()> {
+  pub(crate) fn verify(&self, file: &Path) -> io::Result<()> {
     match fs::metadata(file)?.len() == self.size && sha512(file)? == self.sha512 {
       true => Ok(()),
       false => Err(bad(format!("{} is not the file of {}", file.display(), self.version))),
@@ -95,16 +97,19 @@ pub fn platform() -> String {
   format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
 }
 
-/// The feed `text` split at its last line, `sig <signature>`: the bytes before that line and the
-/// signature's hex; `InvalidData` if the last line is not that or another line is too.
-fn signed(text: &[u8]) -> io::Result<(&[u8], &str)> {
+// MARK: Signature and hash
+
+/// The feed `text` split at its last line, `sig <signature>`: the text before that line and the
+/// signature's hex; `InvalidData` if it is not UTF-8, the last line is not that or another line is
+/// too.
+fn signed(text: &[u8]) -> io::Result<(&str, &str)> {
   let text = std::str::from_utf8(text).map_err(|_| bad("the feed is not UTF-8"))?;
   let end = text.strip_suffix('\n').unwrap_or(text);
   let start = end.rfind('\n').map_or(0, |i| i + 1);
   let (data, last) = (&text[..start], &end[start..]);
   let sig = last.strip_suffix('\r').unwrap_or(last).strip_prefix("sig ");
   match sig.filter(|_| !data.lines().any(|l| l.split(' ').next() == Some("sig"))) {
-    Some(sig) => Ok((data.as_bytes(), sig)),
+    Some(sig) => Ok((data, sig)),
     None => Err(bad("the feed's last line is not its one `sig` line")),
   }
 }
@@ -131,12 +136,13 @@ fn sha512(path: &Path) -> io::Result<[u8; 64]> {
   }
 }
 
+// MARK: Parsing
+
 /// The release in the feed `text` for `platform` when its version is newer than `current`: one
 /// `version` of one word, at most one `notes` of one [secure] URL and one line of the platform's
 /// `<size> <sha512> <url>`, all checked before the versions are; a line of another first word
 /// skipped, repeated or not.
-pub fn release(text: &[u8], current: &str, platform: &str) -> io::Result<Option<Release>> {
-  let text = std::str::from_utf8(text).map_err(|_| bad("the feed is not UTF-8"))?;
+pub fn release(text: &str, current: &str, platform: &str) -> io::Result<Option<Release>> {
   let (mut version, mut notes, mut file) = (None, None, None);
   for line in text.lines() {
     let (word, rest) = line.split_once(' ').unwrap_or((line, ""));
@@ -187,15 +193,13 @@ fn fields<'a>(rest: &'a str, platform: &str) -> io::Result<(u64, [u8; 64], &'a s
 /// `url` is https to a host, or http on [loopback] (tests, a VM serving from its own host), all
 /// printable ASCII: no space or control character a link could hide.
 pub fn secure(url: &str) -> bool {
-  let host = url.strip_prefix("https://").map(|r| r.split(['/', '?', '#']).next().unwrap_or(r));
-  let to = host.is_some_and(|h| !h.is_empty()) || loopback(url);
+  let to = authority(url, "https://").is_some_and(|h| !h.is_empty()) || loopback(url);
   to && url.bytes().all(|b| b.is_ascii_graphic())
 }
 
 /// `url` is http to this machine: `127.0.0.1`, `localhost` or `[::1]`.
 pub fn loopback(url: &str) -> bool {
-  let Some(rest) = url.strip_prefix("http://") else { return false };
-  let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
+  let Some(host) = authority(url, "http://") else { return false };
   let host = match host.rsplit_once(':') {
     Some((h, port)) if port.bytes().all(|b| b.is_ascii_digit()) => h,
     _ => host,
@@ -203,6 +207,24 @@ pub fn loopback(url: &str) -> bool {
 
   ["127.0.0.1", "localhost", "[::1]"].contains(&host)
 }
+
+/// The host (and port) of `url` when it starts with `scheme`: what comes before its path, query
+/// or fragment.
+fn authority<'a>(url: &'a str, scheme: &str) -> Option<&'a str> {
+  url.strip_prefix(scheme)?.split(['/', '?', '#']).next()
+}
+
+/// `N` bytes from exactly `2 * N` hex digits, of either case.
+pub fn hex<const N: usize>(s: &str) -> Option<[u8; N]> {
+  if s.len() != 2 * N || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+    return None;
+  }
+
+  let bytes = (0..N).map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok());
+  bytes.collect::<Option<Vec<u8>>>()?.try_into().ok()
+}
+
+// MARK: Versions
 
 /// A pre-release's dot part: numbers below words, as semver orders them.
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
@@ -230,16 +252,6 @@ fn newer(v: &str, than: &str) -> Option<bool> {
   Some(key(v)? > key(than)?)
 }
 
-/// `N` bytes from exactly `2 * N` hex digits, of either case.
-pub fn hex<const N: usize>(s: &str) -> Option<[u8; N]> {
-  if s.len() != 2 * N || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
-    return None;
-  }
-
-  let bytes = (0..N).map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok());
-  bytes.collect::<Option<Vec<u8>>>()?.try_into().ok()
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -261,7 +273,7 @@ mod tests {
     assert_eq!((r.version.as_str(), r.url.as_str()), ("1.2.0", "https://example.com/app.zip"));
     assert_eq!((r.size, r.sha512, r.notes), (3, hex(ABC).unwrap(), None));
     let crlf = format!("version 2\r\nnotes https://n\r\np 1 {ABC} https://a\r\n");
-    let r = release(crlf.as_bytes(), "1", "p").unwrap().unwrap();
+    let r = release(&crlf, "1", "p").unwrap().unwrap();
     assert_eq!((r.url.as_str(), r.notes.as_deref()), ("https://a", Some("https://n")), "CRLF");
   }
 
@@ -269,18 +281,18 @@ mod tests {
   fn the_notes_are_the_releases_page() {
     let page = "https://github.com/me/app/releases/tag/v2";
     let feed = |notes: &str| format!("version 2\nnotes {notes}\np 1 {ABC} https://a\n");
-    let r = release(feed(page).as_bytes(), "1", "p").unwrap().unwrap();
+    let r = release(&feed(page), "1", "p").unwrap().unwrap();
     assert_eq!(r.notes.as_deref(), Some(page));
     for notes in ["", "http://example.com/v2", "file:///etc", "https://a b", "https://a\tb"] {
-      let e = release(feed(notes).as_bytes(), "1", "p").unwrap_err();
+      let e = release(&feed(notes), "1", "p").unwrap_err();
       assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{notes:?}: {e}");
     }
 
     let twice = format!("{}notes {page}\n", feed(page));
-    assert!(release(twice.as_bytes(), "1", "p").is_err(), "twice");
+    assert!(release(&twice, "1", "p").is_err(), "twice");
     let bad = feed("javascript:alert(1)");
-    assert!(release(bad.as_bytes(), "2", "p").is_err(), "checked when up to date too");
-    assert!(release(bad.as_bytes(), "1", "q").is_err(), "and with no line for the platform");
+    assert!(release(&bad, "2", "p").is_err(), "checked when up to date too");
+    assert!(release(&bad, "1", "q").is_err(), "and with no line for the platform");
   }
 
   #[test]
@@ -311,7 +323,7 @@ mod tests {
     for file in files.into_iter().chain(more) {
       let feed = line(&file.replace("{ABC}", ABC));
       for current in ["1", "3"] {
-        let e = release(feed.as_bytes(), current, "p").unwrap_err();
+        let e = release(&feed, current, "p").unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{file} over {current}: {e}");
       }
     }
@@ -327,12 +339,12 @@ mod tests {
       format!("{ok}\n"),
       format!(" {ok}"),
     ] {
-      assert!(release(feed.as_bytes(), "1", "p").is_err(), "{feed:?}");
+      assert!(release(&feed, "1", "p").is_err(), "{feed:?}");
     }
 
-    assert!(release(b"version \xff\n", "1", "p").is_err(), "not UTF-8");
+    assert!(signed(b"version \xff\nsig 00\n").is_err(), "not UTF-8");
     let other = format!("{ok}q 1 x\nq 2 y\nwhatever comes later\nwhatever comes later\n");
-    let r = release(other.as_bytes(), "1", "p").unwrap();
+    let r = release(&other, "1", "p").unwrap();
     assert!(r.is_some(), "other lines are skipped, repeated or not");
   }
 
@@ -388,30 +400,30 @@ mod tests {
   }
 
   /// [FEED] read with [KEY].
-  fn read_feed(text: &[u8]) -> io::Result<Option<Release>> {
-    Feed::new("https://example.com/update.txt", &[KEY]).read(text, "1.0")
+  fn read_feed(text: &str) -> io::Result<Option<Release>> {
+    Feed::new("https://example.com/update.txt", &[KEY]).read(text.as_bytes(), "1.0")
   }
 
   #[test]
   fn an_openssl_signed_feed_verifies() {
-    let (data, sig) = signed(FEED).unwrap();
+    let (data, sig) = signed(FEED.as_bytes()).unwrap();
     assert_eq!((data.len(), sig.len()), (FEED.len() - 133, 128));
-    verify(&keys(&[KEY]), data, sig).unwrap();
+    verify(&keys(&[KEY]), data.as_bytes(), sig).unwrap();
     // A release only where the feed has a line for this platform (not on ARM Windows or Linux).
     read_feed(FEED).unwrap();
     // The same lines ended in CRLF, the `sig` line too or not, or with no line end.
-    let crlf = String::from_utf8(data.to_vec()).unwrap().replace('\n', "\r\n");
+    let crlf = data.replace('\n', "\r\n");
     for end in ["\r\n", "\n", ""] {
       let feed = format!("{crlf}sig {CRLF_SIG}{end}");
-      assert_eq!(read_feed(feed.as_bytes()).unwrap(), read_feed(FEED).unwrap(), "{end:?}");
+      assert_eq!(read_feed(&feed).unwrap(), read_feed(FEED).unwrap(), "{end:?}");
     }
   }
 
   #[test]
   fn a_feed_signed_by_any_of_the_keys_verifies() {
-    let (data, sig) = signed(FEED).unwrap();
+    let (data, sig) = signed(FEED.as_bytes()).unwrap();
     for hex in [[KEY, RFC_KEY], [RFC_KEY, KEY]] {
-      verify(&keys(&hex), data, sig).unwrap();
+      verify(&keys(&hex), data.as_bytes(), sig).unwrap();
     }
 
     // After a leak the spare signs: an app holding both keys takes it, one with the working key
@@ -433,7 +445,7 @@ mod tests {
     for hex in [&["AAAA"][..], &[KEY, &KEY[2..]], &[KEY, &zero], &[]] {
       let feed = Feed::new("https://a", hex);
       assert_eq!(
-        feed.read(FEED, "1.0").unwrap_err().kind(),
+        feed.read(FEED.as_bytes(), "1.0").unwrap_err().kind(),
         io::ErrorKind::InvalidInput,
         "{hex:?}"
       );
@@ -442,8 +454,7 @@ mod tests {
 
   #[test]
   fn the_sig_line_is_last_and_once() {
-    let (data, sig) = signed(FEED).unwrap();
-    let data = std::str::from_utf8(data).unwrap();
+    let (data, sig) = signed(FEED.as_bytes()).unwrap();
     for feed in [
       data.to_owned(),
       format!("{data}sig {sig}\n\n"),
@@ -454,26 +465,28 @@ mod tests {
       format!("{data}sig  {sig}\n"),
       format!("{data}sig {sig} \n"),
     ] {
-      let e = read_feed(feed.as_bytes()).unwrap_err();
+      let e = read_feed(&feed).unwrap_err();
       assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{feed:?}: {e}");
     }
   }
 
   #[test]
   fn a_changed_feed_or_another_key_is_refused() {
-    let (data, sig) = signed(FEED).unwrap();
+    let (data, sig) = signed(FEED.as_bytes()).unwrap();
     // Each byte the signature covers: a line's text, its line end, the line before `sig`.
     for at in [0, 20, data.len() - 2, data.len() - 1] {
-      let mut feed = FEED.to_vec();
+      let mut feed = FEED.as_bytes().to_vec();
       feed[at] ^= 1;
-      assert_eq!(read_feed(&feed).unwrap_err().kind(), io::ErrorKind::InvalidData, "{at}");
+      let read = Feed::new("https://a", &[KEY]).read(&feed, "1.0");
+      assert_eq!(read.unwrap_err().kind(), io::ErrorKind::InvalidData, "{at}");
     }
 
     let kind = |r: io::Result<()>| r.unwrap_err().kind();
+    let data = data.as_bytes();
     assert_eq!(kind(verify(&keys(&[RFC_KEY]), data, sig)), io::ErrorKind::InvalidData);
     assert_eq!(kind(verify(&keys(&[KEY]), data, "not hex!")), io::ErrorKind::InvalidData);
     // The signature is checked before the feed is read.
-    let e = read_feed(format!("{{\nsig {sig}\n").as_bytes()).unwrap_err();
+    let e = read_feed(&format!("{{\nsig {sig}\n")).unwrap_err();
     assert!(e.to_string().contains("signature"), "{e}");
   }
 

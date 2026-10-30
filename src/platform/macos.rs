@@ -4,7 +4,7 @@
 //! one's id and designated requirement by Security.framework; the two exchanged in one step; the
 //! new one opened by LaunchServices in the old one's place.
 
-use std::ffi::{CString, OsStr, OsString, c_char};
+use std::ffi::{CString, OsString, c_char};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -21,9 +21,11 @@ use objc2_foundation::{
 };
 use objc2_security::{SecCSFlags, SecCode, SecStaticCode, kSecCSCheckAllArchitectures};
 
-pub use super::unix::{alive, detach, wait_exit};
+pub use super::unix::{alive, busy, detach, wait_exit};
 use crate::bad;
 use crate::installer::NOTE;
+
+// MARK: HTTP
 
 /// The body of `url` into `to` by a download task, its file moved into place by the completion
 /// handler, which runs on the session's queue while this waits. The shared session follows
@@ -75,19 +77,20 @@ pub fn get(url: &str, to: &Path, max: u64, progress: &mut dyn FnMut(u64)) -> io:
   Err(super::too_big(url, max))
 }
 
+// MARK: Image and signature
+
 /// Copies the one bundle at the top of the disk image `file` into `file`'s folder, as
 /// `<folder>/new/<name>.app`, once it [accepts] it in place of `app`: the image attached read-only
 /// at `<folder>/volume`, unseen by Finder, and detached again, forced if it must be. `InvalidData`
 /// for an image with more than one `.app` at its top, or none.
 pub fn unpack(file: &Path, app: &Path) -> io::Result<PathBuf> {
-  let (dir, hdiutil) = (file.parent().unwrap_or(file), "/usr/bin/hdiutil");
-  let volume = dir.join("volume");
-  let attach = ["attach", "-nobrowse", "-noautoopen", "-readonly", "-mountpoint"].map(OsStr::new);
-  run(hdiutil, &[&attach[..], &[volume.as_os_str(), file.as_os_str()]].concat())?;
+  let dir = file.parent().unwrap_or(file);
+  let (volume, hdiutil) = (dir.join("volume"), || Command::new("/usr/bin/hdiutil"));
+  let attach = ["attach", "-nobrowse", "-noautoopen", "-readonly", "-mountpoint"];
+  run(hdiutil().args(attach).arg(&volume).arg(file))?;
   let new = copy(&volume, dir, app);
-  let detach =
-    |force: &[&OsStr]| run(hdiutil, &[&["detach".as_ref(), volume.as_os_str()], force].concat());
-  let detached = detach(&[]).or_else(|_| detach(&["-force".as_ref()]));
+  let detach = |force: &[&str]| run(hdiutil().arg("detach").arg(&volume).args(force));
+  let detached = detach(&[]).or_else(|_| detach(&["-force"]));
   new.and_then(|new| detached.map(|()| new))
 }
 
@@ -101,7 +104,7 @@ fn copy(volume: &Path, dir: &Path, app: &Path) -> io::Result<PathBuf> {
 
   accepts(&one, app)?;
   let new = dir.join("new").join(one.file_name().unwrap_or_default());
-  run("/usr/bin/ditto", &[one.as_os_str(), new.as_os_str()])?;
+  run(Command::new("/usr/bin/ditto").arg(&one).arg(&new))?;
   Ok(new)
 }
 
@@ -157,6 +160,8 @@ fn owned<T: Type>(path: &Path, status: i32, made: *mut T) -> io::Result<CFRetain
   made.ok_or_else(|| bad(format!("{}: Security's status {status}", path.display())))
 }
 
+// MARK: Install
+
 /// Exchanges the paths `a` and `b` in one step, `renamex_np` with `RENAME_SWAP`, as Sparkle's
 /// `SUFileManager` does on APFS.
 pub fn exchange(a: &Path, b: &Path) -> io::Result<()> {
@@ -179,25 +184,22 @@ pub fn exchange(a: &Path, b: &Path) -> io::Result<()> {
 /// gets launchd's environment, not this process's, and `/` as its working directory.
 /// `InvalidData` with `open`'s error if LaunchServices fails.
 pub fn start(app: &Path, args: &[OsString], note: Option<&str>) -> io::Result<()> {
-  let env = note.map(|n| OsString::from(format!("{NOTE}={n}")));
-  let env = env.iter().flat_map(|e| ["--env".as_ref(), e.as_os_str()]);
-  let head =
-    ["-n", "-g"].map(OsStr::new).into_iter().chain(env).chain([app.as_os_str(), "--args".as_ref()]);
-  run("/usr/bin/open", &head.chain(args.iter().map(OsString::as_os_str)).collect::<Vec<_>>())
-}
+  let mut open = Command::new("/usr/bin/open");
+  open.args(["-n", "-g"]);
+  if let Some(n) = note {
+    open.arg("--env").arg(format!("{NOTE}={n}"));
+  }
 
-/// A folder not empty yet: macOS can leave entries out of a folder's listing while it is emptied
-/// (a delete once stopped "not empty" with 51 folders never visited).
-pub fn busy(e: &io::Error) -> bool {
-  e.kind() == io::ErrorKind::DirectoryNotEmpty
+  run(open.arg(app).arg("--args").args(args))
 }
 
 /// Runs `cmd` to its end; `InvalidData` with its stderr if it failed.
-fn run(cmd: &str, args: &[&OsStr]) -> io::Result<()> {
-  let out = Command::new(cmd).args(args).output()?;
+fn run(cmd: &mut Command) -> io::Result<()> {
+  let out = cmd.output()?;
+  let program = cmd.get_program().to_string_lossy();
   match out.status.success() {
     true => Ok(()),
-    false => Err(bad(format!("{cmd}: {}", String::from_utf8_lossy(&out.stderr).trim()))),
+    false => Err(bad(format!("{program}: {}", String::from_utf8_lossy(&out.stderr).trim()))),
   }
 }
 

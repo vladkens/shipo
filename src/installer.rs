@@ -27,13 +27,16 @@ const STAGING: &str = ".shipo-update-";
 
 /// Where `target`'s staging folders go: on Windows in the app's folder, which the setup writes
 /// into file by file and whose `.shipo-update-*` folders the uninstaller removes, so no other
-/// app's are reached; elsewhere beside the target, which the swap renames.
-pub fn home(os: Os, target: &Path) -> Option<&Path> {
+/// app's are reached; elsewhere beside the target, which the swap renames (the target itself when
+/// it has no parent).
+pub fn home(os: Os, target: &Path) -> &Path {
   match os {
-    Os::Windows => Some(target),
-    _ => target.parent(),
+    Os::Windows => target,
+    _ => target.parent().unwrap_or(target),
   }
 }
+
+// MARK: Job
 
 /// What an installer does: waits for `pid` to end, puts `new`, in the staging folder `dir`, in
 /// `target`'s place and starts it with `args`.
@@ -58,7 +61,7 @@ pub fn job(os: Os, args: &[OsString]) -> Option<Option<Job>> {
   let [pid, new, target, dash, args @ ..] = rest else { return Some(None) };
   let pid = pid.to_str().and_then(|p| p.parse().ok());
   let (new, target) = (PathBuf::from(new), PathBuf::from(target));
-  let home = home(os, &target).filter(|_| target.is_absolute());
+  let home = target.is_absolute().then(|| home(os, &target));
   let inside = home.and_then(|p| new.strip_prefix(p).ok());
   let inside = inside.filter(|r| r.components().count() > 1);
   let inside = inside.filter(|r| r.components().all(|c| matches!(c, Component::Normal(_))));
@@ -71,14 +74,13 @@ pub fn job(os: Os, args: &[OsString]) -> Option<Option<Job>> {
   })
 }
 
+// MARK: Install
+
 /// Runs the installer's `job` with the OS's calls and exits: 0 once the new app runs, 1 on a
 /// failure.
 pub fn run(job: &Job) -> ! {
   // Windows' wait holds the old process's handle from here, before the mark lets it quit.
-  #[cfg(windows)]
   let wait = imp::wait_exit(job.pid);
-  #[cfg(not(windows))]
-  let wait = imp::wait_exit;
   #[cfg(target_os = "macos")]
   let exchange = imp::exchange;
   #[cfg(not(target_os = "macos"))]
@@ -96,7 +98,7 @@ pub fn run(job: &Job) -> ! {
 /// What the installer does to the system: the OS's, or a test's.
 struct Seams<'a> {
   /// Whether the old app ended within the time ([imp::wait_exit]).
-  wait: &'a dyn Fn(u32, Duration) -> bool,
+  wait: &'a dyn Fn(Duration) -> bool,
   /// Two paths exchanged in one step: macOS' alone.
   exchange: Rename<'a>,
   rename: Rename<'a>,
@@ -114,7 +116,7 @@ type Start<'a> = &'a dyn Fn(&Path, &[OsString], Option<&str>) -> io::Result<()>;
 /// started again with the error in its note. What is left is removed either way.
 fn apply(os: Os, job: &Job, s: &Seams) -> io::Result<()> {
   fs::write(job.dir.join(MARK), std::process::id().to_string())?;
-  let done = match (s.wait)(job.pid, QUIT) {
+  let done = match (s.wait)(QUIT) {
     false => Err(error(io::ErrorKind::TimedOut, format!("the app didn't quit in {QUIT:?}"))),
     true => put(os, job, s).map_err(|e| {
       let e = error(e.kind(), format!("installing {}: {e}", job.target.display()));
@@ -150,30 +152,32 @@ fn put(os: Os, job: &Job, s: &Seams) -> io::Result<()> {
     };
   }
 
-  let (rename, back) = swap(os, &job.new, &job.target, s)?;
-  let undo = |e| also(e, back.iter().try_for_each(|(a, b)| retry(|| rename(a, b))));
-  (s.start)(&job.target, &job.args, None).map_err(undo)
+  let (undo, from, to) = swap(os, &job.new, &job.target, s)?;
+  (s.start)(&job.target, &job.args, None).map_err(|e| also(e, retry(|| undo(&from, &to))))
 }
 
 /// Swaps the app `new` in for `target` whole: on macOS in one exchange, which left `new` holding
 /// the old app; on Linux `target` linked to its [old] name and `new` renamed over it in one step,
 /// tried again while it may pass. Failing, the target is as it was (Linux' link is removed with
-/// what is left). What undoes it: the exchange or the rename, and its steps in order.
-fn swap<'a>(os: Os, new: &Path, target: &Path, s: &Seams<'a>) -> io::Result<Back<'a>> {
-  let (new, target) = (new.to_owned(), target.to_owned());
+/// what is left). What undoes it: the exchange again, or the [old] copy renamed back.
+fn swap<'a>(
+  os: Os,
+  new: &Path,
+  target: &Path,
+  s: &Seams<'a>,
+) -> io::Result<(Rename<'a>, PathBuf, PathBuf)> {
   if os == Os::Mac {
-    return (s.exchange)(&new, &target).map(|()| (s.exchange, vec![(new, target)]));
+    (s.exchange)(new, target)?;
+    return Ok((s.exchange, new.to_owned(), target.to_owned()));
   }
 
-  let old = old(&target);
+  let old = old(target);
   remove(&old)?;
-  fs::hard_link(&target, &old)?;
-  retry(|| (s.rename)(&new, &target))?;
-  Ok((s.rename, vec![(old, target)]))
+  fs::hard_link(target, &old)?;
+  retry(|| (s.rename)(new, target))?;
+  Ok((s.rename, old, target.to_owned()))
 }
 
-/// How a swap is undone: with what, the paths from and to in order.
-type Back<'a> = (Rename<'a>, Vec<(PathBuf, PathBuf)>);
 /// A rename, [fs::rename] or one that fails in tests.
 type Rename<'a> = &'a dyn Fn(&Path, &Path) -> io::Result<()>;
 
@@ -184,6 +188,8 @@ fn also(e: io::Error, undone: io::Result<()>) -> io::Error {
     Err(u) => io::Error::new(e.kind(), format!("{e}, and undoing it failed: {u}")),
   }
 }
+
+// MARK: Handshake
 
 /// Starts the installer with `spawn`, which gives what kills it, and waits up to `cap` for its
 /// [MARK] in `dir`; `TimedOut`, the installer killed, when none comes.
@@ -205,11 +211,13 @@ pub fn handshake<K: FnOnce()>(
   Ok(())
 }
 
+// MARK: Cleanup
+
 /// Removes what an installer stopped midway left of `target`: its [old] copy (none on Windows),
 /// and the staging folders in its [home] whose app and installer (the pid in its [MARK]) both
 /// ended (by `alive`).
 pub fn tidy(os: Os, target: &Path, alive: &dyn Fn(u32) -> bool) {
-  let all = home(os, target).and_then(|p| fs::read_dir(p).ok()).into_iter().flatten().flatten();
+  let all = fs::read_dir(home(os, target)).into_iter().flatten().flatten();
   for e in all {
     let name = e.file_name();
     let pid = name.to_str().and_then(|n| n.strip_prefix(STAGING)?.split('-').next()?.parse().ok());
@@ -232,6 +240,8 @@ fn old(target: &Path) -> PathBuf {
   name.push(".shipo-old");
   target.with_file_name(name)
 }
+
+// MARK: Files
 
 /// A new staging folder in `parent` that only the user reaches (0700 on Unix), removed with what
 /// it holds on drop. Made with `create_dir`, so one already there (a link planted in a shared
@@ -318,7 +328,7 @@ mod tests {
 
   /// The OS's renames, the exchange, an app that quits, a setup that installs, an app that starts.
   const SEAMS: Seams = Seams {
-    wait: &|_, _| true,
+    wait: &|_| true,
     exchange: &exchange,
     rename: &rename,
     setup: &|_| Ok(0),
@@ -452,13 +462,13 @@ mod tests {
       let (os, new, target) = apps(&root)[i];
       let (job, waited, started) =
         (install_job(&root, os, new, target), Cell::new(None), Started::default());
-      let wait = |pid, cap| {
+      let wait = |cap| {
         let mark = fs::read_to_string(job.dir.join(MARK)).unwrap_or_default();
-        waited.set(Some((pid, cap, mark == std::process::id().to_string())));
+        waited.set(Some((cap, mark == std::process::id().to_string())));
         true
       };
       apply(os, &job, &Seams { wait: &wait, start: &starts(&started, false), ..SEAMS }).unwrap();
-      assert_eq!(waited.get(), Some((7, QUIT, true)), "the mark, the installer's pid, first");
+      assert_eq!(waited.get(), Some((QUIT, true)), "the mark, the installer's pid, first");
       installed(&root, os, true, "installed");
       assert_eq!(*started.borrow(), [(job.target.clone(), vec![OsString::from("-x")], None)]);
       assert!(!old(&job.target).exists() && !job.dir.exists(), "{os:?}: what is left");
@@ -517,7 +527,7 @@ mod tests {
     let root = dir("stays");
     let [(os, new, target), _] = apps(&root);
     let (job, started) = (install_job(&root, os, new, target), Started::default());
-    let seams = Seams { wait: &|_, _| false, start: &starts(&started, false), ..SEAMS };
+    let seams = Seams { wait: &|_| false, start: &starts(&started, false), ..SEAMS };
     assert_eq!(apply(os, &job, &seams).unwrap_err().kind(), io::ErrorKind::TimedOut);
     installed(&root, os, false, "after the wait");
     assert!(started.borrow().is_empty() && !job.dir.exists());
