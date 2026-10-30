@@ -93,7 +93,7 @@ fn update() -> shipo::Result<()> {
 }
 ```
 
-The installer waits for the app to quit, puts the new version in and restarts it with the same arguments. If that fails, macOS and Linux put the old version back and Windows reruns the app in its folder; the next `finish` returns the error. `shipo::supported()` tells up front whether this install can update in place, and [examples/update.rs](examples/update.rs) is a console app that updates itself.
+The installer waits for the app to quit, puts the new version in and restarts it with the same arguments. If that fails, macOS and Linux put the old version back and Windows reruns the app in its folder; the next `finish` returns the error. `shipo::supported()` tells up front whether this install can update in place, [examples/update.rs](examples/update.rs) is a console app that updates itself, and [examples/egui](examples/egui) and [examples/gpui](examples/gpui) are window apps that do it with a button and a progress bar.
 
 A pre-release (a version with `-`, such as `1.3.0-rc.1`) doesn't update itself, not even to `1.3.0`: `check` returns `Error::Unsupported`, and testers install the next build by hand. A release does update to a newer pre-release the feed offers. So publish pre-releases with `gh release create --prerelease`, and the `releases/latest` feed stays on the last release.
 

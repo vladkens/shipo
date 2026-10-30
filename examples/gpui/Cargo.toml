@@ -1,0 +1,18 @@
+[package]
+name = "shipo-gpui"
+version = "0.1.0"
+edition = "2024"
+publish = false
+# Where `shipo release --tag` links the feed's files: your app's repository.
+repository = "https://github.com/me/hello"
+
+[dependencies]
+futures = { version = "0.3.34", default-features = false, features = ["std"] }
+gpui-kit = "0.8.1"
+shipo = { version = "0.0.1", path = "../..", default-features = false }
+
+[package.metadata.shipo]
+id = "dev.shipo.example.gpui"
+name = "ShipoGpui"
+icon = "icon.png"
+comment = "Updates itself from a shipo feed"
