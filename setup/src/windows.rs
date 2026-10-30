@@ -1,8 +1,8 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/shipo
-//! The setup's run on Windows: the arch checked, the app installed or uninstalled, the Uninstall
-//! key and the launch-at-login values in the registry, the Start menu shortcut by `IShellLinkW`,
-//! a message box for an error unless `/S`; files replaced and removed by the Win32 calls whose
-//! failure on a running exe is certain.
+//! The setup's run on Windows: the arch checked, the app installed or uninstalled, through the
+//! wizard (`wizard.rs`) unless `/S`, the Uninstall key and the launch-at-login values in the
+//! registry, the shortcuts by `IShellLinkW`, a message box for an error unless `/S`; files replaced
+//! and removed by the Win32 calls whose failure on a running exe is certain.
 
 use std::ffi::c_void;
 use std::os::windows::process::CommandExt;
@@ -24,7 +24,7 @@ use windows_sys::Win32::System::Diagnostics::Debug::{
 };
 use windows_sys::Win32::System::Environment::GetCommandLineW;
 use windows_sys::Win32::System::LibraryLoader::{
-  LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories,
+  GetModuleHandleW, GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories,
 };
 use windows_sys::Win32::System::Registry::{
   HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SZ,
@@ -34,29 +34,42 @@ use windows_sys::Win32::System::Registry::{
 use windows_sys::Win32::System::Threading::{
   CREATE_DEFAULT_ERROR_MODE, GetCurrentProcess, IsWow64Process2,
 };
-use windows_sys::Win32::UI::Shell::{FOLDERID_Programs, SHGetKnownFolderPath, ShellLink};
-use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+use windows_sys::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2;
+use windows_sys::Win32::UI::Shell::{
+  FOLDERID_Desktop, FOLDERID_Programs, SHGetKnownFolderPath, ShellLink,
+};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+  MB_ICONERROR, MB_OK, MessageBoxW, SetProcessDPIAware,
+};
 use windows_sys::core::{GUID, HRESULT, PWSTR};
 
 use super::payload::{self, Info};
 use super::{
-  Args, RETRY_OWN, UNINSTALLER, Value, folder, guid, install, own, placeholder, previous, remove,
-  retry, uninstaller, values,
+  Args, RETRY_OWN, Step, UNINSTALLER, Value, folder, guid, install, own, placeholder, previous,
+  remove, retry, same, uninstaller, values, wizard,
 };
 
 const UNINSTALL: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
 const RUN: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const APPROVED: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
 
-/// Runs the setup: 0 when it installed or uninstalled, 2 when not, with a message unless `/S`.
+/// Runs the setup: 0 when it installed or uninstalled, 1 when the user cancelled, 2 when it
+/// failed, with a message unless `/S`.
 pub fn main() -> ExitCode {
   // DLLs loaded later only from System32, never the setup's folder (Downloads), where one planted
   // would run as the user; the imports' own by the link's /DEPENDENTLOADFLAG (build.rs). No
-  // "No disk" box of Windows' own for a drive gone, which a silent update must never show.
+  // "No disk" box of Windows' own for a drive gone, which a silent update must never show. Sharp
+  // text on every screen, so per-monitor DPI before any window.
   // SAFETY: process-wide flags, set before anything loads.
   unsafe {
     SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
+    // Windows 10 1703 and later; before it, the system's DPI.
+    type Aware = unsafe extern "system" fn(isize) -> i32;
+    match user32::<Aware>(c"SetProcessDpiAwarenessContext") {
+      Some(aware) => aware(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 as isize),
+      None => SetProcessDPIAware(),
+    };
   }
 
   // SAFETY: the process's own command line, NUL-terminated, alive as long as the process.
@@ -70,7 +83,11 @@ pub fn main() -> ExitCode {
 
   let args = Args::parse(env::args_os().skip(1), &raw);
   let mut title = "Setup".to_string();
-  let Err(e) = run(&args, &mut title) else { return ExitCode::SUCCESS };
+  let e = match run(&args, &mut title) {
+    Ok(code) => return code,
+    Err(e) => e,
+  };
+
   if !args.silent {
     message(&title, &e);
   }
@@ -87,7 +104,7 @@ fn message(title: &str, e: &io::Error) {
 
 /// The payload of this exe installed, or uninstalled when it holds no files; `title` the
 /// message's, once the app's name is known.
-fn run(args: &Args, title: &mut String) -> io::Result<()> {
+fn run(args: &Args, title: &mut String) -> io::Result<ExitCode> {
   let path = env::current_exe()?;
   let exe = retry(RETRY_OWN, || fs::read(&path))?;
   let fields = payload::fields(&placeholder());
@@ -106,9 +123,29 @@ fn run(args: &Args, title: &mut String) -> io::Result<()> {
 
   if uninstall {
     let dir = path.parent().ok_or_else(|| io::Error::other("the uninstaller is in no folder"))?;
+    // The copy it moves to the temp folder, started again, would take that folder for the app's.
+    let key = format!(r"{UNINSTALL}\{}", info.app_id);
+    if !named || text(&key, "InstallLocation").is_some_and(|l| !l.is_empty() && !same(&l, dir)) {
+      let n = &info.name;
+      return Err(io::Error::other(format!(
+        "This is not {n}'s Uninstall.exe in its install folder: remove {n} in Settings › Apps."
+      )));
+    }
+
     // Explorer starts it in its folder, which then can't go.
     let _ = env::set_current_dir(env::temp_dir());
-    return uninstall_from(dir, &path, &info);
+    let work = |step: Step| {
+      step(&format!("Remove: {}", dir.display()), 0.0);
+      uninstall_from(dir, &path, &info)
+    };
+
+    return match args.silent {
+      true => work(&|_, _| {}).map(|()| ExitCode::SUCCESS),
+      false => match wizard::uninstall(title, &info.name, dir, work) {
+        None => Ok(ExitCode::from(1)),
+        Some(done) => done.map(|()| ExitCode::SUCCESS),
+      },
+    };
   }
 
   let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "x64" };
@@ -119,7 +156,9 @@ fn run(args: &Args, title: &mut String) -> io::Result<()> {
   // An update, `/S` with no `/D=`, goes where the app is, if the key holds a [folder].
   let key = format!(r"{UNINSTALL}\{}", info.app_id);
   let location = text(&key, "InstallLocation");
-  let dir = match (args.folder()?, location.as_deref().and_then(folder)) {
+  let given = args.folder()?;
+  let update = given.is_none() && location.as_deref().and_then(folder).is_some();
+  let dir = match (given, location.as_deref().and_then(folder)) {
     (Some(dir), _) | (None, Some(dir)) => dir,
     (None, None) => {
       let local = env::var_os("LOCALAPPDATA").ok_or_else(|| io::Error::other("no LOCALAPPDATA"))?;
@@ -129,33 +168,58 @@ fn run(args: &Args, title: &mut String) -> io::Result<()> {
 
   // The placeholder's magic, read from this exe: a literal would put a second one in it.
   let magic = &placeholder()[..payload::MAGIC.len()];
-  let licensed = previous(&dir, &info, location.as_deref(), magic)? == Some(true);
   files.push((UNINSTALLER.into(), uninstaller(stub, fields[0], &info)?));
-  let exe = dir.join(format!("{}.exe", info.name));
-  let lnk = || programs().map(|p| p.join(format!("{}.lnk", info.name)));
-  install(
-    &dir,
-    &files,
-    licensed,
-    // Written whole, so no value of an NSIS install before stays.
-    |size| delete(&key).and_then(|()| set(&key, &values(&info, &dir, size.div_ceil(1024)))),
-    || shortcut(&lnk()?, &exe, &dir, &info.comment),
-  )?;
+  let lnk = format!("{}.lnk", info.name);
+  let work = |dir: &Path, step: Step| {
+    let licensed = previous(dir, &info, location.as_deref(), magic)? == Some(true);
+    let exe = dir.join(format!("{}.exe", info.name));
+    install(
+      dir,
+      &files,
+      licensed,
+      // Written whole, so no value of an NSIS install before stays.
+      |size| delete(&key).and_then(|()| set(&key, &values(&info, dir, size.div_ceil(1024)))),
+      || {
+        let lnk = known(&FOLDERID_Programs)?.join(&lnk);
+        step(&format!("Create shortcut: {}", lnk.display()), 1.0);
+        shortcut(&lnk, &exe, dir, &info.comment)
+      },
+      &|name, part| step(&format!("Extract: {name}"), part),
+    )
+  };
+
+  if args.silent {
+    return work(&dir, &|_, _| {}).map(|()| ExitCode::SUCCESS);
+  }
+
+  let size = files.iter().map(|(_, d)| d.len() as u64).sum();
+  let Some(done) = wizard::install(title, &info.name, (&dir, update), size, work)? else {
+    return Ok(ExitCode::from(1));
+  };
+
+  let exe = done.dir.join(format!("{}.exe", info.name));
+  if done.desktop {
+    // Never over a shortcut of that name to anything else.
+    let lnk = known(&FOLDERID_Desktop).ok().map(|d| d.join(&lnk));
+    if let Some(lnk) = lnk.filter(|l| !l.exists() || ours(l, &exe)) {
+      let _ = shortcut(&lnk, &exe, &done.dir, &info.comment);
+    }
+  }
 
   // Installed, whether the app starts or not.
-  if !args.silent
+  if done.run
     && let Err(e) =
-      Command::new(&exe).current_dir(&dir).creation_flags(CREATE_DEFAULT_ERROR_MODE).spawn()
+      Command::new(&exe).current_dir(&done.dir).creation_flags(CREATE_DEFAULT_ERROR_MODE).spawn()
   {
     message(title, &e);
   }
 
-  Ok(())
+  Ok(ExitCode::SUCCESS)
 }
 
 /// Removes the app of `info` from `dir`, the uninstaller at `path` moved out first, where it can be
 /// while it runs, so the folder can go: to the temp folder, or the install folder's parent when
-/// that is on another volume; then its shortcut, its launch at login and its key, each tried
+/// that is on another volume; then its shortcuts, its launch at login and its key, each tried
 /// however the others went, so no key is left of an app gone. The app's data stays.
 fn uninstall_from(dir: &Path, path: &Path, info: &Info) -> io::Result<()> {
   let name = format!("{}-uninstall-{}.exe", info.name, std::process::id());
@@ -163,13 +227,22 @@ fn uninstall_from(dir: &Path, path: &Path, info: &Info) -> io::Result<()> {
   // Never over a file there: std's rename on Windows replaces one.
   let moved = |d: &PathBuf| !d.join(&name).exists() && fs::rename(path, d.join(&name)).is_ok();
   let removed = remove(dir, info, || away.iter().any(moved));
-  if dir.join(format!("{}.exe", info.name)).exists() {
+  let exe = dir.join(format!("{}.exe", info.name));
+  if exe.exists() {
     return removed;
   }
 
-  let lnk = programs().and_then(|p| match fs::remove_file(p.join(format!("{}.lnk", info.name))) {
-    Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
-    _ => Ok(()),
+  // The desktop's only when it is the app's: the user may have one of that name to anything else.
+  let lnks = [(FOLDERID_Programs, false), (FOLDERID_Desktop, true)].map(|(id, check)| {
+    let lnk = known(&id)?.join(format!("{}.lnk", info.name));
+    if check && !ours(&lnk, &exe) {
+      return Ok(());
+    }
+
+    match fs::remove_file(&lnk) {
+      Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+      _ => Ok(()),
+    }
   });
 
   let id = wide(&info.id);
@@ -180,7 +253,7 @@ fn uninstall_from(dir: &Path, path: &Path, info: &Info) -> io::Result<()> {
   });
 
   let key = delete(&format!(r"{UNINSTALL}\{}", info.app_id));
-  [removed, lnk].into_iter().chain(values).chain([key]).collect()
+  [removed].into_iter().chain(lnks).chain(values).chain([key]).collect()
 }
 
 /// Whether this exe's arch runs natively, or an x64 one on arm64, which emulates it.
@@ -327,17 +400,50 @@ fn gone(code: u32) -> io::Result<()> {
 
 // MARK: Shortcut
 
-/// The current user's Start menu programs folder.
-fn programs() -> io::Result<PathBuf> {
+/// The current user's known folder `id`: the Start menu's programs, the desktop.
+fn known(id: &GUID) -> io::Result<PathBuf> {
   let mut path: PWSTR = null_mut();
   // SAFETY: the path the shell allocates, freed once read.
   unsafe {
-    hr(SHGetKnownFolderPath(&FOLDERID_Programs, 0, 0 as HANDLE, &mut path))?;
-    let len = (0..).take_while(|&i| *path.add(i) != 0).count();
-    let dir = String::from_utf16_lossy(std::slice::from_raw_parts(path, len));
+    hr(SHGetKnownFolderPath(id, 0, 0 as HANDLE, &mut path))?;
+    let dir = pwstr(path);
     CoTaskMemFree(path as *const c_void);
     Ok(dir.into())
   }
+}
+
+/// The NUL-terminated `p` as a string.
+///
+/// # Safety
+/// `p` points to a NUL-terminated UTF-16 string.
+pub unsafe fn pwstr(p: PWSTR) -> String {
+  // SAFETY: as the caller says.
+  unsafe {
+    let len = (0..).take_while(|&i| *p.add(i) != 0).count();
+    String::from_utf16_lossy(std::slice::from_raw_parts(p, len))
+  }
+}
+
+/// The export `name` of user32 as `F`, none on a Windows before it; user32 is loaded already.
+///
+/// # Safety
+/// `F` is the export's type.
+pub unsafe fn user32<F: Copy>(name: &std::ffi::CStr) -> Option<F> {
+  let lib = wide("user32.dll");
+  // SAFETY: a NUL-terminated name; the export as the caller's type, a function pointer as FARPROC.
+  unsafe {
+    let f = GetProcAddress(GetModuleHandleW(lib.as_ptr()), name.as_ptr().cast())?;
+    Some(std::mem::transmute_copy(&f))
+  }
+}
+
+/// The method at `index` of the COM object `obj`'s vtable, as `F`.
+///
+/// # Safety
+/// `obj` is a live COM object and `F` that method's type.
+pub unsafe fn method<F: Copy>(obj: *mut c_void, index: usize) -> F {
+  // SAFETY: a live object, whose first field is its vtable; F is the method's type.
+  unsafe { std::mem::transmute_copy(&*(*(obj as *const *const usize)).add(index)) }
 }
 
 const IID_SHELL_LINK: GUID = GUID::from_u128(0x000214F9_0000_0000_C000_000000000046);
@@ -351,12 +457,6 @@ fn shortcut(lnk: &Path, target: &Path, dir: &Path, comment: &str) -> io::Result<
   type Icon = unsafe extern "system" fn(*mut c_void, *const u16, i32) -> HRESULT;
   type Query = unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT;
   type Save = unsafe extern "system" fn(*mut c_void, *const u16, i32) -> HRESULT;
-
-  /// The method at `index` of the COM object `obj`'s vtable, as `F`.
-  unsafe fn method<F: Copy>(obj: *mut c_void, index: usize) -> F {
-    // SAFETY: a live object, whose first field is its vtable; F is the method's type.
-    unsafe { std::mem::transmute_copy(&*(*(obj as *const *const usize)).add(index)) }
-  }
 
   // INFOTIPSIZE: a description of up to 1023 units and its NUL, cut before a surrogate pair's half.
   let mut tip: Vec<u16> = comment.encode_utf16().take(1023).collect();
@@ -389,6 +489,36 @@ fn shortcut(lnk: &Path, target: &Path, dir: &Path, comment: &str) -> io::Result<
   }
 }
 
+/// Whether the shortcut `lnk` points to `exe`, read by `IShellLinkW`.
+fn ours(lnk: &Path, exe: &Path) -> bool {
+  type Unary = unsafe extern "system" fn(*mut c_void) -> u32;
+  type Query = unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT;
+  type Load = unsafe extern "system" fn(*mut c_void, *const u16, u32) -> HRESULT;
+  type GetPath = unsafe extern "system" fn(*mut c_void, *mut u16, i32, *mut c_void, u32) -> HRESULT;
+  let lnk = wide_path(lnk);
+  let (mut link, mut file, mut buf) = (null_mut(), null_mut(), vec![0u16; 32768]);
+  // SAFETY: as [shortcut]'s; IPersistFile's 5 Load, IShellLinkW's 3 GetPath into `buf`.
+  unsafe {
+    CoInitializeEx(null(), COINIT_APARTMENTTHREADED as u32);
+    if CoCreateInstance(&ShellLink, null_mut(), CLSCTX_INPROC_SERVER, &IID_SHELL_LINK, &mut link)
+      < 0
+    {
+      return false;
+    }
+
+    let mut read = method::<Query>(link, 0)(link, &IID_PERSIST_FILE, &mut file) >= 0;
+    if read {
+      read = method::<Load>(file, 5)(file, lnk.as_ptr(), 0) >= 0;
+      method::<Unary>(file, 2)(file);
+    }
+
+    let len = buf.len() as i32;
+    read = read && method::<GetPath>(link, 3)(link, buf.as_mut_ptr(), len, null_mut(), 0) >= 0;
+    method::<Unary>(link, 2)(link);
+    read && pwstr(buf.as_mut_ptr()).eq_ignore_ascii_case(&exe.display().to_string())
+  }
+}
+
 fn hr(code: HRESULT) -> io::Result<()> {
   match code {
     0.. => Ok(()),
@@ -396,7 +526,7 @@ fn hr(code: HRESULT) -> io::Result<()> {
   }
 }
 
-fn wide(s: &str) -> Vec<u16> {
+pub fn wide(s: &str) -> Vec<u16> {
   s.encode_utf16().chain([0]).collect()
 }
 

@@ -4,7 +4,7 @@
 //! packer stamps its icon, version and manifest and appends the payload ([payload], the packer's
 //! `src/cli/payload.rs`). A package of its own, so the `shipo` crate's binary stays the packer.
 //! This file is what holds on any host: the arguments, the files written and removed, the Uninstall
-//! key's values; `windows.rs` the registry, the shortcut and the run.
+//! key's values; `windows.rs` the registry, the shortcuts and the run, `wizard.rs` the wizard.
 //!
 //! The idea of a stub with a placeholder the packer patches is Velopack's (MIT,
 //! <https://github.com/velopack/velopack/blob/develop/src/bins/src/setup.rs>); the code is ours.
@@ -17,6 +17,8 @@
 mod payload;
 #[cfg(windows)]
 mod windows;
+#[cfg(windows)]
+mod wizard;
 
 use std::ffi::OsString;
 #[cfg(not(windows))]
@@ -93,9 +95,10 @@ impl Args {
 /// `dir` without a trailing separator if it is an absolute folder below a drive's root (`C:\…`,
 /// `\\?\C:\…`) or a share's (`\\server\share\…`, `\\?\UNC\server\share\…`), never the root
 /// itself, which an uninstall would empty: no part of it empty, `.`, `..`, or dots and spaces
-/// alone, which Windows drops or climbs by.
+/// alone, which Windows drops or climbs by. Its `/` made `\`, so the key holds it as Windows does.
 fn folder(dir: &str) -> Option<PathBuf> {
-  let dir = dir.trim_end_matches(['\\', '/']);
+  let dir = dir.replace('/', "\\");
+  let dir = dir.trim_end_matches('\\');
   let prefixed = |p: &str| dir.get(..p.len()).is_some_and(|h| h.eq_ignore_ascii_case(p));
   let (parts, least) = match [r"\\?\UNC\", r"\\.\UNC\"].into_iter().find(|p| prefixed(p)) {
     Some(p) => (&dir[p.len()..], 3),
@@ -106,7 +109,7 @@ fn folder(dir: &str) -> Option<PathBuf> {
     },
   };
 
-  let parts: Vec<_> = parts.split(['\\', '/']).collect();
+  let parts: Vec<_> = parts.split('\\').collect();
   let named = |p: &&str| !p.trim_matches(['.', ' ']).is_empty();
   (parts.len() >= least && parts.iter().all(named)).then(|| dir.into())
 }
@@ -182,6 +185,18 @@ fn unsigned(exe: &mut [u8]) {
   exe[opt + 64..opt + 68].copy_from_slice(&sum.to_le_bytes());
 }
 
+/// `n` bytes as NSIS shows a size: KB, MB, GB or TB, one decimal.
+fn bytes(n: u64) -> String {
+  let mut size = n as f64 / 1024.0;
+  let mut unit = 0;
+  while size >= 1024.0 && unit < 3 {
+    size /= 1024.0;
+    unit += 1;
+  }
+
+  format!("{size:.1} {}", ["KB", "MB", "GB", "TB"][unit])
+}
+
 /// `op` until it succeeds, tried again for `within`; its last error then.
 fn retry<T>(within: Duration, mut op: impl FnMut() -> io::Result<T>) -> io::Result<T> {
   let end = Instant::now() + within;
@@ -195,16 +210,33 @@ fn retry<T>(within: Duration, mut op: impl FnMut() -> io::Result<T>) -> io::Resu
   }
 }
 
+/// What the install tells as it goes: the file it writes and the share of all bytes written, 0 to
+/// 1.
+type Step<'a> = &'a dyn Fn(&str, f32);
+
 /// Writes `files` into `dir`, made if missing, the app's exe first: each written beside as a new
 /// `.<name>.shipo-new-<pid>` and renamed over the old one, tried again while it is in use. Gives
 /// their size.
-fn put(dir: &Path, files: &[(String, Vec<u8>)]) -> io::Result<u64> {
+fn put(dir: &Path, files: &[(String, Vec<u8>)], step: Step) -> io::Result<u64> {
   fs::create_dir_all(dir)?;
+  let total = files.iter().map(|(_, d)| d.len() as u64).sum::<u64>().max(1) as f32;
   let mut size = 0;
   for (name, data) in files {
     let part = dir.join(format!(".{name}.shipo-new-{}", std::process::id()));
     let path = dir.join(name);
-    if let Err(e) = fs::File::create_new(&part).and_then(|mut f| f.write_all(data)) {
+    step(name, size as f32 / total);
+    // By the MiB, so a large exe moves the bar.
+    let written = fs::File::create_new(&part).and_then(|mut f| {
+      for chunk in data.chunks(1 << 20) {
+        f.write_all(chunk)?;
+        size += chunk.len() as u64;
+        step(name, size as f32 / total);
+      }
+
+      Ok(())
+    });
+
+    if let Err(e) = written {
       let _ = fs::remove_file(&part);
       return Err(e);
     }
@@ -213,8 +245,6 @@ fn put(dir: &Path, files: &[(String, Vec<u8>)]) -> io::Result<u64> {
       let _ = fs::remove_file(&part);
       return Err(in_use(&path, e));
     }
-
-    size += data.len() as u64;
   }
 
   Ok(size)
@@ -243,9 +273,7 @@ fn previous(
     own(&data, payload::fields(found)).ok().map(|(info, ..)| info)
   });
 
-  let ours = |l: &str| {
-    Path::new(l.trim_end_matches(['\\', '/'])).as_os_str().eq_ignore_ascii_case(dir.as_os_str())
-  };
+  let ours = |l: &str| same(l, dir);
   match theirs {
     Some(theirs) if theirs.app_id == info.app_id => Ok(Some(theirs.license)),
     None if location.is_some_and(ours) => Ok(Some(true)),
@@ -257,15 +285,16 @@ fn previous(
 /// Writes `files` into `dir` by [put], `LICENSE.txt` removed when the install before wrote one
 /// (`licensed`) and this one doesn't; then the Uninstall key by `key` of their size: an install
 /// that fails before it leaves no key, one with its files always has one. The shortcut last, by
-/// `shortcut`, its failure (a folder past MAX_PATH) not the install's.
+/// `shortcut`, its failure (a folder past MAX_PATH) not the install's. `step` as [put] has it.
 fn install(
   dir: &Path,
   files: &[(String, Vec<u8>)],
   licensed: bool,
   key: impl FnOnce(u64) -> io::Result<()>,
   shortcut: impl FnOnce() -> io::Result<()>,
+  step: Step,
 ) -> io::Result<()> {
-  let size = put(dir, files)?;
+  let size = put(dir, files, step)?;
   let license = dir.join(LICENSE);
   if licensed && !files.iter().any(|(n, _)| n == LICENSE) && license.is_file() {
     retry(RETRY, || delete_file(&license))?;
@@ -321,6 +350,29 @@ fn remove(dir: &Path, info: &Info, moved: impl FnOnce() -> bool) -> io::Result<(
 
   let _ = fs::remove_dir(dir);
   done
+}
+
+/// Whether the folder `l`, as the Uninstall key holds it, is `dir`: by their text, case, `/`, a
+/// trailing separator and `\\?\` aside, else as the file system resolves them (a mapped drive,
+/// 8.3).
+fn same(l: &str, dir: &Path) -> bool {
+  let plain = |s: &str| {
+    let s = s.replace('/', "\\");
+    let s = s.trim_end_matches('\\');
+    let prefixed = |p: &str| s.get(..p.len()).is_some_and(|h| h.eq_ignore_ascii_case(p));
+    if prefixed(r"\\?\UNC\") || prefixed(r"\\.\UNC\") {
+      format!(r"\\{}", &s[8..])
+    } else if prefixed(r"\\?\") || prefixed(r"\\.\") {
+      s[4..].to_string()
+    } else {
+      s.to_string()
+    }
+  };
+
+  // Only an absolute folder resolves: a relative one would by the current folder.
+  let real = |p: &Path| fs::canonicalize(p).ok();
+  plain(l).eq_ignore_ascii_case(&plain(&dir.to_string_lossy()))
+    || folder(l).and_then(|l| real(&l)).is_some_and(|l| real(dir) == Some(l))
 }
 
 fn in_use(path: &Path, e: io::Error) -> io::Error {
@@ -395,7 +447,7 @@ mod tests {
 
     let folder = |dir: &str| Args { dir: Some(dir.into()), ..Args::default() }.folder();
     for ok in [r"C:\Apps", "d:/apps", r"\\server\share\Apps"] {
-      assert_eq!(folder(ok).unwrap(), Some(PathBuf::from(ok)), "{ok}");
+      assert_eq!(folder(ok).unwrap(), Some(PathBuf::from(ok.replace('/', "\\"))), "{ok}");
     }
 
     // A root never: an uninstall would empty it.
@@ -416,6 +468,7 @@ mod tests {
       (r"\\?\UNC\server\share\Apps\", r"\\?\UNC\server\share\Apps"),
       (r"\\.\unc\server\share\Apps", r"\\.\unc\server\share\Apps"),
       (r"C:\.Apps\a.b", r"C:\.Apps\a.b"),
+      ("C:/Apps/Hello/", r"C:\Apps\Hello"),
     ];
     for (dir, want) in oks {
       assert_eq!(folder(dir), Some(PathBuf::from(want)), "{dir}");
@@ -428,6 +481,31 @@ mod tests {
     for dir in roots.into_iter().chain(dots).chain(other) {
       assert_eq!(folder(dir), None, "{dir}");
     }
+  }
+
+  #[test]
+  fn same_folders() {
+    let dir = Path::new(r"C:\Apps\Hello");
+    assert!(same(r"C:\Apps\Hello", dir) && same(r"c:\apps\hello\", dir));
+    assert!(same("C:/Apps/Hello/", dir) && same(r"\\?\C:\Apps\Hello", dir));
+    assert!(same(r"\\?\UNC\srv\share\x", Path::new(r"\\srv\share\x")));
+    assert!(same(r"\\.\C:\Apps\Hello", dir));
+    assert!(same(r"\\.\UNC\srv\share\x", Path::new(r"\\srv\share\x")));
+    // A relative folder never matches by the current folder.
+    let here = std::env::current_dir().unwrap();
+    assert!(!same(".", &here) && !same("", &here));
+    assert!(!same(r"C:\Users\Me\AppData\Local\Temp", dir) && !same(r"C:\Apps", dir));
+  }
+
+  #[test]
+  fn sizes() {
+    let cases = [(0, "0.0 KB"), (1536, "1.5 KB"), (12 << 20, "12.0 MB"), (5 << 40, "5.0 TB")];
+    for (n, want) in cases {
+      assert_eq!(bytes(n), want);
+    }
+
+    assert_eq!(bytes(1023 << 20), "1023.0 MB");
+    assert_eq!(bytes(3 << 30), "3.0 GB");
   }
 
   #[test]
@@ -499,27 +577,28 @@ mod tests {
       Err(io::Error::other("past MAX_PATH"))
     };
 
-    install(&dir, &files, false, key, lnk).unwrap();
+    install(&dir, &files, false, key, lnk, &|_, _| {}).unwrap();
     assert_eq!(*steps.borrow(), ["key 2 true", "shortcut"]);
 
     // An install before wrote a licence this one doesn't: it goes; a folder of its name stays.
     fs::write(dir.join(LICENSE), "MIT").unwrap();
-    install(&dir, &files, true, |_| Ok(()), || Ok(())).unwrap();
+    install(&dir, &files, true, |_| Ok(()), || Ok(()), &|_, _| {}).unwrap();
     assert_eq!(listed(&dir), ["Hello.exe"]);
     fs::create_dir(dir.join(LICENSE)).unwrap();
-    install(&dir, &files, true, |_| Ok(()), || Ok(())).unwrap();
+    install(&dir, &files, true, |_| Ok(()), || Ok(()), &|_, _| {}).unwrap();
     assert_eq!(listed(&dir), ["Hello.exe", LICENSE]);
 
     // A key that fails fails the install, before the shortcut.
     steps.borrow_mut().clear();
     let no_key = |_| Err(io::Error::other("no key"));
-    let e = install(&dir, &files, false, no_key, || panic!("shortcut"));
+    let e = install(&dir, &files, false, no_key, || panic!("shortcut"), &|_, _| {});
     assert_eq!(e.unwrap_err().to_string(), "no key");
 
     // Files that can't be written make no key.
     let file = tmp().join("file");
     fs::write(&file, "").unwrap();
-    let e = install(&file.join("x"), &files, false, |_| panic!("key"), || panic!("lnk"));
+    let e =
+      install(&file.join("x"), &files, false, |_| panic!("key"), || panic!("lnk"), &|_, _| {});
     assert!(e.is_err());
   }
 
@@ -585,9 +664,15 @@ mod tests {
     let licensed = Info { license: true, ..info() };
     let files = [("Hello.exe", "v1"), (LICENSE, "MIT"), (UNINSTALLER, "un")];
     let files: Vec<_> = files.iter().map(|(n, d)| (n.to_string(), d.as_bytes().to_vec())).collect();
-    assert_eq!(put(&dir, &files).unwrap(), 7);
+    let steps = std::cell::RefCell::new(vec![]);
+    let step = |name: &str, part: f32| steps.borrow_mut().push((name.to_string(), part * 7.0));
+    assert_eq!(put(&dir, &files, &step).unwrap(), 7);
+    // Each file as it starts and as each MiB of it is written, by the share of all bytes.
+    let want = [("Hello.exe", 0.0), ("Hello.exe", 2.0), (LICENSE, 2.0), (LICENSE, 5.0)];
+    let want = want.into_iter().chain([(UNINSTALLER, 5.0), (UNINSTALLER, 7.0)]);
+    assert_eq!(*steps.borrow(), want.map(|(n, p)| (n.to_string(), p)).collect::<Vec<_>>());
     assert_eq!(listed(&dir), ["Hello.exe", LICENSE, UNINSTALLER]);
-    assert_eq!(put(&dir, &[("Hello.exe".into(), b"v2".to_vec())]).unwrap(), 2);
+    assert_eq!(put(&dir, &[("Hello.exe".into(), b"v2".to_vec())], &|_, _| {}).unwrap(), 2);
     assert_eq!(fs::read(dir.join("Hello.exe")).unwrap(), b"v2");
 
     // The staging folders go, the app's data and what a `/D=` shares stay.
@@ -598,7 +683,7 @@ mod tests {
 
     // An uninstaller that can't move out stays, with its folder.
     fs::remove_file(dir.join("data.txt")).unwrap();
-    put(&dir, &files).unwrap();
+    put(&dir, &files, &|_, _| {}).unwrap();
     remove(&dir, &licensed, || false).unwrap();
     assert_eq!(listed(&dir), [UNINSTALLER]);
     remove(&dir, &licensed, || true).unwrap();
@@ -606,7 +691,7 @@ mod tests {
 
     // A folder shared by `/D=`: another app's licence and uninstaller, and a folder named as a
     // file, stay; a staging file goes as a file.
-    put(&dir, &files[..1]).unwrap();
+    put(&dir, &files[..1], &|_, _| {}).unwrap();
     fs::write(dir.join(LICENSE), "theirs").unwrap();
     fs::create_dir_all(dir.join("Uninstall.exe/kept")).unwrap();
     fs::write(dir.join(".shipo-update-file"), "").unwrap();
@@ -615,7 +700,7 @@ mod tests {
     fs::remove_dir_all(&dir).unwrap();
 
     // An exe in use stops it before anything changed (a folder stands for one here).
-    put(&dir, &files).unwrap();
+    put(&dir, &files, &|_, _| {}).unwrap();
     fs::remove_file(dir.join("Hello.exe")).unwrap();
     fs::create_dir_all(dir.join("Hello.exe/x")).unwrap();
     assert!(remove(&dir, &licensed, || panic!("moved")).is_err());
