@@ -24,7 +24,7 @@ use windows_sys::Win32::System::Diagnostics::Debug::{
 };
 use windows_sys::Win32::System::Environment::GetCommandLineW;
 use windows_sys::Win32::System::LibraryLoader::{
-  LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories,
+  GetModuleHandleW, GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories,
 };
 use windows_sys::Win32::System::Registry::{
   HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SZ,
@@ -34,19 +34,19 @@ use windows_sys::Win32::System::Registry::{
 use windows_sys::Win32::System::Threading::{
   CREATE_DEFAULT_ERROR_MODE, GetCurrentProcess, IsWow64Process2,
 };
-use windows_sys::Win32::UI::HiDpi::{
-  DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
-};
+use windows_sys::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2;
 use windows_sys::Win32::UI::Shell::{
   FOLDERID_Desktop, FOLDERID_Programs, SHGetKnownFolderPath, ShellLink,
 };
-use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+  MB_ICONERROR, MB_OK, MessageBoxW, SetProcessDPIAware,
+};
 use windows_sys::core::{GUID, HRESULT, PWSTR};
 
 use super::payload::{self, Info};
 use super::{
   Args, RETRY_OWN, Step, UNINSTALLER, Value, folder, guid, install, own, placeholder, previous,
-  remove, retry, uninstaller, values, wizard,
+  remove, retry, same, uninstaller, values, wizard,
 };
 
 const UNINSTALL: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
@@ -64,7 +64,12 @@ pub fn main() -> ExitCode {
   unsafe {
     SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
-    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    // Windows 10 1703 and later; before it, the system's DPI.
+    type Aware = unsafe extern "system" fn(isize) -> i32;
+    match user32::<Aware>(c"SetProcessDpiAwarenessContext") {
+      Some(aware) => aware(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 as isize),
+      None => SetProcessDPIAware(),
+    };
   }
 
   // SAFETY: the process's own command line, NUL-terminated, alive as long as the process.
@@ -118,6 +123,15 @@ fn run(args: &Args, title: &mut String) -> io::Result<ExitCode> {
 
   if uninstall {
     let dir = path.parent().ok_or_else(|| io::Error::other("the uninstaller is in no folder"))?;
+    // The copy it moves to the temp folder, started again, would take that folder for the app's.
+    let key = format!(r"{UNINSTALL}\{}", info.app_id);
+    if !named || text(&key, "InstallLocation").is_some_and(|l| !same(&l, dir)) {
+      let n = &info.name;
+      return Err(io::Error::other(format!(
+        "This is not {n}'s Uninstall.exe in its install folder: remove {n} in Settings › Apps."
+      )));
+    }
+
     // Explorer starts it in its folder, which then can't go.
     let _ = env::set_current_dir(env::temp_dir());
     let work = |step: Step| {
@@ -407,6 +421,19 @@ pub unsafe fn pwstr(p: PWSTR) -> String {
   unsafe {
     let len = (0..).take_while(|&i| *p.add(i) != 0).count();
     String::from_utf16_lossy(std::slice::from_raw_parts(p, len))
+  }
+}
+
+/// The export `name` of user32 as `F`, none on a Windows before it; user32 is loaded already.
+///
+/// # Safety
+/// `F` is the export's type.
+pub unsafe fn user32<F: Copy>(name: &std::ffi::CStr) -> Option<F> {
+  let lib = wide("user32.dll");
+  // SAFETY: a NUL-terminated name; the export as the caller's type, a function pointer as FARPROC.
+  unsafe {
+    let f = GetProcAddress(GetModuleHandleW(lib.as_ptr()), name.as_ptr().cast())?;
+    Some(std::mem::transmute_copy(&f))
   }
 }
 

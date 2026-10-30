@@ -13,8 +13,9 @@ use std::{io, thread};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
   BeginPaint, COLOR_BTNFACE, CreateFontIndirectW, CreateSolidBrush, DeleteObject, EndPaint,
-  FW_BOLD, FillRect, GetMonitorInfoW, GetStockObject, HBRUSH, HDC, HFONT, InvalidateRect,
-  MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromWindow, PAINTSTRUCT, SetBkColor, WHITE_BRUSH,
+  FW_BOLD, FillRect, GetDC, GetDeviceCaps, GetMonitorInfoW, GetStockObject, HBRUSH, HDC, HFONT,
+  InvalidateRect, LOGPIXELSY, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromWindow,
+  PAINTSTRUCT, ReleaseDC, SetBkColor, WHITE_BRUSH,
 };
 use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 use windows_sys::Win32::System::Com::{
@@ -25,15 +26,12 @@ use windows_sys::Win32::UI::Controls::{
   BST_CHECKED, ICC_PROGRESS_CLASS, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, PBM_SETPOS,
   PBM_SETRANGE32,
 };
-use windows_sys::Win32::UI::HiDpi::{
-  AdjustWindowRectExForDpi, GetDpiForWindow, GetSystemMetricsForDpi, SystemParametersInfoForDpi,
-};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
 use windows_sys::Win32::UI::Shell::{FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, SIGDN_FILESYSPATH};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 use windows_sys::core::{BOOL, GUID, HRESULT, PWSTR};
 
-use super::windows::{method, pwstr, wide};
+use super::windows::{method, pwstr, user32, wide};
 use super::{Step, bytes, folder};
 
 // The layout in pixels at 96 DPI, as NSIS MUI2's.
@@ -57,6 +55,11 @@ const STATUS: i32 = 6;
 const LIST: i32 = 7;
 const PROGRESS: i32 = 8;
 const FREE: i32 = 10;
+/// The timers: the work's progress, the free space once typing stops.
+const TICK: usize = 1;
+const SPACE: usize = 2;
+/// The message font's height the layout is drawn for, Segoe UI 9 pt at 96 DPI.
+const EM: i32 = 12;
 const WHITE: i32 = 100;
 const RUN: i32 = 104;
 const DESKTOP: i32 = 105;
@@ -124,6 +127,8 @@ struct Wizard {
   dir: RefCell<String>,
   size: u64,
   dpi: Cell<u32>,
+  /// The message font's height, which the layout scales by, as dialog units do.
+  em: Cell<i32>,
   /// The message font, bold, and bold and larger.
   fonts: Cell<[HFONT; 3]>,
   /// The app's icon for the banner and for the header.
@@ -153,6 +158,7 @@ impl Wizard {
       dir: RefCell::new(dir.display().to_string()),
       size,
       dpi: Cell::new(96),
+      em: Cell::new(EM),
       fonts: Cell::new([null_mut(); 3]),
       icons: Cell::new([null_mut(); 2]),
       // SAFETY: a solid brush, kept for the process.
@@ -232,12 +238,10 @@ impl Wizard {
       }
 
       self.hwnd.set(hwnd);
-      self.scale(GetDpiForWindow(hwnd));
-      let mut r = RECT { left: 0, top: 0, right: self.s(W), bottom: self.s(H) };
-      AdjustWindowRectExForDpi(&mut r, STYLE, 0, ex, self.dpi.get());
+      self.scale(dpi(hwnd));
       let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
       GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY), &mut mi);
-      let (cx, cy, a) = (r.right - r.left, r.bottom - r.top, mi.rcWork);
+      let ((cx, cy), a) = (self.outer(), mi.rcWork);
       let (x, y) = (a.left + (a.right - a.left - cx) / 2, a.top + (a.bottom - a.top - cy) / 2);
       SetWindowPos(hwnd, null_mut(), x, y, cx, cy, SWP_NOZORDER | SWP_NOACTIVATE);
       self.build();
@@ -254,20 +258,46 @@ impl Wizard {
     Ok(())
   }
 
-  /// `v` pixels at 96 DPI at the window's.
+  /// `v` layout pixels at the window's font: its DPI and the user's text size.
   fn s(&self, v: i32) -> i32 {
-    v * self.dpi.get() as i32 / 96
+    v * self.em.get() / EM
+  }
+
+  /// The window's size for its client area.
+  fn outer(&self) -> (i32, i32) {
+    let mut r = RECT { left: 0, top: 0, right: self.s(W), bottom: self.s(H) };
+    let ex = WS_EX_CONTROLPARENT;
+    type Adjust = unsafe extern "system" fn(*mut RECT, u32, BOOL, u32, u32) -> BOOL;
+    // SAFETY: a rect to adjust; the export of its documented type, Windows 10 1607 and later.
+    unsafe {
+      match user32::<Adjust>(c"AdjustWindowRectExForDpi") {
+        Some(adjust) => adjust(&mut r, STYLE, 0, ex, self.dpi.get()),
+        None => AdjustWindowRectEx(&mut r, STYLE, 0, ex),
+      };
+    }
+
+    (r.right - r.left, r.bottom - r.top)
   }
 
   /// The fonts and icons at `dpi`, the old ones freed.
   fn scale(&self, dpi: u32) {
     self.dpi.set(dpi);
-    // SAFETY: the metrics into their own struct; GDI objects and icons this window alone uses.
+    type Info = unsafe extern "system" fn(u32, u32, *mut c_void, u32, u32) -> BOOL;
+    type Metric = unsafe extern "system" fn(i32, u32) -> i32;
+    // SAFETY: the metrics into their own struct; the exports of their documented types, Windows 10
+    // 1607 and later; GDI objects and icons this window alone uses.
     unsafe {
       let mut m =
         NONCLIENTMETRICSW { cbSize: size_of::<NONCLIENTMETRICSW>() as u32, ..Default::default() };
-      SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, m.cbSize, (&raw mut m).cast(), 0, dpi);
+      let (size, at) = (m.cbSize, (&raw mut m).cast());
+      match user32::<Info>(c"SystemParametersInfoForDpi") {
+        Some(info) => info(SPI_GETNONCLIENTMETRICS, size, at, 0, dpi),
+        None => SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, size, at, 0),
+      };
+
       let mut lf = m.lfMessageFont;
+      let em = lf.lfHeight.abs();
+      self.em.set(if em > 0 { em } else { EM * dpi as i32 / 96 });
       let normal = CreateFontIndirectW(&lf);
       lf.lfWeight = FW_BOLD as i32;
       let bold = CreateFontIndirectW(&lf);
@@ -285,7 +315,12 @@ impl Wizard {
 
       let hwnd = self.hwnd.get();
       for (kind, metric) in [(ICON_SMALL, SM_CXSMICON), (ICON_BIG, SM_CXICON)] {
-        let icon = icon(GetSystemMetricsForDpi(metric, dpi)) as isize;
+        let size = match user32::<Metric>(c"GetSystemMetricsForDpi") {
+          Some(of) => of(metric, dpi),
+          None => GetSystemMetrics(metric),
+        };
+
+        let icon = icon(size) as isize;
         DestroyIcon(SendMessageW(hwnd, WM_SETICON, kind as usize, icon) as HICON);
       }
     }
@@ -468,7 +503,8 @@ impl Wizard {
         // The uninstall's folder is where it is; the install's must be one `/D=` takes.
         let Some(dir) = (if self.uninstall { Some(dir.clone().into()) } else { folder(&dir) })
         else {
-          let e = format!("Choose an absolute folder below a drive's root, not {dir:?}.");
+          let e =
+            format!("Choose an absolute folder below a drive's or a share's root, not {dir:?}.");
           return message(self.hwnd.get(), &self.title, &e);
         };
 
@@ -479,7 +515,7 @@ impl Wizard {
 
         self.go(Page::Work);
         // SAFETY: a timer of this window, killed when the work ends.
-        unsafe { SetTimer(self.hwnd.get(), 1, 100, None) };
+        unsafe { SetTimer(self.hwnd.get(), TICK, 100, None) };
       }
       Page::Work if self.done.get() => self.go(Page::Finish),
       Page::Work => {}
@@ -527,7 +563,7 @@ impl Wizard {
       SendMessageW(self.item(PROGRESS), PBM_SETPOS, bar as usize, 0);
       let ok = self.shared.result.lock().unwrap().as_ref().map(|r| r.is_ok());
       if ok.is_some() {
-        KillTimer(hwnd, 1);
+        KillTimer(hwnd, TICK);
       }
 
       match ok {
@@ -632,10 +668,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
           me.go(Page::Welcome);
         }
         BROWSE => me.browse(),
-        EDIT if (w >> 16) as u32 == EN_CHANGE && me.page.get() == Page::Folder => me.free(),
+        EDIT if (w >> 16) as u32 == EN_CHANGE && me.page.get() == Page::Folder => {
+          SetTimer(hwnd, SPACE, 500, None);
+        }
         _ => {}
       },
       WM_CLOSE => me.cancel(),
+      WM_TIMER if w == SPACE => {
+        KillTimer(hwnd, SPACE);
+        me.free();
+      }
       WM_TIMER => me.tick(),
       WM_PAINT => me.paint(),
       WM_CTLCOLORSTATIC if GetDlgCtrlID(l as HWND) >= WHITE => {
@@ -646,7 +688,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
         let r = &*(l as *const RECT);
         me.save();
         me.scale((w >> 16) as u32 & 0xFFFF);
-        let (cx, cy) = (r.right - r.left, r.bottom - r.top);
+        let (cx, cy) = me.outer();
         SetWindowPos(hwnd, null_mut(), r.left, r.top, cx, cy, SWP_NOZORDER | SWP_NOACTIVATE);
         me.build();
       }
@@ -678,6 +720,7 @@ fn common_controls() {
 fn pick(hwnd: HWND) -> Option<String> {
   type Unary = unsafe extern "system" fn(*mut c_void) -> u32;
   type Options = unsafe extern "system" fn(*mut c_void, u32) -> HRESULT;
+  type GetOptions = unsafe extern "system" fn(*mut c_void, *mut u32) -> HRESULT;
   type Show = unsafe extern "system" fn(*mut c_void, HWND) -> HRESULT;
   type Out = unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT;
   type Name = unsafe extern "system" fn(*mut c_void, i32, *mut PWSTR) -> HRESULT;
@@ -692,7 +735,9 @@ fn pick(hwnd: HWND) -> Option<String> {
       return None;
     }
 
-    let picked = method::<Options>(dlg, 9)(dlg, FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM) >= 0
+    let mut opts = 0;
+    let picked = method::<GetOptions>(dlg, 10)(dlg, &mut opts) >= 0
+      && method::<Options>(dlg, 9)(dlg, opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM) >= 0
       && method::<Show>(dlg, 3)(dlg, hwnd) >= 0
       && method::<Out>(dlg, 20)(dlg, &mut item) >= 0;
     let mut dir = None;
@@ -707,6 +752,22 @@ fn pick(hwnd: HWND) -> Option<String> {
 
     method::<Unary>(dlg, 2)(dlg);
     dir
+  }
+}
+
+/// The window's DPI: its monitor's, or the system's before Windows 10 1607.
+fn dpi(hwnd: HWND) -> u32 {
+  type Dpi = unsafe extern "system" fn(HWND) -> u32;
+  // SAFETY: the export of its documented type; the screen's DC, released.
+  unsafe {
+    if let Some(dpi) = user32::<Dpi>(c"GetDpiForWindow") {
+      return dpi(hwnd);
+    }
+
+    let dc = GetDC(null_mut());
+    let dpi = GetDeviceCaps(dc, LOGPIXELSY as i32);
+    ReleaseDC(null_mut(), dc);
+    dpi as u32
   }
 }
 

@@ -272,9 +272,7 @@ fn previous(
     own(&data, payload::fields(found)).ok().map(|(info, ..)| info)
   });
 
-  let ours = |l: &str| {
-    Path::new(l.trim_end_matches(['\\', '/'])).as_os_str().eq_ignore_ascii_case(dir.as_os_str())
-  };
+  let ours = |l: &str| same(l, dir);
   match theirs {
     Some(theirs) if theirs.app_id == info.app_id => Ok(Some(theirs.license)),
     None if location.is_some_and(ours) => Ok(Some(true)),
@@ -351,6 +349,12 @@ fn remove(dir: &Path, info: &Info, moved: impl FnOnce() -> bool) -> io::Result<(
 
   let _ = fs::remove_dir(dir);
   done
+}
+
+/// Whether the folder `l`, as the Uninstall key holds it, is `dir`, its case and a trailing
+/// separator aside.
+fn same(l: &str, dir: &Path) -> bool {
+  Path::new(l.trim_end_matches(['\\', '/'])).as_os_str().eq_ignore_ascii_case(dir.as_os_str())
 }
 
 fn in_use(path: &Path, e: io::Error) -> io::Error {
@@ -458,6 +462,13 @@ mod tests {
     for dir in roots.into_iter().chain(dots).chain(other) {
       assert_eq!(folder(dir), None, "{dir}");
     }
+  }
+
+  #[test]
+  fn same_folders() {
+    let dir = Path::new(r"C:\Apps\Hello");
+    assert!(same(r"C:\Apps\Hello", dir) && same(r"c:\apps\hello\", dir));
+    assert!(!same(r"C:\Users\Me\AppData\Local\Temp", dir) && !same(r"C:\Apps", dir));
   }
 
   #[test]
