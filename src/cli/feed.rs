@@ -174,7 +174,7 @@ pub fn keygen(files: &[PathBuf]) -> io::Result<Vec<String>> {
         io::ErrorKind::AlreadyExists => {
           bad(format!("{} is there: a key is never written over a file", file.display()))
         }
-        _ => at(file)(e),
+        _ => e,
       });
     }
 
@@ -565,6 +565,11 @@ mod tests {
     }
 
     assert_eq!(fs::read_dir(&*dir).unwrap().count(), 3, "a.key, b.key and there.key alone");
+
+    // The path once: `tool::private` names it.
+    let missing = dir.join("none/e.key");
+    let e = keygen(std::slice::from_ref(&missing)).unwrap_err().to_string();
+    assert_eq!(e.matches(&*missing.to_string_lossy()).count(), 1, "{e}");
 
     assert_eq!(fs::read_to_string(dir.join("there.key")).unwrap(), "x");
   }

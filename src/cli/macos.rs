@@ -210,8 +210,9 @@ pub fn bundle(cfg: &Config, bin: &Path) -> io::Result<PathBuf> {
 
 // MARK: Property lists
 
-/// A dict of `items`, in their order.
+/// A dict of `items`, sorted by key.
 pub fn dict<const N: usize>(items: [(&str, Plist); N]) -> Plist {
+  let items = BTreeMap::from(items);
   Plist::Dictionary(items.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
 }
 
@@ -253,7 +254,9 @@ fn toml_plist(value: &toml::Value, what: &str) -> io::Result<Plist> {
     V::Table(table) => {
       let items =
         table.iter().map(|(k, x)| Ok((text(k, what)?, toml_plist(x, &format!("{what}.{k}"))?)));
-      Plist::Dictionary(items.collect::<io::Result<_>>()?)
+      // Sorted whatever order `toml` keeps (`preserve_order` keeps the file's).
+      let items: BTreeMap<_, _> = items.collect::<io::Result<_>>()?;
+      Plist::Dictionary(items.into_iter().collect())
     }
   })
 }
@@ -635,6 +638,19 @@ LSEnvironment = { HELLO_MODE = "quiet" }
     let odd: toml::Table = toml::from_str("k = \"a\\u0001\"").unwrap();
     let e = toml_plist(&toml::Value::Table(odd), "p").unwrap_err().to_string();
     assert_eq!(e, "p.k holds '\\u{1}', which a plist's XML can't");
+
+    let unsorted: toml::Table = toml::from_str("[t]\nz = 1\na = { y = 2, b = 3 }").unwrap();
+    let plist = toml_plist(&toml::Value::Table(unsorted), "p").unwrap();
+    let t = plist.as_dictionary().unwrap().get("t").unwrap().as_dictionary().unwrap();
+    assert_eq!(t.keys().collect::<Vec<_>>(), ["a", "z"]);
+    let a = t.get("a").unwrap().as_dictionary().unwrap();
+    assert_eq!(a.keys().collect::<Vec<_>>(), ["b", "y"]);
+  }
+
+  #[test]
+  fn dict_sorted() {
+    let d = dict([("b", 1.into()), ("C", 2.into()), ("a", 3.into())]);
+    assert_eq!(d.as_dictionary().unwrap().keys().collect::<Vec<_>>(), ["C", "a", "b"]);
   }
 
   #[test]

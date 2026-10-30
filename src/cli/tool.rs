@@ -269,7 +269,7 @@ pub fn private(path: &Path, data: &[u8]) -> io::Result<PathBuf> {
   opts.write(true).create_new(true);
   #[cfg(unix)]
   std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
-  let mut file = opts.open(path)?;
+  let mut file = opts.open(path).map_err(at(path))?;
   if let Err(e) = file.write_all(data) {
     let _ = fs::remove_file(path);
     return Err(at(path)(e));
