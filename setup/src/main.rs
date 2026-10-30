@@ -90,15 +90,33 @@ impl Args {
   }
 }
 
-/// `dir` if it is an absolute folder below a drive's root (`C:\…`) or a share's
-/// (`\\server\share\…`), never the root itself, which an uninstall would empty.
+/// `dir` without a trailing separator if it is an absolute folder below a drive's root (`C:\…`,
+/// `\\?\C:\…`) or a share's (`\\server\share\…`, `\\?\UNC\server\share\…`), never the root
+/// itself, which an uninstall would empty: no part of it empty, `.`, `..`, or dots and spaces
+/// alone, which Windows drops or climbs by.
 fn folder(dir: &str) -> Option<PathBuf> {
-  let trimmed = dir.trim_end_matches(['\\', '/']);
-  let b = trimmed.as_bytes();
+  let dir = dir.trim_end_matches(['\\', '/']);
+  let prefixed = |p: &str| dir.get(..p.len()).is_some_and(|h| h.eq_ignore_ascii_case(p));
+  let (parts, least) = match [r"\\?\UNC\", r"\\.\UNC\"].into_iter().find(|p| prefixed(p)) {
+    Some(p) => (&dir[p.len()..], 3),
+    None if prefixed(r"\\?\") || prefixed(r"\\.\") => (drive(&dir[4..])?, 1),
+    None => match dir.strip_prefix(r"\\") {
+      Some(share) => (share, 3),
+      None => (drive(dir)?, 1),
+    },
+  };
+
+  let parts: Vec<_> = parts.split(['\\', '/']).collect();
+  let named = |p: &&str| !p.trim_matches(['.', ' ']).is_empty();
+  (parts.len() >= least && parts.iter().all(named)).then(|| dir.into())
+}
+
+/// The folders of `path` after its drive, `C:\`.
+fn drive(path: &str) -> Option<&str> {
+  let b = path.as_bytes();
   let drive =
     b.len() > 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/');
-  let share = trimmed.strip_prefix(r"\\").is_some_and(|s| s.split(['\\', '/']).count() >= 3);
-  (drive || share).then(|| dir.into())
+  drive.then(|| &path[3..])
 }
 
 /// Whether `id` is a GUID in braces, as the packer writes the Uninstall key's name.
@@ -386,6 +404,29 @@ mod tests {
     {
       let e = folder(no).unwrap_err().to_string();
       assert_eq!(e, format!("/D= takes an absolute folder, not {no:?}"));
+    }
+  }
+
+  #[test]
+  fn folders() {
+    let oks = [
+      (r"C:\Apps\", r"C:\Apps"),
+      (r"C:\Apps\Hello\\", r"C:\Apps\Hello"),
+      (r"\\?\C:\Apps", r"\\?\C:\Apps"),
+      (r"\\?\UNC\server\share\Apps\", r"\\?\UNC\server\share\Apps"),
+      (r"\\.\unc\server\share\Apps", r"\\.\unc\server\share\Apps"),
+      (r"C:\.Apps\a.b", r"C:\.Apps\a.b"),
+    ];
+    for (dir, want) in oks {
+      assert_eq!(folder(dir), Some(PathBuf::from(want)), "{dir}");
+    }
+
+    // Roots by another name, and parts Windows drops or climbs by.
+    let roots = [r"\\?\UNC\server\share", r"\\.\UNC\server\share", r"\\?\C:\", r"\\?\UNC\"];
+    let dots = [r"C:\.", r"C:\..", r"C:\Apps\..", r"C:\ .", r"C:\Apps\. \x", r"\\server\share\."];
+    let other = [r"\\?\Volume{x}\Apps", r"\\.\pipe\x", r"\\?\Apps", r"C:\Apps\\x", r"\\server\\x"];
+    for dir in roots.into_iter().chain(dots).chain(other) {
+      assert_eq!(folder(dir), None, "{dir}");
     }
   }
 

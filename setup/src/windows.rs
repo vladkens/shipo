@@ -91,7 +91,12 @@ fn run(args: &Args, title: &mut String) -> io::Result<()> {
   let path = env::current_exe()?;
   let exe = retry(RETRY_OWN, || fs::read(&path))?;
   let fields = payload::fields(&placeholder());
-  let damaged = |e| io::Error::other(format!("This setup is damaged, download it again: {e}"));
+  // Which one the name tells, as the damaged payload can't.
+  let named = path.file_name().is_some_and(|n| n.eq_ignore_ascii_case(UNINSTALLER));
+  let damaged = |e| match named {
+    true => io::Error::other(format!("This uninstaller is damaged, install the app again: {e}")),
+    false => io::Error::other(format!("This setup is damaged, download it again: {e}")),
+  };
   let (info, mut files, stub) = own(&exe, fields).map_err(damaged)?;
   let uninstall = files.is_empty();
   *title = format!("{} {}", info.name, if uninstall { "Uninstall" } else { "Setup" });
