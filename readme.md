@@ -9,6 +9,33 @@ Releases and updates for desktop apps.
 
 Work in progress.
 
+## Packing
+
+The app's `Cargo.toml` describes it:
+
+```toml
+[package.metadata.shipo]
+id = "com.example.hello"   # the bundle id, the .desktop's StartupWMClass
+name = "Hello"             # the name people see and the files' prefix
+icon = "assets/icon.png"   # a 1024 px PNG
+comment = "Says hello"
+
+[package.metadata.shipo.macos]
+accessory = true                      # no Dock icon
+entitlements = "assets/hello.entitlements"
+plist.NSMicrophoneUsageDescription = "Hello hears you."
+
+[package.metadata.shipo.windows]
+app-id = "…"                          # the setup's GUID, else derived from `id`
+
+[package.metadata.shipo.linux]
+categories = ["Utility"]
+deb-depends = ["libc6 (>= 2.35)"]
+deb-recommends = ["libgtk-3-0"]
+```
+
+With the release builds in `dist/<triple>/<bin>[.exe]`, `shipo release dist --tag v1.2.0` writes the installers and the signed `update.txt` into `dist/`, linked to the GitHub release `v1.2.0`; without `--tag` it writes the installers of a dev build. `shipo feed` signs a feed for files served elsewhere. `shipo --help` lists every command and option. The host needs `nsis`, `squashfs-tools` and `dpkg` from apt; off a Mac, the app is signed by rcodesign with the `APPLE_CERTIFICATE` and `APPLE_CERTIFICATE_PASSWORD` secrets. The DMG is not written yet.
+
 ## Keys
 
 The feed is signed with Ed25519. The app holds the public keys, built in, and takes a feed signed by any of them; the private keys live only in the release job's secret and in your password manager. Make two, the working key and a spare:
