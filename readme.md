@@ -127,7 +127,7 @@ copyright = "© 2026 Example Labs"
 [package.metadata.shipo.linux]
 categories = ["Utility"]
 deb-package = "hello"
-deb-depends = ["libc6 (>= 2.35)"]
+deb-depends = ["libasound2t64 | libasound2"]
 deb-recommends = ["libgtk-3-0"]
 ```
 
@@ -169,7 +169,7 @@ shipo reads these from `[package]`, or from `[workspace.package]` for `version`,
 |---|---|---|---|
 | `categories` | list | `["Utility"]` | the app menu's categories |
 | `deb-package` | string | the binary's name, lowercase, `_` as `-` | the .deb's package name |
-| `deb-depends` | list | none | the packages the .deb needs |
+| `deb-depends` | list | `libc6 (>= <the binary's glibc>)` | the packages the .deb needs; shipo adds that `libc6` unless you list one |
 | `deb-recommends` | list | none | the packages the .deb recommends |
 
 Put the release builds, x86_64 or aarch64, in `dist/<target>/<bin>[.exe]`, such as `dist/aarch64-apple-darwin/hello`, and run:

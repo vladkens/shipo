@@ -166,8 +166,14 @@ pub fn deb(
     );
   }
 
+  let data = read(bin)?;
+  let glibc = glibc(&data);
+  if let Some(v) = &glibc {
+    eprintln!("shipo: {} needs glibc {v} or newer", bin.display());
+  }
+
   let mut tree = Tree::default();
-  tree.file(&format!("usr/bin/{}", cfg.bin), 0o755, read(bin)?);
+  tree.file(&format!("usr/bin/{}", cfg.bin), 0o755, data);
   tree.file(&format!("usr/share/applications/{}.desktop", cfg.id), 0o644, desktop(cfg)?);
   for (n, png) in pngs {
     tree.file(&format!("usr/share/icons/hicolor/{n}x{n}/apps/{}.png", cfg.id), 0o644, png);
@@ -177,7 +183,7 @@ pub fn deb(
     tree.file(&format!("usr/share/doc/{pkg}/copyright"), 0o644, read(&license)?);
   }
 
-  let control = control(cfg, &pkg, arch, tag.is_none(), tree.size())?;
+  let control = control(cfg, arch, tag.is_none(), tree.size(), glibc.as_deref())?;
   let data = deb_archive(&control, &tree, mtime(bin)?)?;
   let out = crate::out(out_dir, &cfg.name, tag, &format!("linux-{arch}.deb"));
   tool::place(&out, |part| File::create_new(part)?.write_all(&data))?;
@@ -185,16 +191,30 @@ pub fn deb(
 }
 
 /// The `.deb`'s control file for the files of `size` bytes: [package] `pkg`, [deb_version] of a
-/// dev build if `dev`, [maintainer], `linux.deb-depends` and `deb-recommends`, and the
-/// [description]. A field holds one line; an empty one is left out.
-fn control(cfg: &Config, pkg: &str, arch: Arch, dev: bool, size: u64) -> io::Result<String> {
+/// dev build if `dev`, [maintainer], `linux.deb-depends` (`libc6 (>= <glibc>)` first when it names
+/// no `libc6`) and `deb-recommends`, and the [description]. A field holds one line; an empty one is
+/// left out.
+fn control(
+  cfg: &Config,
+  arch: Arch,
+  dev: bool,
+  size: u64,
+  glibc: Option<&str>,
+) -> io::Result<String> {
+  let mut depends = cfg.linux.deb_depends.clone();
+  let libc6 =
+    |d: &String| d.split('|').any(|a| a.split([' ', '(']).find(|w| !w.is_empty()) == Some("libc6"));
+  if let Some(v) = glibc.filter(|_| !depends.iter().any(libc6)) {
+    depends.insert(0, format!("libc6 (>= {v})"));
+  }
+
   let fields = [
-    ("Package", pkg.to_string()),
+    ("Package", package(cfg)?),
     ("Version", deb_version(&cfg.version, dev)),
     ("Architecture", arch.deb().into()),
     ("Maintainer", maintainer(cfg)?),
     ("Installed-Size", size.div_ceil(1024).to_string()),
-    ("Depends", cfg.linux.deb_depends.join(", ")),
+    ("Depends", depends.join(", ")),
     ("Recommends", cfg.linux.deb_recommends.join(", ")),
     ("Section", "utils".into()),
     ("Priority", "optional".into()),
@@ -292,6 +312,51 @@ fn maintainer(cfg: &Config) -> io::Result<String> {
 /// The `LICENSE` file in the package's folder, else in its workspace's; `None` if neither has one.
 fn license(cfg: &Config) -> Option<PathBuf> {
   [&cfg.root, &cfg.workspace].into_iter().map(|dir| dir.join("LICENSE")).find(|p| p.is_file())
+}
+
+// MARK: glibc
+
+/// The newest glibc the ELF `elf` needs, as `2.34`: the greatest `GLIBC_<x.y>` of its version
+/// needs, the `SHT_GNU_verneed` section (`.gnu.version_r`) and the string table it links (elf(5)).
+/// `None` for one that needs none (static, musl) or isn't a 64-bit little-endian ELF, as both
+/// arches' are.
+fn glibc(elf: &[u8]) -> Option<String> {
+  elf.starts_with(b"\x7fELF\x02\x01").then_some(())?;
+  let num = |at: u64, n: usize| {
+    let b = elf.get(usize::try_from(at).ok()?..)?.get(..n)?;
+    Some(b.iter().rev().fold(0, |v, &x| v << 8 | u64::from(x)))
+  };
+  // An offset in the file, so the sums past it can't overflow.
+  let off = |at| num(at, 8).filter(|&o| o < elf.len() as u64);
+  let name = |at: u64| elf.get(usize::try_from(at).ok()?..)?.split(|&b| b == 0).next();
+
+  let (table, size, count) = (off(0x28)?, num(0x3a, 2)?, num(0x3c, 2)?);
+  let mut best: Option<Vec<u32>> = None;
+  for sh in (0..count).map(|i| table + i * size) {
+    // `sh_type`, `sh_offset`, `sh_link` (the string table) and `sh_info` (the needs).
+    if num(sh + 4, 4)? != 0x6fff_fffe {
+      continue;
+    }
+
+    let (mut need, strs) = (off(sh + 24)?, off(table + num(sh + 40, 4)? * size + 24)?);
+    // The last entry's next is 0, so the counts end the lists, and the cap a malformed one.
+    for _ in 0..num(sh + 44, 4)?.min(1024) {
+      // `Elf64_Verneed`: `vn_cnt` at 2, `vn_aux` at 8, `vn_next` at 12; `Elf64_Vernaux`:
+      // `vna_name` at 8, `vna_next` at 12.
+      let mut aux = need + num(need + 8, 4)?;
+      for _ in 0..num(need + 2, 2)? {
+        let version = name(strs + num(aux + 8, 4)?)?.strip_prefix(b"GLIBC_");
+        let version = version.and_then(|v| str::from_utf8(v).ok());
+        let parts = version.and_then(|v| v.split('.').map(|p| p.parse().ok()).collect());
+        best = best.max(parts);
+        aux += num(aux + 12, 4)?;
+      }
+
+      need += num(need + 12, 4)?;
+    }
+  }
+
+  best.map(|v| v.iter().map(u32::to_string).collect::<Vec<_>>().join("."))
 }
 
 // MARK: Files
@@ -841,7 +906,7 @@ deb-recommends = ["libgtk-3-0t64 | libgtk-3-0", "libasound2t64"]
       Maintainer: Example <jane@example.com>\nInstalled-Size: 3\nDepends: libc6 (>= 2.31)\n\
       Recommends: libgtk-3-0t64 | libgtk-3-0, libasound2t64\nSection: utils\n\
       Priority: optional\nDescription: Says hello\n";
-    assert_eq!(control(&cfg, "hello", Arch::Aarch64, true, 3000).unwrap(), want);
+    assert_eq!(control(&cfg, Arch::Aarch64, true, 3000, Some("2.39")).unwrap(), want);
 
     let mut cfg = config(Path::new("/app"), "");
     cfg.comment = String::new();
@@ -849,18 +914,110 @@ deb-recommends = ["libgtk-3-0t64 | libgtk-3-0", "libasound2t64"]
     let want = "Package: hello\nVersion: 1.2.0~beta.1\nArchitecture: amd64\n\
       Maintainer: Example <jane@example.com>\nInstalled-Size: 1\nSection: utils\n\
       Priority: optional\nDescription: Hello World\n";
-    assert_eq!(control(&cfg, "hello", Arch::X86_64, false, 1).unwrap(), want);
+    assert_eq!(control(&cfg, Arch::X86_64, false, 1, None).unwrap(), want);
 
     cfg.linux = toml::from_str("deb-depends = [\"a\\nb\"]").unwrap();
-    let e = control(&cfg, "hello", Arch::X86_64, false, 1).unwrap_err().to_string();
+    let e = control(&cfg, Arch::X86_64, false, 1, None).unwrap_err().to_string();
     assert_eq!(e, "the .deb's Depends is one line, not \"a\\nb\"");
     cfg.linux = Default::default();
 
     for authors in [vec![], vec!["Jane".to_string()], vec!["Jane <jane>".to_string()]] {
       cfg.authors = authors;
-      let e = control(&cfg, "hello", Arch::X86_64, false, 1).unwrap_err().to_string();
+      let e = control(&cfg, Arch::X86_64, false, 1, None).unwrap_err().to_string();
       assert!(e.starts_with("the .deb's Maintainer is `Name <mail>`"), "{e}");
     }
+  }
+
+  #[test]
+  fn libc6_from_the_binary() {
+    let mut cfg = config(Path::new("/app"), "");
+    let depends = |cfg: &Config, glibc| {
+      let control = control(cfg, Arch::X86_64, false, 1, glibc).unwrap();
+      control.lines().find_map(|l| l.strip_prefix("Depends: ")).map(String::from)
+    };
+    assert_eq!(depends(&cfg, None), None);
+    assert_eq!(depends(&cfg, Some("2.35")).unwrap(), "libc6 (>= 2.35)");
+
+    let cases = [
+      ("[\"libgtk-3-0\"]", "libc6 (>= 2.35), libgtk-3-0"),
+      ("[\"libc6-dev\"]", "libc6 (>= 2.35), libc6-dev"),
+      ("[\"libc6\"]", "libc6"),
+      ("[\"libc6(>=2.31)\"]", "libc6(>=2.31)"),
+      ("[\"a\", \"musl | libc6 (>= 2.17)\"]", "a, musl | libc6 (>= 2.17)"),
+    ];
+    for (list, want) in cases {
+      cfg.linux = toml::from_str(&format!("deb-depends = {list}")).unwrap();
+      assert_eq!(depends(&cfg, Some("2.35")).unwrap(), want, "{list}");
+    }
+  }
+
+  /// A file an ELF needs and the versions of it.
+  type Need<'a> = (&'a str, &'a [&'a str]);
+
+  /// A 64-bit little-endian ELF of a string table and the version needs `needs`, each a file and
+  /// its versions, and nothing else: a header, the two sections' data and three section headers.
+  fn elf(needs: &[Need]) -> Vec<u8> {
+    let le = |v: u64, n: usize| {
+      let mut b = v.to_le_bytes().to_vec();
+      b.resize(n, 0);
+      b
+    };
+    let (mut strs, mut verneed) = (vec![0u8], vec![]);
+    let mut put = |s: &str| {
+      strs.extend(s.as_bytes().iter().chain([&0]));
+      (strs.len() - s.len() - 1) as u64
+    };
+    for (i, (file, versions)) in needs.iter().enumerate() {
+      let n = versions.len() as u64;
+      let next = if i + 1 == needs.len() { 0 } else { 16 + 16 * n };
+      verneed.extend([le(1, 2), le(n, 2), le(put(file), 4), le(16, 4), le(next, 4)].concat());
+      for (j, v) in versions.iter().enumerate() {
+        let next = if j + 1 == versions.len() { 0 } else { 16 };
+        verneed.extend([le(0, 8), le(put(v), 4), le(next, 4)].concat());
+      }
+    }
+
+    let (strs_at, need_at) = (64, 64 + strs.len() as u64);
+    let table = need_at + verneed.len() as u64;
+    let mut out = [&b"\x7fELF\x02\x01"[..], &[0; 34], &le(table, 8), &[0; 10]].concat();
+    out.extend([le(64, 2), le(3, 2), le(0, 2)].concat());
+    out.extend([strs, verneed].concat());
+    let section = |kind, at, link, info| {
+      [le(0, 4), le(kind, 4), le(0, 16), le(at, 8), le(0, 8), le(link, 4), le(info, 4), le(0, 16)]
+        .concat()
+    };
+    out.extend(section(0, 0, 0, 0));
+    out.extend(section(3, strs_at, 0, 0));
+    out.extend(section(0x6fff_fffe, need_at, 1, needs.len() as u64));
+    out
+  }
+
+  #[test]
+  fn glibc_of_an_elf() {
+    let libc = ("libc.so.6", &["GLIBC_2.2.5", "GLIBC_2.34", "GLIBC_PRIVATE"][..]);
+    let cases: [(&[Need], _); 5] = [
+      (&[libc, ("libm.so.6", &["GLIBC_2.29"]), ("libgcc_s.so.1", &["GCC_3.0"])], Some("2.34")),
+      (&[("libc.so.6", &["GLIBC_2.9", "GLIBC_2.10"])], Some("2.10")),
+      (&[("libgcc_s.so.1", &["GCC_4.2.0"])], None),
+      (&[("libc.so.6", &["GLIBC_2.17.1", "GLIBC_2.17"])], Some("2.17.1")),
+      (&[], None),
+    ];
+    for (needs, want) in cases {
+      assert_eq!(glibc(&elf(needs)).as_deref(), want, "{needs:?}");
+    }
+
+    let whole = elf(&[libc]);
+    assert_eq!(glibc(&whole[..whole.len() - 20]), None, "cut in the last header");
+    assert_eq!(glibc(b"#!/bin/sh\necho hello\n"), None, "not an ELF");
+  }
+
+  /// This test's own binary, which the host's toolchain linked against its glibc.
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn glibc_of_a_real_binary() {
+    let v = glibc(&fs::read(std::env::current_exe().unwrap()).unwrap()).unwrap();
+    let parts: Vec<u32> = v.split('.').map(|p| p.parse().unwrap()).collect();
+    assert!(parts[0] == 2 && parts[1] >= 17, "{v}");
   }
 
   #[test]
@@ -1077,7 +1234,7 @@ deb-recommends = ["libgtk-3-0t64 | libgtk-3-0", "libasound2t64"]
     let deb = deb(&cfg, &bin, arch, None, &out).unwrap();
     assert_eq!(deb, out.join(format!("Hello World-dev-linux-{arch}.deb")));
     let info = text(Command::new("dpkg-deb").arg("--info").arg(&deb));
-    let control = control(&cfg, "hello", arch, true, 0).unwrap();
+    let control = control(&cfg, arch, true, 0, glibc(&fs::read(&bin).unwrap()).as_deref()).unwrap();
     for line in control.lines().filter(|l| !l.starts_with("Installed-Size")) {
       assert!(info.contains(&format!("\n {line}\n")), "{line}: {info}");
     }
