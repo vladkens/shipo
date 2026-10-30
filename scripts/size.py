@@ -38,7 +38,7 @@ PARTS = {
   # The library's OS code: each OS, the shared Unix code and the dispatch.
   "library/platform": (500, ("src/platform/*.rs",)),
   # The packer's commands, config, tools, feed and icons.
-  "packer": (1300, ("src/cli/{main,config,tool,feed,image}.rs",)),
+  "packer": (1400, ("src/cli/{main,config,tool,feed,image}.rs",)),
   # The .app bundle, its signing and the DMG with its HFS+ volume, written ourselves.
   "packer/macos": (1300, ("src/cli/{macos,sign,dmg,hfs}.rs",)),
   # The setup and the exe's resources.
