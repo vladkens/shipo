@@ -48,6 +48,7 @@ mod installer;
 mod platform;
 #[cfg(test)]
 mod testing;
+mod uninstall;
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -104,11 +105,11 @@ pub fn check(feed: &Feed, current: &str) -> Result<Option<Release>> {
 
 /// Whether the running app can update in place, checked with no network, so an app can hide its
 /// update up front: not without an installed app to replace ([Error::Unsupported]: a build, a
-/// Windows exe outside `%LOCALAPPDATA%\Programs`, a Linux one not run as an AppImage, as a .deb's
-/// in /usr, a translocated app), nor one it can't replace ([Error::Unsupported]: a bundle the user
-/// can't write or on a volume without APFS's swap, an AppImage the user can't write), nor one whose
-/// folder the user can't write ([Error::Io], `PermissionDenied`: `/Applications` for a standard
-/// user, `/opt`).
+/// Windows exe outside `%LOCALAPPDATA%\Programs` and its setup's folder, a Linux one not run as an
+/// AppImage, as a .deb's in /usr, a translocated app), nor one it can't replace
+/// ([Error::Unsupported]: a bundle the user can't write or on a volume without APFS's swap, an
+/// AppImage the user can't write), nor one whose folder the user can't write ([Error::Io],
+/// `PermissionDenied`: `/Applications` for a standard user, `/opt`).
 pub fn supported() -> Result<()> {
   installed().map(drop)
 }
@@ -116,7 +117,7 @@ pub fn supported() -> Result<()> {
 /// The app an update replaces ([target]), [replaceable], its [home] writable: a staging folder
 /// made there.
 fn installed() -> Result<PathBuf> {
-  let target = target(OS, &env::current_exe()?, &|k| env::var_os(k))?;
+  let target = target(OS, &env::current_exe()?, &|k| env::var_os(k), &installs)?;
   #[cfg(unix)]
   replaceable(OS, &target, imp::access(&target))?;
   Folder::new(home(OS, &target))?;
@@ -192,7 +193,8 @@ pub fn finish() -> Option<Error> {
   #[cfg(windows)]
   std::thread::spawn(|| {
     std::thread::sleep(Duration::from_secs(5));
-    let found = env::current_exe().ok().and_then(|exe| target(OS, &exe, &|k| env::var_os(k)).ok());
+    let var = |k: &str| env::var_os(k);
+    let found = env::current_exe().ok().and_then(|exe| target(OS, &exe, &var, &installs).ok());
     if let Some(target) = found {
       installer::tidy(OS, &target, &imp::alive);
     }
@@ -220,10 +222,27 @@ const OS: Os = match () {
 /// An environment variable by its name: [env::var_os], or a test's.
 type Env<'a> = &'a dyn Fn(&str) -> Option<OsString>;
 
+/// The values of an HKCU `{…}` Uninstall key the app is found by: `InstallLocation`,
+/// `DisplayIcon`, `UninstallString`.
+#[derive(Clone)]
+struct Key {
+  location: String,
+  icon: String,
+  uninstall: String,
+}
+
+/// The Uninstall keys, Windows' only.
+fn installs() -> Vec<Key> {
+  #[cfg(windows)]
+  return imp::installs();
+  #[cfg(not(windows))]
+  Vec::new()
+}
+
 /// The app an update replaces, of the running `exe`: [Error::Unsupported] for none (a build) or a
 /// bundle macOS translocated (run from a read-only copy, as it does for one downloaded and not
-/// moved).
-fn target(os: Os, exe: &Path, env: Env) -> Result<PathBuf> {
+/// moved). `keys`, the Uninstall keys, read only when the exe isn't in the default folder.
+fn target(os: Os, exe: &Path, env: Env, keys: &dyn Fn() -> Vec<Key>) -> Result<PathBuf> {
   let target = match os {
     // The `.app` bundle, by its layout: `<name>.app/Contents/MacOS/<exe>`.
     Os::Mac => {
@@ -239,15 +258,19 @@ fn target(os: Os, exe: &Path, env: Env) -> Result<PathBuf> {
       }
       _ => None,
     },
-    // The exe's folder under `%LOCALAPPDATA%\Programs`, where the per-user setup installs,
-    // whatever the case.
+    // The exe's folder under `%LOCALAPPDATA%\Programs`, where the per-user setup installs by
+    // default, whatever the case, or the one its key names with this exe, picked in its wizard or
+    // by `/D=`.
     Os::Windows => {
       let folded = |p: &Path| -> Vec<_> {
         p.components().map(|c| c.as_os_str().to_ascii_lowercase()).collect()
       };
       let programs = env("LOCALAPPDATA").map(|l| folded(&Path::new(&l).join("Programs")));
       let under = |f: &Path| f.ancestors().skip(1).any(|a| Some(folded(a)) == programs);
-      exe.parent().filter(|f| under(f)).map(Path::to_owned)
+      match exe.parent() {
+        Some(dir) if under(dir) => Some(dir.to_owned()),
+        dir => dir.and_then(|dir| keyed(dir, exe, &keys())),
+      }
     }
   };
 
@@ -259,6 +282,26 @@ fn target(os: Os, exe: &Path, env: Env) -> Result<PathBuf> {
     }
     Some(t) => Ok(t),
   }
+}
+
+/// The folder of the key the setup (or v0.1's NSIS one) wrote for the running `exe` in `dir`, as
+/// the key holds it, so `/D=` keeps it so: a [folder](uninstall::folder) with this exe in it and
+/// its uninstaller, which an MSI's or another app's key isn't. By the text first; only a key of
+/// this exe is resolved on disk, where a share gone may block.
+fn keyed(dir: &Path, exe: &Path, keys: &[Key]) -> Option<PathBuf> {
+  let name = exe.file_name()?.to_str()?;
+  let ours: Vec<_> = keys
+    .iter()
+    .filter(|k| {
+      uninstall::folder(&k.location).is_some()
+        && k.icon.eq_ignore_ascii_case(&format!(r"{}\{name}", k.location))
+        && k.uninstall == uninstall::command(&k.location)
+    })
+    .collect();
+
+  let found = ours.iter().find(|k| uninstall::alike(&k.location, dir));
+  let found = found.or_else(|| ours.iter().find(|k| uninstall::same(&k.location, dir)));
+  found.map(|k| PathBuf::from(&k.location))
 }
 
 /// What the user may do to the target, as the OS tells it; Windows' setup replaces its own.
@@ -396,7 +439,7 @@ mod tests {
   #[test]
   fn the_target_is_the_installed_app() {
     let none = |_: &str| None;
-    let target = |os, exe: &str| target(os, Path::new(exe), &none);
+    let target = |os, exe: &str| target(os, Path::new(exe), &none, &Vec::new);
     let app = target(Os::Mac, "/Applications/A.app/Contents/MacOS/a").unwrap();
     assert_eq!(app, Path::new("/Applications/A.app"));
     let moved = "/private/var/folders/x/T/AppTranslocation/1-2/d/A.app/Contents/MacOS/a";
@@ -415,7 +458,7 @@ mod tests {
   #[test]
   fn a_windows_app_is_one_the_setup_installed() {
     let local = |k: &str| (k == "LOCALAPPDATA").then(|| "C:/Users/Me/AppData/Local".into());
-    let target = |exe: &str| target(Os::Windows, Path::new(exe), &local);
+    let target = |exe: &str| target(Os::Windows, Path::new(exe), &local, &Vec::new);
     let programs = "C:/Users/Me/AppData/Local/Programs";
     assert_eq!(target(&format!("{programs}/W/a.exe")).unwrap(), Path::new(programs).join("W"));
     let case = "c:/users/me/appdata/local/PROGRAMS/W";
@@ -431,10 +474,59 @@ mod tests {
     }
   }
 
+  /// The folder picked in the setup's wizard or by `/D=` is the one its key names, as the setup
+  /// (and v0.1's NSIS one) writes it with the exe; never another app's folder or a parent of it,
+  /// nor a key another installer wrote.
+  #[test]
+  fn a_windows_app_in_its_keys_folder() {
+    let local = |k: &str| (k == "LOCALAPPDATA").then(|| "C:/Users/Me/AppData/Local".into());
+    let key = |l: &str, name: &str| Key {
+      location: l.into(),
+      icon: format!(r"{l}\{name}"),
+      uninstall: format!(r#""{l}\Uninstall.exe""#),
+    };
+    let hello = key(r"C:\Apps\Hello", "Hello.exe");
+    let found =
+      |exe: &str, keys: &[Key]| target(Os::Windows, Path::new(exe), &local, &|| keys.to_vec()).ok();
+    let keyed = [key(r"D:\Tools", "T.exe"), hello.clone()];
+    let at = |exe: &str| found(exe, &keyed);
+    assert_eq!(at("C:/Apps/Hello/Hello.exe"), Some(r"C:\Apps\Hello".into()));
+    let case = at("c:/apps/HELLO/hello.EXE");
+    assert_eq!(case, Some(r"C:\Apps\Hello".into()), "the key's folder, whatever the case");
+    assert_eq!(at("C:/Apps/Hello/sub/Hello.exe"), None, "not a folder deeper");
+    assert_eq!(at("C:/Apps/Hello.exe"), None);
+    assert_eq!(at("C:/Apps/Hellos/Hello.exe"), None);
+    assert_eq!(at("C:/Apps/Hello/Other.exe"), None, "another app's exe in its folder");
+    assert_eq!(at("D:/Tools/Hello.exe"), None);
+
+    // The default folder reads no key.
+    let programs = "C:/Users/Me/AppData/Local/Programs/Hello/Hello.exe";
+    let unread = || -> Vec<Key> { panic!("keys read") };
+    assert!(target(Os::Windows, Path::new(programs), &local, &unread).is_ok());
+
+    // Not the setup's key: an MSI's, an icon of its own, a root or a folder Windows climbs by.
+    let msi = Key { uninstall: "MsiExec.exe /X{x}".into(), ..hello.clone() };
+    let icon = Key { icon: r#""C:\Apps\Hello\Hello.exe",0"#.into(), ..hello.clone() };
+    for k in [msi, icon] {
+      assert_eq!(found("C:/Apps/Hello/Hello.exe", &[k]), None);
+    }
+
+    let odd = [
+      ("C:/Hello.exe", r"C:\"),
+      ("C:/Apps/../Hello/Hello.exe", r"C:\Apps\..\Hello"),
+      ("C:/Apps/. /Hello.exe", r"C:\Apps\. "),
+      ("//?/Volume{x}/Apps/Hello.exe", r"\\?\Volume{x}\Apps"),
+    ];
+    for (exe, l) in odd {
+      assert!(uninstall::alike(l, Path::new(exe).parent().unwrap()), "{l}");
+      assert_eq!(found(exe, &[key(l, "Hello.exe")]), None, "{l}");
+    }
+  }
+
   #[test]
   fn the_app_is_the_bundle_or_the_appimage() {
     let none = |_: &str| None;
-    let app = |os, exe: &str, env: Env| target(os, Path::new(exe), env).ok();
+    let app = |os, exe: &str, env: Env| target(os, Path::new(exe), env, &Vec::new).ok();
     let mac = |exe: &str| app(Os::Mac, exe, &none);
     assert_eq!(mac("/Applications/A.app/Contents/MacOS/a"), Some("/Applications/A.app".into()));
     assert_eq!(mac("/Applications/A/Contents/MacOS/a"), None);
