@@ -340,7 +340,8 @@ fn stage_name<'a>(os: Os, url: &'a str, exe: &OsStr) -> Result<&'a str> {
 #[cfg(test)]
 mod tests {
   use std::io::{Read, Write};
-  use std::net::TcpListener;
+  use std::net::{Shutdown, TcpListener};
+  use std::time::Duration;
 
   use super::*;
   use crate::testing::{ABC, FEED, KEY, RFC_KEY, dir, sign};
@@ -375,8 +376,16 @@ mod tests {
           _ => ("404 Not Found", b"none"),
         };
 
-        let head = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\n\r\n", body.len());
+        // One request a connection, said: a client that kept it for the redirect could send on
+        // it as it closes, and WinHTTP takes the reset or empty reply as an invalid response.
+        let len = body.len();
+        let head =
+          format!("HTTP/1.1 {status}\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n");
         let _ = s.write_all(head.as_bytes()).and_then(|_| s.write_all(body));
+        // Closed once the client has, so no unread byte turns the close into a reset that drops
+        // the reply in flight.
+        let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+        let _ = s.shutdown(Shutdown::Write).and_then(|_| s.read_to_end(&mut Vec::new()));
       }
     });
 
