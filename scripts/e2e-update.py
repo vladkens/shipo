@@ -10,10 +10,12 @@ uv run scripts/e2e-update.py pack <dir>    `shipo release` of each version, a th
 uv run scripts/e2e-update.py run <dir>     1.0.0 installed and updated; checks that 2.0.0 is what runs
 uv run scripts/e2e-update.py all <dir>     the three on this host (`make e2e`)
 
-`pack` packs the binaries `build` left in <dir> for any OS, so one host may pack another's: the
-setup needs makensis, the DMG a Mac (signed by "Hello Local Signing", which v1 and v2 must share).
-`run` takes this OS's files and leaves the app installed: in a temporary folder on macOS and Linux,
-for this user on Windows. CI runs the steps on each OS (.github/workflows/main.yml).
+`pack` packs the binaries `build` left in <dir> for any OS, so any host packs every OS's: the
+setup takes the stub `make setup` built from $SHIPO_SETUP_STUB_X64 and $SHIPO_SETUP_STUB_ARM64,
+and a DMG updates only when packed on a Mac (signed by "Hello Local Signing", which v1 and v2 must
+share; elsewhere it is signed ad hoc). `run` takes this OS's files and leaves the app installed: in
+a temporary folder on macOS and Linux; on Windows for this user, then uninstalled by its setup's
+uninstaller, which must leave nothing. CI runs the steps on each OS (.github/workflows/main.yml).
 """
 
 import argparse
@@ -179,21 +181,71 @@ def install(packed: Path, home: Path) -> Path:
   return image
 
 
-def registered() -> str | None:
-  """Windows: the installed version the setup wrote last, its uninstall key's DisplayVersion."""
+UNINSTALL = r"Software\Microsoft\Windows\CurrentVersion\Uninstall"
+RUN = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+
+def uninstall_key() -> dict | None:
+  """Windows: the values of the app's uninstall key, the one whose DisplayName is the app's."""
   import winreg
 
-  path = r"Software\Microsoft\Windows\CurrentVersion\Uninstall"
-  with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path) as keys:
+  with winreg.OpenKey(winreg.HKEY_CURRENT_USER, UNINSTALL) as keys:
     for i in range(winreg.QueryInfoKey(keys)[0]):
       with winreg.OpenKey(keys, winreg.EnumKey(keys, i)) as key:
-        try:
-          if winreg.QueryValueEx(key, "DisplayName")[0] == NAME:
-            return winreg.QueryValueEx(key, "DisplayVersion")[0]
-        except OSError:
-          continue
+        values = {}
+        for j in range(winreg.QueryInfoKey(key)[1]):
+          name, value, _ = winreg.EnumValue(key, j)
+          values[name] = value
+
+        if values.get("DisplayName") == NAME:
+          return values
 
   return None
+
+
+def registered() -> str | None:
+  """Windows: the installed version the setup wrote last, its uninstall key's DisplayVersion."""
+  return (uninstall_key() or {}).get("DisplayVersion")
+
+
+def uninstall(exe: Path) -> None:
+  """Windows: the install as spec.md has it, then removed by its QuietUninstallString: the folder,
+  the key, the Start menu entry and the launch at login all gone."""
+  import winreg
+
+  key = uninstall_key()
+  folder = exe.parent
+  lnk = Path(os.environ["APPDATA"]) / r"Microsoft\Windows\Start Menu\Programs" / f"{NAME}.lnk"
+  want = {
+    "InstallLocation": str(folder),
+    "DisplayIcon": str(exe),
+    "QuietUninstallString": f'"{folder / "Uninstall.exe"}" /S',
+    "NoModify": 1,
+    "NoRepair": 1,
+  }
+
+  wrong = {k: (key or {}).get(k) for k, v in want.items() if (key or {}).get(k) != v}
+  if wrong or not lnk.is_file() or not (folder / "LICENSE.txt").is_file():
+    sys.exit(f"e2e: the install is not spec.md's: {wrong}, {lnk} {lnk.is_file()}")
+
+  log(f"installed as spec.md has it: {sorted(key)}")
+  with winreg.CreateKey(winreg.HKEY_CURRENT_USER, RUN) as run_key:
+    winreg.SetValueEx(run_key, ID, 0, winreg.REG_SZ, f'"{exe}"')
+
+  log(key["QuietUninstallString"])
+  subprocess.run(key["QuietUninstallString"], check=True, timeout=60)
+  with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN) as run_key:
+    try:
+      winreg.QueryValueEx(run_key, ID)
+      left = True
+    except OSError:
+      left = False
+
+  if folder.exists() or uninstall_key() or lnk.exists() or left:
+    listed = sorted(p.name for p in folder.iterdir()) if folder.exists() else None
+    sys.exit(f"e2e: left after uninstalling: {listed}, key {uninstall_key()}, {lnk.exists()}, {left}")
+
+  log("uninstalled, nothing left")
 
 
 def stamp(exe: Path):
@@ -250,6 +302,8 @@ def check(packed: Path) -> None:
       time.sleep(1)
 
   log("updated in place")
+  if sys.platform == "win32":
+    uninstall(exe)
 
 
 def main() -> None:

@@ -11,13 +11,13 @@
 
 </div>
 
-The `shipo` command turns your app's built binaries into installers for macOS, Windows and Linux, plus a signed update feed. The `shipo` crate runs inside your app and updates it in place from that feed. One Linux machine or Mac packs every platform.
+The `shipo` command turns your app's built binaries into installers for macOS, Windows and Linux, plus a signed update feed. The `shipo` crate runs inside your app and updates it in place from that feed. Any one machine, Linux, Mac or Windows, packs every platform.
 
 ## 🌟 Features
 
 - 📦 **Every installer from one machine**: DMG, Windows setup, AppImage and .deb
 - 🍏 **Builds and signs the DMG on Linux**: a Mac is optional
-- 🧰 **Runs with just `curl`** on Linux or a Mac (and NSIS for the Windows setup)
+- 🧰 **Runs with just `curl`** on Linux, a Mac or Windows
 - 🪟 **Installs for the current user** on Windows, with a Start menu entry
 - 🪶 **A tiny updater**: 1 dependency on Linux, 3 on Windows, 8 on macOS
 - 🔐 **Signed updates**, with a spare key to replace a leaked one
@@ -101,7 +101,7 @@ The updater uses the system's HTTP; the dependency counts above leave out 6 crat
 
 ## 📦 Packer
 
-shipo packs on Linux (x86_64 or aarch64) or an Apple silicon Mac. It needs `curl`, and NSIS for the Windows setup (`apt install nsis`, `brew install makensis`); on a Mac it also uses the tools macOS ships.
+shipo packs on Linux (x86_64 or aarch64), an Apple silicon Mac or x64 Windows. It needs `curl`; on a Mac it also uses the tools macOS ships.
 
 Your app's `Cargo.toml` describes the app:
 
@@ -249,7 +249,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with: { path: dist } # dist/<target>/hello[.exe]
-      - run: sudo apt-get update && sudo apt-get install -y nsis && cargo install --locked shipo --version 0.1.0
+      - run: cargo install --locked shipo --version 0.1.0
       - run: shipo release dist --tag "$GITHUB_REF_NAME"
         env:
           SHIPO_UPDATE_KEY: ${{ secrets.SHIPO_UPDATE_KEY }}

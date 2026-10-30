@@ -1,7 +1,7 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/shipo
 //! The programs the packer runs: a command whose failure is an error with what it printed, the
 //! pinned tools it fetches by the system's `curl`, checked by their SHA-256 and unpacked from their
-//! tarballs; and the files the packer writes: put in place whole, private for secrets, in
+//! tarballs or zips; and the files the packer writes: put in place whole, private for secrets, in
 //! temporary folders.
 
 use std::fs::{self, File, OpenOptions};
@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-use flate2::read::MultiGzDecoder;
+use flate2::read::{DeflateDecoder, MultiGzDecoder};
 
 use crate::{at, bad, wrap};
 
@@ -174,6 +174,74 @@ pub fn untar(tarball: &Path, member: &str, path: &Path) -> io::Result<PathBuf> {
     set_mode(part, 0o755)
   })?;
   Ok(path.to_path_buf())
+}
+
+/// The file `member` of the zip `zip` at `path` (0755), [place]d as [untar] does.
+pub fn unzip(zip: &Path, member: &str, path: &Path) -> io::Result<PathBuf> {
+  let data = zip_file(&read(zip)?, member).map_err(at(zip))?;
+  place(path, |part| {
+    File::create_new(part)?.write_all(&data)?;
+    set_mode(part, 0o755)
+  })?;
+  Ok(path.to_path_buf())
+}
+
+/// The file `member` of the zip `zip` (APPNOTE.TXT), stored or deflated: found by the central
+/// directory, its local header's data inflated and checked against the size and CRC-32 there.
+fn zip_file(zip: &[u8], member: &str) -> io::Result<Vec<u8>> {
+  let u16_at =
+    |at: usize| get(zip, at).map(u16::from_le_bytes).ok_or_else(|| bad("the zip is cut short"));
+  let u32_at =
+    |at: usize| get(zip, at).map(u32::from_le_bytes).ok_or_else(|| bad("the zip is cut short"));
+  // The end of the central directory: its signature within the last 64 KiB, its comment after.
+  let from = zip.len().saturating_sub(22 + 0xFFFF);
+  let end =
+    (from..zip.len().saturating_sub(21)).rev().find(|&i| zip[i..].starts_with(b"PK\x05\x06"));
+  let end = end.ok_or_else(|| bad("not a zip: no end of its central directory"))?;
+  let (count, mut at) = (u16_at(end + 10)?, u32_at(end + 16)? as usize);
+  for _ in 0..count {
+    if u32_at(at)? != 0x0201_4B50 {
+      return Err(bad("the zip's central directory is malformed"));
+    }
+
+    let (method, crc, packed, size) =
+      (u16_at(at + 10)?, u32_at(at + 16)?, u32_at(at + 20)?, u32_at(at + 24)?);
+    let (name_len, extra, comment) =
+      (u16_at(at + 28)? as usize, u16_at(at + 30)?, u16_at(at + 32)?);
+    let local = u32_at(at + 42)? as usize;
+    let name = zip.get(at + 46..at + 46 + name_len).ok_or_else(|| bad("the zip is cut short"))?;
+    at += 46 + name_len + extra as usize + comment as usize;
+    if name != member.as_bytes() {
+      continue;
+    }
+
+    if u32_at(local)? != 0x0403_4B50 {
+      return Err(bad("the zip's local header is malformed"));
+    }
+
+    let start = local + 30 + u16_at(local + 26)? as usize + u16_at(local + 28)? as usize;
+    let body =
+      zip.get(start..start + packed as usize).ok_or_else(|| bad("the zip is cut short"))?;
+    let data = match method {
+      0 => body.to_vec(),
+      8 => {
+        let mut out = Vec::with_capacity(size as usize);
+        DeflateDecoder::new(body).take(size as u64 + 1).read_to_end(&mut out)?;
+        out
+      }
+      _ => return Err(bad(format!("{member}: zip method {method}, neither stored nor deflated"))),
+    };
+
+    let mut sum = flate2::Crc::new();
+    sum.update(&data);
+    if data.len() != size as usize || sum.sum() != crc {
+      return Err(bad(format!("{member}: its size or CRC-32 is not the zip's")));
+    }
+
+    return Ok(data);
+  }
+
+  Err(bad(format!("no {member} in the zip")))
 }
 
 /// The regular files of the gzipped tarball `gz`, each by its path without a leading `./`; a path
@@ -430,6 +498,97 @@ mod tests {
     }
 
     assert!(tar_files(b"not gzip").is_err());
+  }
+
+  /// A zip of `files`, each `(name, data, deflated)`, as a zip tool writes one.
+  fn zip(files: &[(&str, &[u8], bool)]) -> Vec<u8> {
+    let (mut out, mut dir) = (vec![], vec![]);
+    for &(name, data, deflated) in files {
+      let body = match deflated {
+        true => {
+          let mut enc = flate2::write::DeflateEncoder::new(vec![], Compression::default());
+          enc.write_all(data).unwrap();
+          enc.finish().unwrap()
+        }
+        false => data.to_vec(),
+      };
+
+      let mut sum = flate2::Crc::new();
+      sum.update(data);
+      let method: u16 = if deflated { 8 } else { 0 };
+      let fields = |sig: u32| {
+        let mut h = sig.to_le_bytes().to_vec();
+        h.extend([20, 0, 0, 0]);
+        h.extend(method.to_le_bytes());
+        h.extend([0; 4]);
+        h.extend(sum.sum().to_le_bytes());
+        h.extend((body.len() as u32).to_le_bytes());
+        h.extend((data.len() as u32).to_le_bytes());
+        h.extend((name.len() as u16).to_le_bytes());
+        h.extend([0, 0]);
+        h
+      };
+
+      let mut central = vec![0x50, 0x4B, 1, 2, 20, 0];
+      central.extend(&fields(0)[4..]);
+      central.extend([0; 10]);
+      central.extend((out.len() as u32).to_le_bytes());
+      central.extend(name.as_bytes());
+      dir.push(central);
+      out.extend(fields(0x0403_4B50));
+      out.extend(name.as_bytes());
+      out.extend(body);
+    }
+
+    let at = out.len() as u32;
+    let size: usize = dir.iter().map(Vec::len).sum();
+    out.extend(dir.concat());
+    out.extend(b"PK\x05\x06\0\0\0\0");
+    out.extend([(files.len() as u16).to_le_bytes(), (files.len() as u16).to_le_bytes()].concat());
+    out.extend((size as u32).to_le_bytes());
+    out.extend(at.to_le_bytes());
+    out.extend(b"\x03\0end");
+    out
+  }
+
+  #[test]
+  fn zipped() {
+    let big = vec![7u8; 100_000];
+    let files = [("d/", &b""[..], false), ("d/COPYING", b"MIT", false), ("d/tool.exe", &big, true)];
+    let data = zip(&files);
+    assert_eq!(zip_file(&data, "d/tool.exe").unwrap(), big);
+    assert_eq!(zip_file(&data, "d/COPYING").unwrap(), b"MIT");
+    assert_eq!(zip_file(&data, "tool.exe").unwrap_err().to_string(), "no tool.exe in the zip");
+
+    // COPYING's first byte, after the folder's header and its own.
+    let mut bad_crc = data.clone();
+    bad_crc[30 + 2 + 30 + 9] ^= 1;
+    let e = zip_file(&bad_crc, "d/COPYING").unwrap_err().to_string();
+    assert_eq!(e, "d/COPYING: its size or CRC-32 is not the zip's");
+
+    // Cut anywhere before its comment, it is an error, never a panic.
+    for n in 0..data.len() - 3 {
+      assert!(zip_file(&data[..n], "d/tool.exe").is_err(), "{n}");
+    }
+
+    let tmp = Temp::new().unwrap();
+    fs::write(tmp.join("t.zip"), &data).unwrap();
+    let out = unzip(&tmp.join("t.zip"), "d/COPYING", &tmp.join("COPYING")).unwrap();
+    assert_eq!(fs::read(out).unwrap(), b"MIT");
+  }
+
+  /// rcodesign's Windows zip, a zip tool's, read: its exe as `unzip` gives it.
+  #[test]
+  #[ignore = "fetches rcodesign's Windows zip from GitHub"]
+  fn zip_of_rcodesign() {
+    let tmp = Temp::new().unwrap();
+    let url = "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign/0.29.0/apple-codesign-0.29.0-x86_64-pc-windows-msvc.zip";
+    let sha = "54bb500e2da7a8de02fcae0f331d1cac6e6d7173b4281042ff9c528ba3159aaa";
+    let zip = fetch(url, sha, &tmp.join("rcodesign.zip")).unwrap();
+    let member = "apple-codesign-0.29.0-x86_64-pc-windows-msvc/rcodesign.exe";
+    let exe = unzip(&zip, member, &tmp.join("rcodesign.exe")).unwrap();
+    let want = "4763d9e8a66a01a5cff91ad77071ec8a7032f2ebd103ba78fccddab397bb5dea";
+    assert_eq!(sha256(&exe).unwrap(), want);
   }
 
   #[test]
