@@ -1,6 +1,6 @@
 # shipo's contract
 
-What the packer (`shipo`, `cli/`) makes and the library (the `shipo` crate, `src/`) reads and does, so either side can be written by someone else. "Must" is the contract; the rest says how the two sides here do it.
+What the packer (`shipo`, `src/cli/`) makes and the library (the `shipo` crate, `src/`) reads and does, so either side can be written by someone else. "Must" is the contract; the rest says how the two sides here do it.
 
 ## Platforms
 

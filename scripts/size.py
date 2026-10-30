@@ -24,7 +24,7 @@ from collections import defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DIRS = tuple(d for d in ("src", "cli/src", "examples", "tests") if (ROOT / d).is_dir())
+DIRS = tuple(d for d in ("src", "examples", "tests") if (ROOT / d).is_dir())
 EXTS = (".rs",)
 KINDS = ("code", "docs", "comments", "tests", "blank")
 # The parts, each with its files (`*` stays within a directory, `{a,b}` is either) and the code
@@ -38,24 +38,24 @@ PARTS = {
   # The library's OS code: each OS, the shared Unix code and the dispatch.
   "library/platform": (500, ("src/platform/*.rs",)),
   # The packer's commands, config, tools, feed and icons.
-  "packer": (1300, ("cli/src/{main,config,tool,feed,image}.rs",)),
+  "packer": (1300, ("src/cli/{main,config,tool,feed,image}.rs",)),
   # The .app bundle, its signing and the DMG with its HFS+ volume, written ourselves.
-  "packer/macos": (1300, ("cli/src/{macos,sign,dmg,hfs}.rs",)),
+  "packer/macos": (1300, ("src/cli/{macos,sign,dmg,hfs}.rs",)),
   # The setup and the exe's resources.
-  "packer/windows": (700, ("cli/src/windows.rs",)),
+  "packer/windows": (700, ("src/cli/windows.rs",)),
   # The AppImage with its squashfs, and the .deb.
-  "packer/linux": (600, ("cli/src/linux.rs",)),
+  "packer/linux": (600, ("src/cli/linux.rs",)),
 }
 # Files a script writes (scripts/hfs-unicode.py: the HFS+ decomposition tables): no budget.
-GENERATED = ("cli/src/unicode.rs",)
+GENERATED = ("src/cli/unicode.rs",)
 
 
 def matches(pattern: str, path: str) -> bool:
   """Whether a path is one of a pattern's files.
 
-  >>> [matches("src/*.rs", p) for p in ("src/lib.rs", "src/platform/macos.rs", "cli/src/main.rs")]
+  >>> [matches("src/*.rs", p) for p in ("src/lib.rs", "src/platform/macos.rs", "src/cli/main.rs")]
   [True, False, False]
-  >>> [matches("cli/src/{dmg,hfs}.rs", p) for p in ("cli/src/dmg.rs", "cli/src/hfs.rs", "cli/src/hfsx.rs")]
+  >>> [matches("src/cli/{dmg,hfs}.rs", p) for p in ("src/cli/dmg.rs", "src/cli/hfs.rs", "src/cli/hfsx.rs")]
   [True, True, False]
   """
   rx = re.escape(pattern).replace(r"\*", "[^/]*")
@@ -66,9 +66,9 @@ def matches(pattern: str, path: str) -> bool:
 def part(path: str) -> str | None:
   """The part a file's code counts against; examples, tests and generated files have none.
 
-  >>> [part(p) for p in ("src/lib.rs", "src/platform/unix.rs", "cli/src/main.rs", "cli/src/hfs.rs")]
+  >>> [part(p) for p in ("src/lib.rs", "src/platform/unix.rs", "src/cli/main.rs", "src/cli/hfs.rs")]
   ['library', 'library/platform', 'packer', 'packer/macos']
-  >>> [part(p) for p in ("cli/src/windows.rs", "cli/src/linux.rs", "cli/src/unicode.rs", "cli/src/new.rs")]
+  >>> [part(p) for p in ("src/cli/windows.rs", "src/cli/linux.rs", "src/cli/unicode.rs", "src/cli/new.rs")]
   ['packer/windows', 'packer/linux', None, None]
   """
   for name, (_, patterns) in PARTS.items():
@@ -81,10 +81,10 @@ def part(path: str) -> str | None:
 def module(path: str, files: bool) -> str:
   """The row a file's lines count in: its part, or the file itself when in none.
 
-  >>> [module(p, False) for p in ("src/feed.rs", "cli/src/feed.rs", "examples/update.rs")]
+  >>> [module(p, False) for p in ("src/feed.rs", "src/cli/feed.rs", "examples/update.rs")]
   ['library', 'packer', 'examples']
-  >>> [module(p, False) for p in ("cli/src/unicode.rs", "cli/src/new.rs")]
-  ['generated', 'cli/src/new.rs']
+  >>> [module(p, False) for p in ("src/cli/unicode.rs", "src/cli/new.rs")]
+  ['generated', 'src/cli/new.rs']
   """
   if files:
     return path

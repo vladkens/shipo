@@ -1,8 +1,8 @@
 # Dependencies
 
-Why each crate is in, and why the packer writes some formats itself. A crate comes in only where our own code would be large; every app builds the library's, so it takes as few as it can. Counts are crates in `cargo tree -e normal`, the crate itself included, measured on 2026-10-30.
+Why each crate is in, and why the packer writes some formats itself. A crate comes in only where our own code would be large; every app builds the library's, so it takes as few as it can; the packer's are optional, under the `cli` feature, which an app turns off. Counts are crates in `cargo tree -e normal`, the crate itself included, measured on 2026-10-30.
 
-## Library (`src/`)
+## Library (`src/` but `src/cli/`)
 
 | Crate | For | Why |
 |---|---|---|
@@ -11,7 +11,7 @@ Why each crate is in, and why the packer writes some formats itself. A crate com
 | `windows-sys` (Windows) | WinHTTP, processes | the system's own HTTP |
 | none (Linux) | libcurl, loaded at run time | no link-time dependency |
 
-## Packer (`cli/`): taken
+## Packer (`src/cli/`): taken
 
 | Crate | For | Why |
 |---|---|---|

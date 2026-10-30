@@ -2,7 +2,7 @@
 # /// script
 # requires-python = ">=3.11"
 # ///
-"""Writes cli/src/unicode.rs: the tables HFS+ decomposes names by, from Unicode 3.2 as TN1150 has it.
+"""Writes src/cli/unicode.rs: the tables HFS+ decomposes names by, from Unicode 3.2 as TN1150 has it.
 
 A name on HFS+ is stored decomposed (NFD) by Unicode 3.2's canonical decompositions, but for
 U+2000–U+2FFF, U+F900–U+FAFF and U+2F800–U+2FAFF, which stay as they are. Python keeps 3.2's
@@ -15,7 +15,7 @@ import platform
 import unicodedata
 from pathlib import Path
 
-OUT = Path(__file__).resolve().parent.parent / "cli/src/unicode.rs"
+OUT = Path(__file__).resolve().parent.parent / "src/cli/unicode.rs"
 UCD = unicodedata.ucd_3_2_0
 
 

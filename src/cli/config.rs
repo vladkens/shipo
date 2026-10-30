@@ -610,7 +610,7 @@ mod tests {
       ("", "", vec!["src/bin/c/lib.rs"], "app"),
       ("", "", vec![main, a], "app"),
       ("default-run = \"a\"", "", vec![main, a, b], "a"),
-      // The shipo-cli case: `[[bin]]` builds src/main.rs under another name.
+      // `[[bin]]` builds src/main.rs under another name.
       ("", "[[bin]]\nname = \"x\"\npath = \"./src/main.rs\"\n", vec![main], "x"),
       // `[[bin]]` of the package's name builds src/main.rs: one target.
       ("default-run = \"other\"", "[[bin]]\nname = \"app\"\n", vec![main], "app"),

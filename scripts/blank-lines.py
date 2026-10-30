@@ -7,7 +7,7 @@
 rustfmt keeps blank lines but never adds them, so this finds the missing ones: a block's closing
 brace followed, at the same indentation, by another statement. `--fix` inserts the blank lines.
 
-uv run scripts/blank-lines.py [--fix] [paths...]   (default: src examples tests cli)
+uv run scripts/blank-lines.py [--fix] [paths...]   (default: src examples tests)
 """
 
 import re
@@ -49,7 +49,7 @@ def missing(lines: list[str]) -> list[int]:
 def main():
   args = sys.argv[1:]
   fix = "--fix" in args
-  roots = [Path(a) for a in args if a != "--fix"] or [ROOT / d for d in ("src", "examples", "tests", "cli")]
+  roots = [Path(a) for a in args if a != "--fix"] or [ROOT / d for d in ("src", "examples", "tests")]
   found = 0
 
   for path in sorted(p for r in roots for p in ([r] if r.is_file() else r.rglob("*.rs"))):

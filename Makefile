@@ -3,20 +3,22 @@
 prepare:
 	cargo +nightly fmt
 	uv run scripts/blank-lines.py --fix
-	cargo clippy --workspace --all-targets --fix --allow-dirty --allow-staged
+	cargo clippy --all-targets --fix --allow-dirty --allow-staged
 
 check:
 	cargo +nightly fmt --check
 	uv run scripts/blank-lines.py
-	cargo clippy --workspace --all-targets -- -D warnings
+	cargo clippy --all-targets -- -D warnings
+	cargo clippy --no-default-features --all-targets -- -D warnings
 	uv run scripts/size.py --check
 
 test:
-	cargo test --workspace
+	cargo test
+	cargo test --no-default-features
 	uv run --no-project python -m doctest scripts/size.py
 
 build:
-	cargo build --release -p shipo-cli
+	cargo build --release
 
 update:
 	cargo upgrade --incompatible

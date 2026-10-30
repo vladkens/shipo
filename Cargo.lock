@@ -307,26 +307,18 @@ version = "0.0.1"
 dependencies = [
  "block2",
  "ed25519-compact",
- "objc2-core-foundation",
- "objc2-foundation",
- "objc2-security",
- "windows-sys",
-]
-
-[[package]]
-name = "shipo-cli"
-version = "0.0.1"
-dependencies = [
- "ed25519-compact",
  "flate2",
  "hmac-sha256",
  "lexopt",
+ "objc2-core-foundation",
+ "objc2-foundation",
+ "objc2-security",
  "plist",
  "png",
  "serde",
- "shipo",
  "tar",
  "toml",
+ "windows-sys",
 ]
 
 [[package]]
