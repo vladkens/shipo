@@ -387,6 +387,18 @@ pub fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
   }
 }
 
+/// The time a package gives its files: `$SOURCE_DATE_EPOCH` when set, so the same binaries pack
+/// the same bytes at any time on any host, else `meta`'s, the file's on disk.
+pub fn time(meta: &fs::Metadata) -> io::Result<u64> {
+  if let Some(epoch) = std::env::var_os("SOURCE_DATE_EPOCH") {
+    let epoch = epoch.to_string_lossy();
+    let secs = epoch.trim().parse();
+    return secs.map_err(|_| bad(format!("SOURCE_DATE_EPOCH is {epoch:?}, not seconds")));
+  }
+
+  Ok(meta.modified()?.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs()))
+}
+
 // MARK: Bytes
 
 /// `bytes` in lowercase hex.

@@ -6,14 +6,16 @@
 installed as a user installs it, then updated in place from 2.0.0's feed served on loopback.
 
 uv run scripts/e2e-update.py build <dir>   the example at both versions, <dir>/<version>/<triple>/hello[.exe]
-uv run scripts/e2e-update.py pack <dir>    `shipo release` of each version, a throwaway key, 2.0.0's feed
+uv run scripts/e2e-update.py pack <dir>    `shipo release` of each version, a throwaway key, 2.0.0's feed,
+                                           and <dir>/SHA256SUMS of what it packed
 uv run scripts/e2e-update.py run <dir>     1.0.0 installed and updated; checks that 2.0.0 is what runs
   [--v1 <setup>]                           Windows: 1.0.0 installed by this setup (an NSIS one), not <dir>'s
 uv run scripts/e2e-update.py all <dir>     the three on this host (`make e2e`)
 
-`pack` packs the binaries `build` left in <dir> for any OS, so any host packs every OS's, and a DMG
-updates only when packed on a Mac (signed by "Hello Local Signing", which v1 and v2 must share;
-elsewhere it is signed ad hoc). `run` takes this OS's files and leaves the app installed: in a
+`pack` packs the binaries `build` left in <dir> for any OS, so any host packs every OS's, the same
+bytes on each: the files' times are the commit's ($SOURCE_DATE_EPOCH) and the key is fixed. Only a
+DMG differs, as it updates only when packed on a Mac (signed by "Hello Local Signing", which v1 and
+v2 must share; elsewhere it is signed ad hoc), and with it the feed. `run` takes this OS's files and leaves the app installed: in a
 temporary folder on macOS and Linux; on Windows for this user, then uninstalled by its setup's
 uninstaller, which must leave nothing; before that, with the app running, its setup and uninstaller
 must each exit 2 and change nothing. CI runs the steps on each OS (.github/workflows/main.yml).
@@ -122,11 +124,11 @@ def pack(out: Path) -> None:
   shipo = target_dir() / "release" / f"shipo{EXE}"
   # The tools shipo fetches (rcodesign, the AppImage runtime) once for both versions.
   env = os.environ | {"CARGO_TARGET_DIR": str(out / "target")}
+  env.setdefault("SOURCE_DATE_EPOCH", run("git", "log", "-1", "--format=%ct", cwd=ROOT).strip())
   (out / "icon.png").write_bytes(png(1024))
 
   key = out / "update.key"
-  key.unlink(missing_ok=True)
-  run(shipo, "keygen", key, env=env)
+  key.write_text(hashlib.sha256(b"shipo e2e").hexdigest() + "\n")
   (out / "key.pub").write_text(run(shipo, "keygen", "--public", key, env=env).strip())
 
   if sys.platform == "darwin" and os.environ.get("CI"):
@@ -144,6 +146,11 @@ def pack(out: Path) -> None:
   feed = run(shipo, "feed", "--manifest", newest / "Cargo.toml", "--url", url, "--key", key, *files, env=env)
   shutil.copy2(feed.strip(), out / "update.txt")
   print((out / "update.txt").read_text(), end="")
+
+  packed = sorted(f.relative_to(out).as_posix() for f in out.glob(f"*/{NAME}-dev-*")) + ["update.txt"]
+  sums = "".join(f"{hashlib.sha256((out / f).read_bytes()).hexdigest()}  {f}\n" for f in packed)
+  (out / "SHA256SUMS").write_text(sums, newline="\n")
+  print(sums, end="")
 
 
 def serve(root: Path) -> None:

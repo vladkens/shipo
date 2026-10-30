@@ -13,7 +13,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use crate::unicode::{CCC, NFD};
-use crate::{at, bad};
+use crate::{at, bad, tool};
 
 /// The allocation block's size.
 const BLOCK: usize = 4096;
@@ -43,8 +43,6 @@ pub struct Entry {
   pub name: String,
   /// The permission bits, the file type not among them.
   pub mode: u16,
-  pub uid: u32,
-  pub gid: u32,
   /// Its modification time, in seconds since 1970.
   pub time: u64,
   pub kind: Kind,
@@ -66,8 +64,9 @@ pub enum Data {
 }
 
 impl Entry {
-  /// The tree at `path` as it is on disk: names, owners, times, and symlinks as links; the modes
-  /// the writer's ([owner]).
+  /// The tree at `path` as it is on disk: names, and symlinks as links, each folder's entries by
+  /// name, whatever order the host lists them in; the times [tool::time]'s, the modes the writer's
+  /// ([mode]), the owners root's, so any host writes the same bytes of the same tree.
   pub fn read(path: &Path) -> io::Result<Entry> {
     let at = at(path);
     let meta = fs::symlink_metadata(path).map_err(&at)?;
@@ -91,6 +90,7 @@ impl Entry {
           entries.push(Entry::read(&entry.map_err(&at)?.path())?);
         }
 
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
         Kind::Dir(entries)
       }
       t if t.is_file() => Kind::File(Data::Disk(path.to_path_buf(), meta.len())),
@@ -98,33 +98,26 @@ impl Entry {
       _ => return Err(bad(format!("{}: not a file, folder or symlink", path.display()))),
     };
 
-    let time = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
-    let time = time.map_or(0, |t| t.as_secs());
-    let (mode, uid, gid) = owner(&meta, &kind);
-    Ok(Entry { name: name.into(), mode, uid, gid, time, kind })
+    let time = tool::time(&meta).map_err(&at)?;
+    Ok(Entry { name: name.into(), mode: mode(&meta, &kind), time, kind })
   }
 }
 
-/// The permission bits and owners of `meta`, the bits set as the writer's own, never the build
-/// host's `umask` (a 0700 bundle opens for its owner alone): folders and files with an execute
-/// bit 0755, other files 0644, links as they are. Off Unix, which keeps no mode on disk, the
-/// owners are 0 and a file executes when [program] says so.
-fn owner(meta: &fs::Metadata, kind: &Kind) -> (u16, u32, u32) {
+/// The permission bits of `meta`, set as the writer's own, never the build host's `umask` (a
+/// 0700 bundle opens for its owner alone): folders and files with an execute bit 0755, other
+/// files 0644, links as they are. Off Unix, which keeps no mode on disk, a file executes when
+/// [program] says so.
+fn mode(meta: &fs::Metadata, kind: &Kind) -> u16 {
   #[cfg(unix)]
-  let (mode, uid, gid) = {
-    use std::os::unix::fs::MetadataExt;
-    ((meta.mode() & 0o7777) as u16, meta.uid(), meta.gid())
-  };
+  let mode = std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) as u16 & 0o7777;
   #[cfg(not(unix))]
-  let (mode, uid, gid, _) = (off_unix(kind), 0, 0, meta);
+  let (mode, _) = (off_unix(kind), meta);
 
-  let mode = match kind {
+  match kind {
     Kind::Link(_) => mode,
     Kind::File(_) if mode & 0o111 == 0 => 0o644,
     Kind::File(_) | Kind::Dir(_) => 0o755,
-  };
-
-  (mode, uid, gid)
+  }
 }
 
 /// The mode off Unix of an entry: 0755 for a folder, a link and a [program] on disk, else 0644.
@@ -523,10 +516,8 @@ fn record(it: &Item) -> Vec<u8> {
     out.extend_from_slice(&word.to_be_bytes());
   }
 
-  // HFSPlusBSDInfo: the owners, no flags, the mode, a link count of 1 for a file.
-  out.extend_from_slice(&e.uid.to_be_bytes());
-  out.extend_from_slice(&e.gid.to_be_bytes());
-  out.extend_from_slice(&[0, 0]);
+  // HFSPlusBSDInfo: root and wheel, no flags, the mode, a link count of 1 for a file.
+  out.extend_from_slice(&[0; 10]);
   out.extend_from_slice(&(file_type | e.mode).to_be_bytes());
   out.extend_from_slice(&(if kind == FILE { 1u32 } else { 0 }).to_be_bytes());
   // Finder's info: a link is of type `slnk` by `rhap`.
@@ -809,8 +800,7 @@ pub(crate) mod tests {
 
   #[test]
   fn errors() {
-    let entry =
-      |name: &str, kind| Entry { name: name.into(), mode: 0o755, uid: 0, gid: 0, time: 0, kind };
+    let entry = |name: &str, kind| Entry { name: name.into(), mode: 0o755, time: 0, kind };
     let file = |name: &str| entry(name, Kind::File(Data::Bytes(vec![])));
     let twins = [
       ("a", "A", "A and a"),
@@ -838,7 +828,8 @@ pub(crate) mod tests {
     assert_eq!(e, format!("{}: not a file, folder or symlink", fifo.display()));
   }
 
-  /// A tree made under a `umask` of 077 reads as the writer's modes; a link keeps its own.
+  /// A tree made under a `umask` of 077 reads as the writer's modes, a link keeping its own, each
+  /// folder's entries by name.
   #[cfg(unix)]
   #[test]
   fn modes() {
@@ -864,8 +855,7 @@ pub(crate) mod tests {
     crate::tool::set_mode(&app, 0o755).unwrap();
     let link = fs::symlink_metadata(app.join("link")).unwrap().mode() as u16 & 0o7777;
     let Kind::Dir(entries) = &root.kind else { panic!("{root:?}") };
-    let mut got: Vec<_> = entries.iter().map(|e| (e.name.as_str(), e.mode)).collect();
-    got.sort();
+    let got: Vec<_> = entries.iter().map(|e| (e.name.as_str(), e.mode)).collect();
     let want = [
       ("bin", 0o755),
       ("data", 0o644),
@@ -885,19 +875,10 @@ pub(crate) mod tests {
       let file = Entry {
         name: "f".into(),
         mode: 0o644,
-        uid: 0,
-        gid: 0,
         time: 0,
         kind: Kind::File(Data::Bytes(data.to_vec())),
       };
-      let root = Entry {
-        name: "V".into(),
-        mode: 0o755,
-        uid: 0,
-        gid: 0,
-        time: 0,
-        kind: Kind::Dir(vec![file]),
-      };
+      let root = Entry { name: "V".into(), mode: 0o755, time: 0, kind: Kind::Dir(vec![file]) };
       volume(&root).unwrap()[1024 + 104..1024 + 112].to_vec()
     };
 
@@ -955,17 +936,10 @@ pub(crate) mod tests {
         continue;
       }
 
-      entries.push(Entry {
-        name,
-        mode: 0o644,
-        uid: 0,
-        gid: 0,
-        time: 0,
-        kind: Kind::File(Data::Bytes(vec![])),
-      });
+      entries.push(Entry { name, mode: 0o644, time: 0, kind: Kind::File(Data::Bytes(vec![])) });
     }
 
-    Entry { name: "folds".into(), mode: 0o755, uid: 0, gid: 0, time: 0, kind: Kind::Dir(entries) }
+    Entry { name: "folds".into(), mode: 0o755, time: 0, kind: Kind::Dir(entries) }
   }
 
   /// Checks the tree at `path` is `entry`: the names as HFS+ keeps them, the modes, times, data
@@ -1077,16 +1051,12 @@ pub(crate) mod tests {
     let link = Entry {
       name: "Applications".into(),
       mode: 0o755,
-      uid: 0,
-      gid: 0,
       time: 0,
       kind: Kind::Link("/Applications".into()),
     };
     let hidden = Entry {
       name: ".DS_Store".into(),
       mode: 0o644,
-      uid: 0,
-      gid: 0,
       time: 0,
       kind: Kind::File(Data::Bytes(vec![7; 9000])),
     };

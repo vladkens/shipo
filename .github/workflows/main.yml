@@ -20,6 +20,11 @@ defaults:
     shell: bash
 
 jobs:
+  # Each OS: the checks and the tests, those that fetch pinned tools too, and the test app of the
+  # end-to-end update (examples/update.rs) built at 1.0.0 and 2.0.0 for `e2e`. On a Mac also the
+  # setup stubs the packer embeds, stubs/, built again from source as `make setup` builds them
+  # (scripts/setup-stub.py): the same bytes as stubs/SHA256SUMS, or the job fails. Only on a Mac:
+  # Windows' and Linux's rustc lay the functions out in another order.
   test:
     strategy:
       fail-fast: false
@@ -34,78 +39,22 @@ jobs:
           save-if: ${{ github.event_name != 'pull_request' }}
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       - run: rustup toolchain install nightly --profile minimal --component rustfmt
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y squashfs-tools desktop-file-utils
       - run: make check
         env:
           PYTHONUTF8: 1 # the scripts read the sources as UTF-8 on Windows too
       - run: make test
-
-  # The setup stubs the packer embeds, stubs/, built again from source as `make setup` builds
-  # them (scripts/setup-stub.py): the same bytes as stubs/SHA256SUMS, or the job fails. On a Mac,
-  # as `make setup` runs: Windows' and Linux's rustc lay the functions out in another order.
-  setup:
-    runs-on: macos-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-      - run: cargo install cargo-xwin --locked --version 0.23.1
-      - run: uv run scripts/setup-stub.py --check
-      - if: failure()
+      # One at a time: two of them fetch rcodesign to one path. Linux has no Mach-O for rcodesign
+      # to sign: the Mac signs its own, and codesign verifies it.
+      - run: cargo test -- --ignored --test-threads=1 ${{ runner.os == 'Linux' && '--skip rcodesign_signs' || '' }}
+      - if: runner.os == 'macOS'
+        run: cargo install cargo-xwin --locked --version 0.23.1 && uv run scripts/setup-stub.py --check
+      - if: failure() && runner.os == 'macOS'
         uses: actions/upload-artifact@v7
         with:
           name: setup-stub-built
           path: setup/target/bin/
-
-  # On Ubuntu with the tools apt has: the packer's ignored tests (the .deb and the AppImage read
-  # back, rcodesign fetched pinned, signing the Mac's binary), and the DMGs and .debs each host
-  # packed, read by dmg2img and fsck.hfsplus (hfsprogs) and dpkg-deb.
-  packages:
-    needs: e2e-pack
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.event_name != 'pull_request' }}
-      - run: sudo apt-get update && sudo apt-get install -y squashfs-tools desktop-file-utils hfsprogs dmg2img
-      - uses: actions/download-artifact@v8
-        with:
-          name: e2e-bin-macOS
-          path: macos
-      - uses: actions/download-artifact@v8
-        with:
-          pattern: e2e-packed-*
-          path: packed
-      - run: cargo test -- --include-ignored
-        env:
-          SHIPO_TEST_MACHO: ${{ github.workspace }}/macos/1.0.0/aarch64-apple-darwin/hello
-      - run: |
-          for dmg in packed/*/*/*.dmg; do
-            dmg2img -i "$dmg" -o "${dmg%.dmg}.img"
-            fsck.hfsplus -n "${dmg%.dmg}.img"
-          done
-          for deb in packed/*/*/*.deb; do dpkg-deb --info "$deb"; done
-
-  # The end-to-end update (scripts/e2e-update.py): examples/update.rs at 1.0.0 and 2.0.0 built on
-  # each OS, packed by shipo on each OS, 1.0.0 installed and updated in place from 2.0.0's feed
-  # served on loopback, the packages of every packing host on Windows and Linux. The DMG updates
-  # on the Mac that packed it: 1.0.0 takes only a 2.0.0 signed by its own identity, here "Hello
-  # Local Signing", made by the script in a keychain codesign uses without a prompt.
-  e2e-bin:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: e2e
-          save-if: ${{ github.event_name != 'pull_request' }}
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       - run: uv run scripts/e2e-update.py build e2e
       - uses: actions/upload-artifact@v7
         with:
@@ -113,8 +62,13 @@ jobs:
           path: e2e/
           if-no-files-found: error
 
-  e2e-pack:
-    needs: e2e-bin
+  # The end-to-end update (scripts/e2e-update.py): each OS packs every OS's packages of the test
+  # app, then installs its own 1.0.0 and has it update itself in place from 2.0.0's feed served on
+  # loopback. The DMG updates on the Mac that packed it: 1.0.0 takes only a 2.0.0 signed by its own
+  # identity, here "Hello Local Signing", made by the script in a keychain codesign uses without a
+  # prompt. The DMG is read back by the Mac's own tools and by Linux's, the .deb by dpkg-deb.
+  e2e:
+    needs: test
     strategy:
       fail-fast: false
       matrix:
@@ -128,78 +82,70 @@ jobs:
           key: e2e
           save-if: ${{ github.event_name != 'pull_request' }}
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y hfsprogs dmg2img
       - uses: actions/download-artifact@v8
         with:
           pattern: e2e-bin-*
           merge-multiple: true
           path: e2e
       - run: uv run scripts/e2e-update.py pack e2e
+      - if: runner.os == 'macOS'
+        run: |
+          for dmg in e2e/*/*.dmg; do
+            hdiutil verify -quiet "$dmg"
+            dev=$(hdiutil attach -nomount -readonly -noverify "$dmg" | awk '/^\/dev\// { print $1 }')
+            fsck_hfs -n "$dev"
+            hdiutil detach "$dev"
+          done
+      - if: runner.os == 'Linux'
+        run: |
+          for dmg in e2e/*/*.dmg; do
+            img="$RUNNER_TEMP/$(basename "$dmg" .dmg).img"
+            dmg2img -i "$dmg" -o "$img"
+            fsck.hfsplus -n "$img"
+          done
+          for deb in e2e/*/*.deb; do dpkg-deb --info "$deb"; done
+      - run: uv run scripts/e2e-update.py run e2e
       - uses: actions/upload-artifact@v7
         with:
-          name: e2e-packed-${{ runner.os }}
-          path: |
-            e2e/
-            !e2e/target/
-            !e2e/*.keychain-db
-            !e2e/signing.*
+          name: e2e-sums-${{ runner.os }}
+          path: e2e/SHA256SUMS
           if-no-files-found: error
-      - if: runner.os == 'macOS'
-        run: uv run scripts/e2e-update.py run e2e
 
-  e2e:
-    needs: e2e-pack
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-        packer: [Linux, macOS, Windows]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-      - uses: actions/download-artifact@v8
-        with:
-          name: e2e-packed-${{ matrix.packer }}
-          path: e2e
-      - run: uv run scripts/e2e-update.py run e2e
-
-  # The DMGs packed off a Mac, signed ad hoc: read by hdiutil, the app run from the image.
-  e2e-dmg:
-    needs: e2e-pack
-    runs-on: macos-latest
-    timeout-minutes: 15
+  # Each package is the same bytes whichever host packed it, so the one an OS installed above is
+  # the one every host packs. A Mac's DMG is its own, and so the feed that lists it: codesign signs
+  # it by that Mac's keychain identity, which its update needs; Linux and Windows sign it ad hoc.
+  same:
+    needs: e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/download-artifact@v8
         with:
-          pattern: e2e-packed-*
-          path: packed
+          pattern: e2e-sums-*
       - run: |
-          for dmg in packed/e2e-packed-{Linux,Windows}/*/*.dmg; do
-            hdiutil verify -quiet "$dmg"
-            hdiutil attach -nobrowse -readonly -mountpoint mnt "$dmg"
-            codesign --verify --strict mnt/Hello.app
-            test -x mnt/Hello.app/Contents/MacOS/hello
-            echo "$dmg: $(mnt/Hello.app/Contents/MacOS/hello)"
-            hdiutil detach mnt
-          done
+          tail -n +1 e2e-sums-*/SHA256SUMS
+          diff e2e-sums-Linux/SHA256SUMS e2e-sums-Windows/SHA256SUMS
+          own() { grep -v -e '\.dmg$' -e ' update\.txt$' "$1"; }
+          diff <(own e2e-sums-Linux/SHA256SUMS) <(own e2e-sums-macOS/SHA256SUMS)
 
   # The shared release steps, as in wavo: `build` builds the packer's binaries read-only; on main
   # `publish` puts them up as the `dev` pre-release, and a `release: vX.Y.Z (#N)` commit publishes
   # the crate and the same archives as the version. `publish` never compiles.
   build:
     if: "github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' || startsWith(github.event.pull_request.title, 'release: v')"
-    runs-on: macos-latest # the macOS binary needs a Mac; Linux cross-compiles
+    runs-on: macos-latest # the macOS binary needs a Mac; Linux and Windows cross-compile
     steps:
       - uses: actions/checkout@v7
       - uses: vladkens/actions/rust-build@v1
         with:
-          targets: aarch64-apple-darwin x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+          targets: aarch64-apple-darwin x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-pc-windows-gnu
           dev: true
 
   publish:
     if: github.ref == 'refs/heads/main' # write rights only for main's own workflow
-    needs: [test, setup, packages, e2e, e2e-pack, e2e-dmg, build]
+    needs: [test, e2e, same, build]
     runs-on: ubuntu-latest # no build here, and Linux runners start faster
     permissions:
       attestations: write

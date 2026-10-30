@@ -64,8 +64,7 @@ fn write(
 }
 
 /// Writes to `out` the UDZO image of the volume `name` holding the bundle `app` as it is on disk,
-/// its modes the writer's ([Entry::read]), the link and the `.DS_Store`; these two of the bundle's
-/// owners and time.
+/// as [Entry::read] gives it, the link and the `.DS_Store`; these two of the bundle's time.
 fn image(name: &str, app: &Path, out: &mut impl io::Write) -> io::Result<()> {
   let app = Entry::read(app)?;
   if !matches!(app.kind, Kind::Dir(_)) {
@@ -74,14 +73,7 @@ fn image(name: &str, app: &Path, out: &mut impl io::Write) -> io::Result<()> {
 
   // Finder finds a file's place by its name as the volume stores it.
   let layout = ds_store(&hfs::nfd(&app.name)?)?;
-  let entry = |name: &str, mode, kind| Entry {
-    name: name.into(),
-    mode,
-    uid: app.uid,
-    gid: app.gid,
-    time: app.time,
-    kind,
-  };
+  let entry = |name: &str, mode, kind| Entry { name: name.into(), mode, time: app.time, kind };
 
   let link = entry("Applications", 0o755, Kind::Link("/Applications".into()));
   let store = entry(".DS_Store", 0o644, Kind::File(Data::Bytes(layout)));
