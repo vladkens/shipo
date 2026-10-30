@@ -217,7 +217,7 @@ A dev build, without `--tag`, needs no secrets. The app is signed ad hoc on Linu
 
 ## 📄 Feed
 
-The feed, `update.txt`, is one signed text file you can host anywhere over https. shipo writes it, and any tool that writes the same lines works too:
+The feed is one signed text file, `update.txt`: host it anywhere, no update server needed. `shipo release --tag` writes it beside the installers, and `shipo feed` for files served elsewhere:
 
 ```text
 version 1.2.0
@@ -230,12 +230,16 @@ sig <signature>
 
 | Line | What it holds |
 |---|---|
-| `version <version>` | once: the release's version without `v`, such as `1.2.0` or `1.3.0-rc.1`, ordered as semver |
-| `notes <url>` | optional, once: the release's page |
-| `<os>-<arch> <size> <sha512> <url>` | once per platform, `macos`, `windows` or `linux` and `x86_64` or `aarch64`: the file's size in bytes, its SHA-512 and its URL |
-| `sig <signature>` | the last line: the Ed25519 signature (RFC 8032) of every byte before it |
+| `version <version>` | the release's version without `v`, such as `1.2.0` or `1.3.0-rc.1` |
+| `notes <url>` | optional: the release's page |
+| `<os>-<arch> <size> <sha512> <url>` | a platform's file: its size in bytes, its SHA-512 and its URL |
+| `sig <signature>` | the Ed25519 signature of every byte before this line |
 
-The feed is UTF-8 and at most 1 MiB, one line per record, its fields split by single spaces, its lines ending in LF or CRLF. Hashes and signatures are hex, in either case. URLs are https, or http to `127.0.0.1`, `localhost` or `[::1]` for tests. An app skips a line whose first word it doesn't know, so the format grows without breaking it: an app on an older shipo reads the feeds newer ones write.
+A platform is `macos`, `windows` or `linux` and `x86_64` or `aarch64`, as Rust names them, so the record is `windows-x86_64` while the file name says `x64`, as Windows does.
+
+- One record per line, fields split by single spaces, lines ending in LF or CRLF, UTF-8, at most 1 MiB.
+- No empty lines; `version`, `notes` and each platform at most once; `sig` last. Hex is of either case.
+- URLs are https, or http to `127.0.0.1`, `localhost` or `[::1]` for tests. An app skips a line whose first word it doesn't know, so a newer feed still updates an app on an older shipo.
 
 ## 🚀 Releasing from GitHub Actions
 
@@ -294,7 +298,7 @@ Every crate an updater pulls in ships inside your app and must be trusted: shipo
 | macOS release from Linux | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ |
 | Crates in your app, Linux / Windows / macOS | **8 / 10 / 15** | 114 / 117 / 125 | +42 / +42 / +53 | 107 / 115 / 107 | — | — |
 | Signs and notarizes macOS | ✅ | ✅ | ✅ | ✅ | ➖ left to the developer | ✅ |
-| Signs Windows (Authenticode) | ❌ | ✅ signtool or own command | ✅ signtool or own command | ✅ signtool, Azure | — macOS only | ✅ any OS, cloud HSMs |
+| Signs Windows (Authenticode) | ❌ | ✅ signtool or a custom command | ✅ signtool or a custom command | ✅ signtool, Azure Trusted Signing | — macOS only | ✅ from any OS, cloud signing |
 | Signed updates | ✅ with a spare key | ✅ one key | ✅ one key | ❌ HTTPS only | ✅ one key | ✅ |
 | Delta updates | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
 | License | MIT | MIT/Apache-2.0 | MIT/Apache-2.0 | MIT | MIT | paid (free for open source) |
