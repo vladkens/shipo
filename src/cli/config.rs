@@ -559,7 +559,8 @@ mod tests {
 
     let files = [("app/Cargo.toml", far.as_str()), ("real/Cargo.toml", "[package]\n")];
     let e = error(&files, "app/Cargo.toml");
-    assert!(e.ends_with("real/Cargo.toml has no [workspace]"), "{e}");
+    let want = format!("{} has no [workspace]", Path::new("real").join("Cargo.toml").display());
+    assert!(e.ends_with(&want), "{e}");
   }
 
   #[test]

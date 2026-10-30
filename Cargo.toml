@@ -22,11 +22,12 @@ required-features = ["cli"]
 [features]
 default = ["cli"]
 # The packer, the `shipo` binary; an app takes the library alone with `default-features = false`.
-cli = ["dep:flate2", "dep:hmac-sha256", "dep:lexopt", "dep:plist", "dep:png", "dep:serde", "dep:tar", "dep:toml"]
+cli = ["dep:flate2", "dep:getrandom", "dep:hmac-sha256", "dep:lexopt", "dep:plist", "dep:png", "dep:serde", "dep:tar", "dep:toml"]
 
 [dependencies]
 ed25519-compact = { version = "2.6.0", default-features = false }
 flate2 = { version = "1.1.10", optional = true }
+getrandom = { version = "0.4.3", optional = true }
 hmac-sha256 = { version = "1.1.15", default-features = false, optional = true }
 lexopt = { version = "0.3.2", optional = true }
 plist = { version = "1.10", optional = true }

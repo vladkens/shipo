@@ -5,7 +5,7 @@
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs::{self, File};
-use std::io::{self, Read, Write as _};
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
 use ed25519_compact::sha512::Hash;
@@ -160,10 +160,8 @@ pub fn keygen(files: &[PathBuf]) -> io::Result<Vec<String>> {
   }
 
   let mut seeds = vec![[0; 32]; files.len()];
-  let urandom = Path::new("/dev/urandom");
-  let mut random = File::open(urandom).map_err(at(urandom))?;
   for seed in &mut seeds {
-    random.read_exact(seed).map_err(at(urandom))?;
+    getrandom::fill(seed).map_err(|e| io::Error::other(format!("the OS's randomness: {e}")))?;
   }
 
   let mut keys = vec![];
@@ -530,11 +528,8 @@ mod tests {
     }
   }
 
-  #[cfg(unix)]
   #[test]
   fn keygen_writes_new_keys_alone() {
-    use std::os::unix::fs::PermissionsExt;
-
     let dir = Temp::files(&[("there.key", "x")]);
     let files = paths(&dir, &["a.key", "b.key"]);
     let keys = keygen(&files).unwrap();
@@ -544,7 +539,11 @@ mod tests {
       let text = fs::read_to_string(file).unwrap();
       assert!(text.len() == 65 && text.ends_with('\n'), "{text:?}");
       assert!(unhex::<32>(text.trim_end()).is_some(), "{text:?}");
-      assert_eq!(fs::metadata(file).unwrap().permissions().mode() & 0o777, 0o600);
+      #[cfg(unix)]
+      {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(fs::metadata(file).unwrap().permissions().mode() & 0o777, 0o600);
+      }
       assert_eq!(&Key::read(file).unwrap().public(), public);
       assert!(unhex::<32>(public).is_some());
     }

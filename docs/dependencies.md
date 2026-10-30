@@ -20,6 +20,7 @@ Why each crate is in, and why the packer writes some formats itself. A crate com
 | `png` | any PNG read and written | ~9 crates; every PNG colour type and depth |
 | `lexopt` | the arguments | no dependencies; clap is far heavier |
 | `ed25519-compact` | signing the feed, `keygen` | the library's, no dependencies |
+| `getrandom` | the seeds of `keygen` | the OS's randomness on all three hosts (`/dev/urandom` is Unix alone); 3 crates on macOS and Linux (`cfg-if`, `libc`), 2 on Windows (`cfg-if`), all already in the tree: adds itself alone |
 | `flate2` | zlib and gzip (DMG, .deb, squashfs, tarballs) | already in the tree through `png`; adds nothing |
 | `hmac-sha256` | SHA-256 of the pinned tools | no dependencies; `sha2` is 10 crates |
 | `tar` (no default features) | tarballs read and written | 3 crates (`tar`, `filetime`, `libc`); replaced ~340 lines of our own ustar code |
