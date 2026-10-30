@@ -264,17 +264,25 @@ jobs:
 
 ## 🆚 Compared
 
-| | shipo | [cargo-packager](https://github.com/crabnebula-dev/cargo-packager) | [Tauri](https://v2.tauri.app/distribute/) | [Velopack](https://github.com/velopack/velopack) | [Sparkle](https://sparkle-project.org) / [WinSparkle](https://winsparkle.org) | [Conveyor](https://conveyor.hydraulic.dev) |
-|---|---|---|---|---|---|---|
-| Made for | Rust apps | Rust and JS apps | Tauri apps | C#, Rust, C++, JS… apps | macOS / Windows apps | JVM, Electron, Flutter, native apps |
-| Packs every OS on | ✅ Linux or a Mac | ❌ each OS on its own, NSIS on any | ❌ each OS on its own, NSIS on any | ✅ a Mac, MSI on Windows | ➖ updaters only | ✅ any OS |
-| Formats | DMG, NSIS, AppImage, .deb | DMG, NSIS, MSI, AppImage, .deb, pacman | DMG, NSIS, MSI, AppImage, .deb, .rpm | .pkg, Setup.exe, MSI, AppImage | none, updates from your zip, DMG, .pkg / setup.exe | zip, MSIX, .deb with an apt repo |
-| Updater's crates, Linux / Windows / macOS | 8 / 10 / 15 | 114 / 117 / 125 | +42 / +42 / +53 | 107 / 115 / 107 | n/a, Objective-C / C++ libraries | n/a: MSIX, Sparkle, apt |
-| Signed updates | ✅ Ed25519, a spare key | ✅ minisign | ✅ minisign | ❌ checksums over HTTPS | ✅ Ed25519 | ✅ each OS's signing |
-| Delta updates | ❌ | ❌ | ❌ | ✅ | ✅ on macOS | ✅ on Windows and macOS |
-| License | MIT | MIT or Apache-2.0 | MIT or Apache-2.0 | MIT | MIT | paid, free for open source |
+Every crate an updater pulls in ships inside your app and must be trusted: shipo's updater adds only 8 to 15 crates and uses the OS's own HTTP.
 
-Crates are what `cargo tree -e normal` listed on 2026-10-30 for an app with just the updater, itself and build-time macros included, and for Tauri what its updater adds to a Tauri app. The others have years of use behind them and lead elsewhere: Sparkle is the reference on macOS, Sparkle, Velopack and Conveyor send delta updates, Conveyor packs and notarizes from any OS, and cargo-packager and Tauri also make MSI, pacman or .rpm.
+| | **shipo** | [cargo-packager](https://github.com/crabnebula-dev/cargo-packager) | [Tauri](https://v2.tauri.app/distribute/) | [Velopack](https://github.com/velopack/velopack) | [Sparkle](https://sparkle-project.org) | [Conveyor](https://conveyor.hydraulic.dev) |
+|---|---|---|---|---|---|---|
+| Packs every OS from one machine | ✅ | ❌ | ❌ | ✅ on a Mac | ➖ updater only | ✅ |
+| macOS release from Linux | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| Crates in your app, Linux / Windows / macOS | **8 / 10 / 15** | 114 / 117 / 125 | +42 / +42 / +53 | 107 / 115 / 107 | — | — |
+| Signed updates | ✅ with a spare key | ✅ one key | ✅ one key | ❌ HTTPS only | ✅ one key | ✅ |
+| Delta updates | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
+| License | MIT | MIT/Apache-2.0 | MIT/Apache-2.0 | MIT | MIT | paid (free for open source) |
+
+- **Packs every OS from one machine**: one CI job makes every installer. Sparkle and [WinSparkle](https://winsparkle.org) only update, so you pack with other tools.
+- **macOS release from Linux**: the DMG is signed and notarized on a Linux runner, so you need no Mac and no macOS runner.
+- **Crates in your app**: each one is code every user runs, and it adds build time. Tauri's count is what its updater adds to a Tauri app. Sparkle is an Objective-C framework and Conveyor uses each OS's updater, so they add none.
+- **Signed updates**: a stolen hosting or CI token can't push an update without the private key. With a spare key a leaked key is replaced by a normal release; with one key, only by a release people download by hand (Sparkle can switch keys in an update signed with your Developer ID). Conveyor relies on each OS's signing. Velopack checks only the hashes in its feed, so whoever can change the hosting can ship an update.
+- **Delta updates**: an update downloads only what changed; shipo downloads the whole app. Velopack sends them on every OS, Sparkle on macOS, Conveyor on Windows and macOS.
+- **License**: all are free for commercial use except Conveyor, paid for closed-source apps.
+
+The others lead elsewhere: delta updates, more formats (MSI, .rpm, pacman) and years of use, with Sparkle the reference on macOS. Crates are what `cargo tree -e normal` listed on 2026-10-30 for an app with only the updater, counting the updater itself and its build-time macros.
 
 ## 🤝 Contributing
 
