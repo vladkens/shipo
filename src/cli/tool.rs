@@ -135,6 +135,8 @@ pub fn fetch(url: &str, sha256: &str, path: &Path) -> io::Result<PathBuf> {
     fs::create_dir_all(dir)?;
   }
 
+  sweep(path)?;
+
   let mut curl = Command::new("curl");
   curl.args(["-fsSL", "--connect-timeout", "30", "--speed-limit", "1024", "--speed-time", "60"]);
   curl.args(["--retry", "3", "--retry-all-errors", "-o"]);
@@ -350,6 +352,34 @@ fn unique() -> String {
   let nanos = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
   let n = COUNT.fetch_add(1, Ordering::Relaxed);
   format!("{}-{}-{n}", std::process::id(), nanos.as_nanos())
+}
+
+/// `<file>` of `<file>.<unique>.part`, a part [place] makes.
+pub fn part_of(name: &str) -> Option<&str> {
+  let (file, unique) = name.strip_suffix(".part")?.rsplit_once('.')?;
+  let digits = |x: &str| !x.is_empty() && x.bytes().all(|b| b.is_ascii_digit());
+  (unique.split('-').count() == 3 && unique.split('-').all(digits)).then_some(file)
+}
+
+/// Removes the parts of `path` an hour old or more, of a run stopped midway; a newer one may be
+/// another run's at work.
+fn sweep(path: &Path) -> io::Result<()> {
+  let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else {
+    return Ok(());
+  };
+
+  let hour = Duration::from_secs(3600);
+  let old = |e: &fs::DirEntry| {
+    let age = e.metadata().and_then(|m| m.modified()).map(|t| t.elapsed().unwrap_or_default());
+    age.is_ok_and(|age| age >= hour)
+  };
+  for e in fs::read_dir(dir)?.flatten() {
+    if e.file_name().to_str().and_then(part_of) == Some(name) && old(&e) {
+      fs::remove_file(e.path())?;
+    }
+  }
+
+  Ok(())
 }
 
 /// The file `out`, made by `make` at a part of its own, `<out>.<unique>.part`, and renamed into
@@ -647,6 +677,16 @@ mod tests {
     fs::write(&path, "tampered").unwrap();
     assert!(fetch(&url, &good, &path).unwrap_err().to_string().contains("pinned"));
     assert_eq!(listed(), 0);
+
+    // A part an hour old is a stopped run's and goes; a newer one may be another run's at work.
+    let (stale, fresh) = (tools.join("tool.1-2-3.part"), tools.join("tool.4-5-6.part"));
+    let hour = SystemTime::now() - Duration::from_secs(3600);
+    File::create(&stale).unwrap().set_modified(hour).unwrap();
+    File::create(&fresh).unwrap();
+    fetch(&url, &sha256(&src).unwrap(), &path).unwrap();
+    assert!(!stale.exists() && fresh.exists());
+    assert_eq!(part_of("App.deb.12-345-0.part"), Some("App.deb"));
+    assert_eq!([part_of("App.deb.part"), part_of("App.deb.1-x-2.part")], [None, None]);
   }
 
   #[cfg(unix)]

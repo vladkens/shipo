@@ -57,7 +57,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: cargo-xwin@0.23.1
       - run: uv run scripts/setup-stub.py --check
@@ -91,11 +91,13 @@ jobs:
           merge-multiple: true
           path: e2e
       - run: uv run scripts/e2e-update.py pack e2e
+      # attach retries as the library does: DiskImages can be busy for a moment
       - if: runner.os == 'macOS'
         run: |
+          attach() { for _ in 1 2 3 4 5; do hdiutil attach "$@" && return; sleep 1; done; return 1; }
           for dmg in e2e/*/*.dmg; do
             hdiutil verify -quiet "$dmg"
-            dev=$(hdiutil attach -nomount -readonly -noverify "$dmg" | awk '/^\/dev\// { print $1 }')
+            dev=$(attach -nomount -readonly -noverify "$dmg" | awk '/^\/dev\// { print $1 }')
             fsck_hfs -n "$dev"
             hdiutil detach "$dev"
           done
@@ -140,9 +142,10 @@ jobs:
           diff <(own e2e-sums-Linux/SHA256SUMS) <(own e2e-sums-macOS/SHA256SUMS)
       # the ad-hoc DMG of Linux and Windows opens and runs on a Mac
       - run: |
+          attach() { for _ in 1 2 3 4 5; do hdiutil attach "$@" && return; sleep 1; done; return 1; }
           for dmg in dmg/*/*.dmg; do
             hdiutil verify -quiet "$dmg"
-            hdiutil attach -nobrowse -readonly -mountpoint mnt "$dmg"
+            attach -nobrowse -readonly -mountpoint mnt "$dmg"
             codesign --verify --strict mnt/Hello.app
             echo "$dmg: $(mnt/Hello.app/Contents/MacOS/hello)"
             hdiutil detach mnt

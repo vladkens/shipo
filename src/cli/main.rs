@@ -348,7 +348,7 @@ pub fn out(dir: &Path, name: &str, tag: Option<&str>, end: &str) -> PathBuf {
 
 /// Removes `dir`'s update.txt and the files a run of any [label] writes, `<name>-<label>-<end>` of
 /// each [Arch]'s ends, so no old feed, package of a triple gone from `dir` or other version's file
-/// is left beside the new ones, which a glob would upload.
+/// is left beside the new ones, which a glob would upload; and their parts a stopped run left.
 fn clean(dir: &Path, name: &str) -> io::Result<()> {
   let ends: Vec<_> = Arch::ALL
     .into_iter()
@@ -370,7 +370,8 @@ fn clean(dir: &Path, name: &str) -> io::Result<()> {
   for entry in fs::read_dir(dir)? {
     let entry = entry?;
     let file = entry.file_name();
-    let stale = file == "update.txt" || file.to_str().is_some_and(ours);
+    let file = file.to_str().map(|f| tool::part_of(f).unwrap_or(f));
+    let stale = file.is_some_and(|f| f == "update.txt" || ours(f));
     if stale && !entry.file_type()?.is_dir() {
       fs::remove_file(entry.path())?;
     }
@@ -673,6 +674,10 @@ mod tests {
       "Wavo Pro-dev-linux-x86_64.deb",
       "Other-dev-linux-x86_64.deb",
       "notes.md",
+      "Wavo-dev-linux-x86_64.deb.123-456-7.part",
+      "update.txt.1-2-3.part",
+      "notes.md.1-2-3.part",
+      "Wavo-dev-linux-x86_64.deb.x.part",
     ];
 
     for name in names {
@@ -685,11 +690,13 @@ mod tests {
       "Other-dev-linux-x86_64.deb",
       "Wavo Pro-dev-linux-x86_64.deb",
       "Wavo-dev-folder",
+      "Wavo-dev-linux-x86_64.deb.x.part",
       "Wavo-dev-linux-x86_64.zip",
       "Wavo-devx.txt",
       "Wavo-v1.2.0-notes.md",
       "Wavo-v2-v1.0.0-linux-x86_64.deb",
       "notes.md",
+      "notes.md.1-2-3.part",
     ];
     assert_eq!(listed(&tmp), want);
   }
