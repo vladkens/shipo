@@ -45,11 +45,10 @@ use windows_sys::core::{GUID, HRESULT, PWSTR};
 
 use super::payload::{self, Info};
 use super::{
-  Args, RETRY_OWN, Step, UNINSTALLER, Value, folder, guid, install, own, placeholder, previous,
-  remove, retry, same, uninstaller, values, wizard,
+  Args, RETRY_OWN, Step, UNINSTALL, UNINSTALLER, Value, folder, guid, install, own, placeholder,
+  previous, remove, retry, same, uninstaller, values, wizard,
 };
 
-const UNINSTALL: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
 const RUN: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const APPROVED: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
 

@@ -569,6 +569,27 @@ mod tests {
     assert_eq!(super::job(Os::Windows, &beside), Some(None), "Windows' beside the folder");
   }
 
+  /// What an app of v0.1 or later hands the new version's installer on macOS and Linux: the flag,
+  /// its pid, the new app in a `.shipo-update-<pid>-<nanos>` folder beside the target, the target,
+  /// `--` and its own arguments. It waits 10 s for `ready` in that folder, quits within 30 s and
+  /// gets a failed install's error in `SHIPO_UPDATE_ERROR`. (Windows' installer is the old exe.)
+  #[test]
+  fn compat_the_installer_older_apps_start() {
+    assert_eq!((MARK, NOTE), ("ready", "SHIPO_UPDATE_ERROR"));
+    assert!(QUIT >= Duration::from_secs(30));
+    let root = env::temp_dir();
+    let dir = ".shipo-update-41-1761800000000000000";
+    for (os, new, target) in
+      [(Os::Mac, "new/A.app", "A.app"), (Os::Linux, "app.AppImage", "A.AppImage")]
+    {
+      let (new, target) = (root.join(dir).join(new), root.join(target));
+      let (n, t) = (new.clone().into(), target.clone().into());
+      let args = ["--shipo-install".into(), "41".into(), n, t, "--".into(), "-x".into()];
+      let want = Job { pid: 41, new, target, dir: root.join(dir), args: vec!["-x".into()] };
+      assert_eq!(job(os, &args), Some(Some(want)), "{os:?}");
+    }
+  }
+
   #[test]
   fn download_removes_what_an_ended_installer_left() {
     let root = dir("tidy");

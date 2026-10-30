@@ -1,5 +1,5 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/shipo
-//! The update feed, `update.txt` as `spec.md` gives it, signed by Ed25519 in process, and the
+//! The update feed, `update.txt` (the readme's Feed), signed by Ed25519 in process, and the
 //! private keys that sign it: read from a file or `$SHIPO_UPDATE_KEY`, or made by `keygen`.
 
 use std::ffi::OsString;
@@ -14,7 +14,7 @@ use ed25519_compact::{KeyPair, Seed};
 use crate::tool::{self, base64, hex};
 use crate::{at, bad};
 
-/// The most bytes a feed may be (`spec.md`).
+/// The most bytes a feed may be: the apps read no more.
 const MAX: usize = 1 << 20;
 
 /// The feed's platforms in the order it lists them, each with the end of its file's name; a
@@ -186,7 +186,7 @@ pub fn keygen(files: &[PathBuf]) -> io::Result<Vec<String>> {
   Ok(keys)
 }
 
-/// `version` as the apps compare it (`spec.md`): numeric dot parts, then an optional
+/// `version` as the apps compare it: numeric dot parts, then an optional
 /// `-<pre-release>` and `+<build>`, one word, no `v`.
 fn comparable(version: &str) -> bool {
   let word = version.bytes().all(|b| b.is_ascii_graphic());
@@ -204,8 +204,7 @@ fn encode(name: &str) -> String {
     .collect()
 }
 
-/// `url` as the apps take it (`spec.md`): https to a host, or http to loopback, all printable
-/// ASCII.
+/// `url` as the apps take it: https to a host, or http to loopback, all printable ASCII.
 fn secure(url: &str) -> bool {
   let (scheme, rest) = url.split_once("://").unwrap_or_default();
   let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
@@ -250,9 +249,8 @@ mod tests {
   const PUBLIC: &str = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
   /// The seed's PKCS#8 in base64, the body of its PEM.
   const SEED_PKCS8: &str = "MC4CAQAwBQYDK2VwBCIEIJ1hsZ3v/VpguoRK9JLsLMREScVpezJpGXA7rAMcrn9g";
-  /// The SHA-512 of `abc` (FIPS 180-2) and of nothing.
+  /// The SHA-512 of `abc` (FIPS 180-2).
   const ABC: &str = "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f";
-  const EMPTY: &str = "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e";
 
   /// The paths of `names` in `dir`.
   fn paths(dir: &Path, names: &[&str]) -> Vec<PathBuf> {
@@ -271,30 +269,22 @@ mod tests {
     Key::parse(SEED, "test").unwrap()
   }
 
+  /// The feed v0.1's packer wrote of these files, signed by RFC 8032's test key.
+  const V0_1: &str = include_str!("../../tests/fixtures/update-v0.1.txt");
+
+  /// The packer still writes the feed v0.1's apps read, byte for byte; a change here must keep
+  /// them reading it (a record of a new first word, which they skip), with the person's approval.
   #[test]
-  fn the_feeds_bytes() {
-    let names = [
-      "App-dev-linux-x86_64.AppImage",
-      "App-dev-windows-x64-setup.exe",
-      "App-dev-macos-aarch64.dmg",
-    ];
-    let dir = Temp::files(&[(names[0], "abc"), (names[1], ""), (names[2], "abc")]);
+  fn compat_the_feed_v0_1_apps_read() {
+    let names = PLATFORMS.map(|(_, end)| format!("App-v1.2.0{end}"));
+    let dir = Temp::files(&names.each_ref().map(|n| (n.as_str(), "abc")));
     let notes = "https://github.com/me/app/releases/tag/v1.2.0";
     let url = "https://github.com/me/app/releases/download/v{version}/";
     let text = body("1.2.0", Some(notes), url, &names.map(|n| dir.join(n))).unwrap();
     let path = write(&key(), &text, &dir.join("distrib")).unwrap();
     assert_eq!(path, dir.join("distrib/update.txt"));
     assert_eq!(fs::read_dir(dir.join("distrib")).unwrap().count(), 1, "no part left");
-    let base = "https://github.com/me/app/releases/download/v1.2.0";
-    let want = format!(
-      "version 1.2.0\n\
-       notes {notes}\n\
-       macos-aarch64 3 {ABC} {base}/App-dev-macos-aarch64.dmg\n\
-       windows-x86_64 0 {EMPTY} {base}/App-dev-windows-x64-setup.exe\n\
-       linux-x86_64 3 {ABC} {base}/App-dev-linux-x86_64.AppImage\n\
-       sig 6f55910c0e2bb1e3201659a7c62456791784703bd260cbb295ac012894a25c256a4a09aa740491e0e2e0650107dea0c375bcfbd216d327666fbfc30999016d00\n"
-    );
-    assert_eq!(fs::read_to_string(&path).unwrap(), want);
+    assert_eq!(fs::read_to_string(&path).unwrap(), V0_1);
   }
 
   #[test]
@@ -522,7 +512,7 @@ mod tests {
       assert!(!comparable(v), "{v:?}");
     }
 
-    // The library takes the same, but for a leading `v`, which `spec.md` keeps out of the feed.
+    // The library takes the same, but for a leading `v`, which the packer keeps out of the feed.
     let reader = shipo::Feed::new("https://h/update.txt", &[PUBLIC]);
     for v in ["1", "1.2.0-rc.1+b.7", "latest", "1.x", "1..0", "1.0 beta", "99999999999999999999"] {
       let text = format!("version {v}\n");

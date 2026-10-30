@@ -22,7 +22,7 @@ The `shipo` command turns your app's built binaries into installers for macOS, W
 - 🪶 **A tiny updater**: 1 dependency on Linux, 3 on Windows, 8 on macOS
 - 🔐 **Signed updates**, with a spare key to replace a leaked one
 - 🔄 **Updates silently after the app quits**, restarts it and reports any failure
-- 📄 **A plain-text feed** any client can read, described in [spec.md](spec.md)
+- 📄 **A plain-text feed** any client can read ([Feed](#-feed))
 
 ## ⚡ Quick start
 
@@ -214,6 +214,28 @@ macOS releases need a paid Apple Developer ID, and an App Store Connect API key 
 On Linux shipo signs the app and the DMG with the certificate and notarizes the DMG. On a Mac the keychain's Developer ID signs, and the `APPLE_CERTIFICATE*` secrets go unused. On macOS the updater installs only a release signed with the same Developer ID as the running app.
 
 A dev build, without `--tag`, needs no secrets. The app is signed ad hoc on Linux, or on a Mac by a local identity shipo creates in the login keychain. The DMG is notarized only when the `APPLE_API_*` secrets are set.
+
+## 📄 Feed
+
+The feed, `update.txt`, is one signed text file you can host anywhere over https. shipo writes it, and any tool that writes the same lines works too:
+
+```text
+version 1.2.0
+notes https://github.com/me/hello/releases/tag/v1.2.0
+macos-aarch64 394788 <sha512> https://github.com/me/hello/releases/download/v1.2.0/Hello-v1.2.0-macos-aarch64.dmg
+windows-x86_64 285930 <sha512> https://github.com/me/hello/releases/download/v1.2.0/Hello-v1.2.0-windows-x64-setup.exe
+linux-x86_64 412204 <sha512> https://github.com/me/hello/releases/download/v1.2.0/Hello-v1.2.0-linux-x86_64.AppImage
+sig <signature>
+```
+
+| Line | What it holds |
+|---|---|
+| `version <version>` | once: the release's version without `v`, such as `1.2.0` or `1.3.0-rc.1`, ordered as semver |
+| `notes <url>` | optional, once: the release's page |
+| `<os>-<arch> <size> <sha512> <url>` | once per platform, `macos`, `windows` or `linux` and `x86_64` or `aarch64`: the file's size in bytes, its SHA-512 and its URL |
+| `sig <signature>` | the last line: the Ed25519 signature (RFC 8032) of every byte before it |
+
+The feed is UTF-8 and at most 1 MiB, one line per record, its fields split by single spaces, its lines ending in LF or CRLF. Hashes and signatures are hex, in either case. URLs are https, or http to `127.0.0.1`, `localhost` or `[::1]` for tests. An app skips a line whose first word it doesn't know, so the format grows without breaking it: an app on an older shipo reads the feeds newer ones write.
 
 ## 🚀 Releasing from GitHub Actions
 

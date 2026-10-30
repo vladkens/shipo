@@ -7,8 +7,8 @@
 //!
 //! The library has no UI and no state of its own: the app draws the menu item, the popup, the
 //! progress and the setting, and keeps the check time and a skipped version. It never shows a
-//! window and never takes the focus. `spec.md` is the contract with the packer: the feed, the
-//! release files, where each OS's app is and how it is replaced.
+//! window and never takes the focus. An app on an older version of this crate takes the updates a
+//! newer packer makes; the feed's format is in the readme.
 //!
 //! ```no_run
 //! /// The feed and the public keys `shipo keygen` printed, the working one and the spare.
@@ -139,11 +139,12 @@ pub fn download(release: &Release, mut progress: impl FnMut(u64, u64)) -> Result
 }
 
 /// Starts the [Staged] app's installer, the new version's [finish] (on Windows this one's), and
-/// returns once it runs; the app must then quit within 30 s. The installer waits for this process
-/// to end, puts the new version in, starts it with this process's arguments and removes what is
-/// left; an error of those comes from [finish] in the app it starts. [Error::Install] when the
-/// installer gives no sign in 10 s, nothing swapped. The staging folder is the installer's from
-/// here on: on an error the next [download] removes it.
+/// returns once it runs; the app must then quit within 30 s. On macOS the installer is the new
+/// bundle's executable of this one's name, so every release keeps that name. The installer waits
+/// for this process to end, puts the new version in, starts it with this process's arguments and
+/// removes what is left; an error of those comes from [finish] in the app it starts.
+/// [Error::Install] when the installer gives no sign in 10 s, nothing swapped. The staging folder
+/// is the installer's from here on: on an error the next [download] removes it.
 pub fn install(staged: Staged) -> Result<()> {
   let Staged { new, target, dir } = staged;
   let (dir, exe) = (dir.keep(), env::current_exe()?);

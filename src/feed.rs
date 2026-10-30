@@ -1,6 +1,6 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/shipo
-//! The feed and the release it offers, read as `spec.md` gives it: its `sig` line checked by any
-//! of the app's keys first, then the release for this platform when its version is newer than the
+//! The feed and the release it offers (the readme's Feed): its `sig` line checked by any of the
+//! app's keys first, then the release for this platform when its version is newer than the
 //! running one.
 
 use std::fs::{self, File};
@@ -23,7 +23,7 @@ pub struct Feed<'a> {
   pub url: &'a str,
   /// The public keys, each its 32 bytes in 64 hex digits: a feed signed by any of them is taken.
   /// `shipo keygen` makes two, the working one and the spare kept offline, so a leaked key can be
-  /// dropped by a release the other signs (`spec.md`).
+  /// dropped by a release the other signs (the readme's Keys).
   pub keys: &'a [&'a str],
 }
 
@@ -486,6 +486,29 @@ mod tests {
     // The signature is checked before the feed is read.
     let e = read_feed(&format!("{{\nsig {sig}\n")).unwrap_err();
     assert!(matches!(e, Error::Signature(_)), "{e}");
+  }
+
+  /// The feed v0.1's packer wrote: the library reads it still, and the packer's test of the same
+  /// file keeps the packer writing what v0.1's apps read.
+  #[test]
+  fn compat_a_v0_1_feed_reads() {
+    let feed = include_str!("../tests/fixtures/update-v0.1.txt");
+    let (data, sig) = signed(feed.as_bytes()).unwrap();
+    verify(&keys(&[RFC_KEY]), data.as_bytes(), sig).unwrap();
+    let base = "https://github.com/me/app/releases/download/v1.2.0/App-v1.2.0";
+    for (platform, end) in [
+      ("macos-x86_64", "macos-x86_64.dmg"),
+      ("macos-aarch64", "macos-aarch64.dmg"),
+      ("windows-x86_64", "windows-x64-setup.exe"),
+      ("windows-aarch64", "windows-arm64-setup.exe"),
+      ("linux-x86_64", "linux-x86_64.AppImage"),
+      ("linux-aarch64", "linux-aarch64.AppImage"),
+    ] {
+      let r = release(data, "1.1.0", platform).unwrap().unwrap();
+      assert_eq!((r.version.as_str(), r.url, r.size), ("1.2.0", format!("{base}-{end}"), 3));
+      let notes = "https://github.com/me/app/releases/tag/v1.2.0";
+      assert_eq!((r.notes.as_deref(), r.sha512), (Some(notes), hex(ABC).unwrap()), "{platform}");
+    }
   }
 
   #[test]

@@ -1,8 +1,8 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/shipo
 //! The Windows setup stub: it installs the app its payload holds for the current user, or, as the
-//! uninstaller (a payload of no files), removes it, as spec.md's Windows section gives it. The
-//! packer stamps its icon, version and manifest and appends the payload ([payload], the packer's
-//! `src/cli/payload.rs`). A package of its own, so the `shipo` crate's binary stays the packer.
+//! uninstaller (a payload of no files), removes it. The packer stamps its icon, version and
+//! manifest and appends the payload ([payload], the packer's `src/cli/payload.rs`). A package of
+//! its own, so the `shipo` crate's binary stays the packer.
 //! This file is what holds on any host: the arguments, the files written and removed, the Uninstall
 //! key's values; `windows.rs` the registry, the shortcuts and the run, `wizard.rs` the wizard.
 //!
@@ -39,6 +39,9 @@ static PLACEHOLDER_DATA: [u8; PLACEHOLDER] = payload::placeholder();
 /// The uninstaller's name in the install folder, as NSIS setups name theirs, so an install over
 /// one of those replaces it.
 const UNINSTALLER: &str = "Uninstall.exe";
+/// The parent of the app's Uninstall key in HKCU, `{<AppId>}`, where an install before this one,
+/// an NSIS setup's too, left `InstallLocation`.
+const UNINSTALL: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
 /// The licence's name in the install folder.
 const LICENSE: &str = "LICENSE.txt";
 /// How long a file in use is tried again: the app that just quit may hold its exe a moment.
@@ -457,6 +460,27 @@ mod tests {
       let e = folder(no).unwrap_err().to_string();
       assert_eq!(e, format!("/D= takes an absolute folder, not {no:?}"));
     }
+  }
+
+  /// What a newer setup takes from older versions: the key and its `InstallLocation` an install
+  /// left, v0.1's NSIS setup's too, where `/S` alone (v0.1's updater) installs; and `/S /D=<the
+  /// app's folder>`, as later updaters run it, the program's path quoted.
+  #[test]
+  fn compat_older_installs_and_updaters() {
+    assert_eq!(UNINSTALL, r"Software\Microsoft\Windows\CurrentVersion\Uninstall");
+    let dir = r"C:\Users\Me\AppData\Local\Programs\My  App";
+    let location = ("InstallLocation", Value::Text(dir.into()));
+    assert!(values(&info(), Path::new(dir), 1).contains(&location));
+    assert_eq!(folder(dir), Some(dir.into()));
+
+    let exe = format!(r#""{dir}\.shipo-update-41-17\Hello-v2-windows-x64-setup.exe""#);
+    let parse = |args: &[&str], raw: &str| Args::parse(args.iter().map(OsString::from), raw);
+    assert_eq!(parse(&["/S"], &format!("{exe} /S")), Args { silent: true, dir: None });
+    let args = parse(
+      &["/S", r"/D=C:\Users\Me\AppData\Local\Programs\My", "App"],
+      &format!("{exe} /S /D={dir}"),
+    );
+    assert_eq!(args, Args { silent: true, dir: Some(dir.into()) });
   }
 
   #[test]

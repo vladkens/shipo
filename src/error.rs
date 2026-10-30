@@ -14,9 +14,9 @@ pub enum Error {
   /// tool the update runs (`hdiutil`, `ditto` on macOS).
   #[error(transparent)]
   Io(#[from] std::io::Error),
-  /// The feed is not one `spec.md` gives: larger than 1 MiB, not UTF-8, a record malformed or
-  /// repeated, no version or one that doesn't compare with the app's, a URL not https; or on
-  /// Windows a release URL that names no setup.
+  /// An invalid feed: larger than 1 MiB, not UTF-8, a record malformed or repeated, no version
+  /// or one that doesn't compare with the app's, a URL not https; or on Windows a release URL that
+  /// names no setup.
   #[error("invalid feed: {0}")]
   Feed(String),
   /// The feed is not signed by any of the app's keys: its last line is not its one `sig` line, or
