@@ -1,16 +1,22 @@
-## Unreleased
+## v0.2.0 – 2026-10-31
+
+A classic Windows setup wizard, and every installer packed on any OS.
 
 ### Features
 
 - Added a new Windows setup with a classic install wizard, an optional desktop shortcut and a silent `/S` mode.
-- Added updates of v0.1's Windows installs to the new setup, with no reinstall.
+- Windows apps installed with v0.1 move to the new setup on their next update, with no reinstall.
+- Updates now work for Windows apps installed in a custom folder, picked in the wizard or set with `/D=`.
 - Added packing on Windows: Linux, macOS or Windows builds every installer, with nothing else to install.
-- Added a fake update to see an app's updater UI with no release: a feed marked `.fakeable()` and `SHIPO_FAKE_UPDATE=<version>`.
-- Added reproducible packages: with `SOURCE_DATE_EPOCH` set, shipo packs the same bytes from any host, except a DMG signed with an identity and the feed that lists it.
+- Added a prebuilt packer for Windows.
+- Added `SHIPO_FAKE_UPDATE=<version>` to preview your app's update UI without a release, for feeds marked `.fakeable()`.
+- Added reproducible packages: with `SOURCE_DATE_EPOCH` set, every OS packs the same bytes, apart from a DMG signed with an identity and the feed listing it.
 
 ### Fixes
 
 - Fixed update network errors on Windows showing a bare code instead of a message.
+
+**Full Changelog**: https://github.com/vladkens/shipo/compare/v0.1.0...v0.2.0
 
 ## v0.1.0 – 2026-10-30
 

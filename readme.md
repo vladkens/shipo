@@ -199,6 +199,8 @@ shipo feed --url https://example.com/hello/{version} dist/*.dmg dist/*-setup.exe
 shipo app --bin target/release/hello # the signed Hello.app alone, to try it on a Mac
 ```
 
+Ship one OS only? Put only its build in `dist/`: shipo packs what it finds.
+
 It writes the installers into `dist/`, and with `--tag` the signed feed, `update.txt`:
 
 | File | Updated by |
@@ -320,6 +322,19 @@ Crates: `cargo tree` of an app with only the updater, on 2026-10-30; for Tauri, 
 ## 🤝 Contributing
 
 Pull requests are welcome, including ones made with agents: point yours at [agents.md](agents.md).
+
+## 🗺️ Roadmap
+
+- Windows code signing (Authenticode) from any OS, with cloud signing services.
+- A C library (a .dylib, .so or .dll and a header), so apps in other languages can use the updater.
+- Update channels, such as beta and stable.
+- A minimum OS version per release, so an app on an older system skips an update it can't run.
+
+## 🤖 How it's made
+
+shipo is written by AI agents (Claude Code, Codex) following [agents.md](agents.md); I choose what to build and review every pull request. CI builds every package on Linux, macOS and Windows, checks each with the OS's own tools and that all three give the same bytes (but for the DMG a Mac signs), and has a test app update itself from 1.0.0 to 2.0.0 on each OS.
+
+I've written software by hand for years ([macmon](https://github.com/vladkens/macmon), [twscrape](https://github.com/vladkens/twscrape), [ecloop](https://github.com/vladkens/ecloop)); agents are how I build now. Releases are rare; the CLI and data formats stay compatible, the API may still change before 1.0, and every break is listed in [changelog.md](changelog.md).
 
 ## 📝 License
 
