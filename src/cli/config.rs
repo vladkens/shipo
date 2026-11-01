@@ -214,6 +214,9 @@ impl Config {
         )));
       }
 
+      // The name shown is the flag's, not a `macos.plist` one.
+      self.macos.plist.remove("CFBundleName");
+      self.macos.plist.remove("CFBundleDisplayName");
       self.name = name;
     }
 

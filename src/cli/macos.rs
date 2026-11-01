@@ -618,7 +618,8 @@ LSEnvironment = { HELLO_MODE = "quiet" }
       icon: Some(tmp.join(icon)),
     };
 
-    let cfg = config(&tmp, "").with(over("dev.png")).unwrap();
+    // MACOS's `plist.CFBundleName` gives way to `--name`.
+    let cfg = config(&tmp, MACOS).with(over("dev.png")).unwrap();
     let app = bundle(&cfg, &bin).unwrap();
     assert_eq!(app, tmp.join("target/Hello Dev.app"));
     assert!(app.join("Contents/MacOS/hello").is_file());
