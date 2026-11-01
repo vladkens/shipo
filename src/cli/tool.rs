@@ -139,7 +139,9 @@ pub fn fetch(url: &str, sha256: &str, path: &Path) -> io::Result<PathBuf> {
 
   let mut curl = Command::new("curl");
   curl.args(["-fsSL", "--connect-timeout", "30", "--speed-limit", "1024", "--speed-time", "60"]);
-  curl.args(["--retry", "3", "--retry-all-errors", "-o"]);
+  // A test's missing file needn't wait out the backoff of 1, 2 and 4 s.
+  let retries = if cfg!(test) { "0" } else { "3" };
+  curl.args(["--retry", retries, "--retry-all-errors", "-o"]);
   let got = place(path, |part| {
     run(curl.arg(part).arg(url))?;
     check(part, sha256, &name)

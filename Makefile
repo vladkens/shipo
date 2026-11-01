@@ -19,7 +19,7 @@ check:
 test:
 	cargo test
 	cargo test --manifest-path setup/Cargo.toml
-	cargo test --no-default-features
+	cargo test --no-default-features --doc
 	uv run --no-project python -m doctest scripts/size.py
 
 build:

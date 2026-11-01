@@ -261,7 +261,8 @@ mod tests {
     let root = dir("dmg");
     let app = root.join("A.app");
     bundle(&app, "com.example.a", "1");
-    // A staging folder `name` with `update.dmg` made of `apps`, copies of the app, and a file.
+    // A staging folder `name` with `update.dmg` made of `apps`, copies of the app, and a file;
+    // by `makehybrid`, as `hdiutil create` takes seconds an image.
     let image = |name: &str, apps: &[&str]| {
       let src = root.join(name).join("src");
       write(&src, &[("readme", "")]);
@@ -273,7 +274,7 @@ mod tests {
 
       let dmg = root.join(name).join("update.dmg");
       let mut make = Command::new("/usr/bin/hdiutil");
-      make.args(["create", "-quiet", "-format", "UDZO", "-srcfolder"]).arg(src).arg(&dmg);
+      make.args(["makehybrid", "-quiet", "-hfs", "-o"]).arg(&dmg).arg(src);
       assert!(make.status().unwrap().success());
       dmg
     };
