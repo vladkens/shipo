@@ -43,6 +43,15 @@ pub struct Config {
   pub target: PathBuf,
 }
 
+/// What `shipo app` sets in place of the config's for its one bundle: `--id`, `--name`, `--icon`.
+#[derive(Debug, Default, PartialEq)]
+pub struct Overrides {
+  pub id: Option<String>,
+  pub name: Option<String>,
+  /// From the current folder, as `--bin`.
+  pub icon: Option<PathBuf>,
+}
+
 /// A workspace root: its folder and its `[workspace.package]`, the values a member inherits.
 struct Workspace {
   dir: PathBuf,
@@ -128,6 +137,7 @@ impl Config {
     let mut shipo: Shipo = Value::Table(shipo.clone())
       .try_into()
       .map_err(|e| bad(format!("[package.metadata.shipo] {}", said(e))))?;
+    reverse_dns(&shipo.id, "[package.metadata.shipo] id")?;
 
     shipo.macos.entitlements = shipo.macos.entitlements.map(|path| root.join(path));
     let ws = workspace(&root, &toml, pkg)?;
@@ -189,6 +199,32 @@ impl Config {
 }
 
 impl Config {
+  /// The config with `over`'s values in place of its own: the id and the name checked here, the
+  /// icon as the config's, when the bundle is made.
+  pub fn with(mut self, over: Overrides) -> io::Result<Self> {
+    if let Some(id) = over.id {
+      reverse_dns(&id, "--id")?;
+      self.id = id;
+    }
+
+    if let Some(name) = over.name {
+      // The bundle's file name in the target folder.
+      if name.is_empty() || name.chars().any(|c| c.is_control() || c == '/' || c == '\\') {
+        return Err(bad(format!(
+          "--name {name:?} makes no file name: no /, \\ or control character"
+        )));
+      }
+
+      self.name = name;
+    }
+
+    if let Some(icon) = over.icon {
+      self.icon = icon;
+    }
+
+    Ok(self)
+  }
+
   /// The version's leading numbers, `\d+(\.\d+)*`, as macOS and Windows take it: 1.2.0 of
   /// 1.2.0-beta.1; an error if it starts with none.
   pub fn numeric(&self) -> io::Result<&str> {
@@ -205,6 +241,18 @@ impl Config {
     }
 
     Ok(&self.version[..end])
+  }
+}
+
+/// Checks the `id`, `what` naming it, is reverse DNS as a bundle id takes it: two parts or more of
+/// A-Z, a-z, 0-9 and `-`, joined by dots.
+fn reverse_dns(id: &str, what: &str) -> io::Result<()> {
+  let part = |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+  match id.contains('.') && id.split('.').all(part) {
+    true => Ok(()),
+    false => Err(bad(format!(
+      "{what} {id:?} is not reverse DNS: two parts or more of A-Z, a-z, 0-9 and -, joined by dots"
+    ))),
   }
 }
 
@@ -427,6 +475,51 @@ mod tests {
     assert!(c.windows.app_id.is_none() && c.linux.categories.is_empty());
     assert_eq!((c.authors, c.repository), (vec![], String::new()));
     assert_eq!((c.workspace, c.target), (dir.to_path_buf(), dir.join("target")));
+  }
+
+  #[test]
+  fn ids() {
+    for id in ["me.app", "com.example.wavo-dev", "Com.Example.App2"] {
+      assert!(reverse_dns(id, "id").is_ok(), "{id}");
+    }
+
+    for id in ["app", "", "me.", ".me", "me..app", "me.my_app", "me.app!", "me.wavö"] {
+      let e = reverse_dns(id, "--id").unwrap_err().to_string();
+      let want = "is not reverse DNS: two parts or more of A-Z, a-z, 0-9 and -, joined by dots";
+      assert_eq!(e, format!("--id {id:?} {want}"));
+    }
+
+    let e = error(&[("Cargo.toml", &APP.replace("me.app", "app"))], "Cargo.toml");
+    assert!(e.starts_with("[package.metadata.shipo] id \"app\" is not reverse DNS"), "{e}");
+  }
+
+  #[test]
+  fn overrides() {
+    let dir = Temp::files(&[("Cargo.toml", APP)]);
+    let c = Config::read(&dir.join("Cargo.toml"), &none).unwrap();
+    let c = c.with(Overrides::default()).unwrap();
+    assert_eq!((c.id.as_str(), c.name.as_str()), ("me.app", "App"));
+    assert_eq!(c.icon, dir.join("icon.png"));
+
+    let over = Overrides {
+      id: Some("me.app.dev".into()),
+      name: Some("App Dev".into()),
+      icon: Some("dev.png".into()),
+    };
+    let c = c.with(over).unwrap();
+    assert_eq!((c.id.as_str(), c.name.as_str()), ("me.app.dev", "App Dev"));
+    assert_eq!((c.icon, c.bin.as_str()), (PathBuf::from("dev.png"), "app"));
+
+    let with = |over: Overrides| {
+      let c = Config::read(&dir.join("Cargo.toml"), &none).unwrap();
+      c.with(over).unwrap_err().to_string()
+    };
+    let e = with(Overrides { id: Some("dev".into()), ..Default::default() });
+    assert!(e.starts_with("--id \"dev\" is not reverse DNS"), "{e}");
+    for name in ["", "a/b", "a\\b", "a\nb"] {
+      let e = with(Overrides { name: Some(name.into()), ..Default::default() });
+      assert_eq!(e, format!("--name {name:?} makes no file name: no /, \\ or control character"));
+    }
   }
 
   #[test]

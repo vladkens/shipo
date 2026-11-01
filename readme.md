@@ -199,6 +199,8 @@ shipo feed --url https://example.com/hello/{version} dist/*.dmg dist/*-setup.exe
 shipo app --bin target/release/hello # the signed Hello.app alone, to try it on a Mac
 ```
 
+`shipo app` also takes `--id`, `--name` and `--icon` in place of the config's, for a dev build beside the installed app, such as `Hello Dev.app`.
+
 Ship one OS only? Put only its build in `dist/`: shipo packs what it finds.
 
 It writes the installers into `dist/`, and with `--tag` the signed feed, `update.txt`:

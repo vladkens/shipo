@@ -1,3 +1,9 @@
+## Unreleased
+
+### Features
+
+- Added `--id`, `--name` and `--icon` to `shipo app`, to build a dev flavor beside the installed app.
+
 ## v0.2.0 – 2026-10-31
 
 A classic Windows setup wizard, and every installer packed on any OS.

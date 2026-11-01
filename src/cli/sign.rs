@@ -392,6 +392,14 @@ pub(crate) mod tests {
     assert_eq!(local("Hello"), "Hello Local Signing");
   }
 
+  /// `--name` names the local identity too, so a dev flavor has its own.
+  #[test]
+  fn local_identity_of_name() {
+    let over = crate::config::Overrides { name: Some("Hello Dev".into()), ..Default::default() };
+    let cfg = crate::macos::tests::config(Path::new("/app"), "").with(over).unwrap();
+    assert_eq!(local(&cfg.name), "Hello Dev Local Signing");
+  }
+
   #[test]
   fn signing_args() {
     let args = |v: Vec<OsString>| {
