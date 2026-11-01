@@ -1,6 +1,6 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/shipo
 //! The shipo packer: an app's binaries into signed installers and a signed update feed. This file
-//! is its command line; [USAGE] is its documentation.
+//! is its command line, which clap parses from [Command].
 
 mod config;
 mod dmg;
@@ -19,183 +19,126 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::{fmt, fs, io};
 
+use clap::error::ErrorKind;
+use clap::{CommandFactory, Parser, Subcommand};
 use config::{Config, Overrides};
 
-/// `shipo --help`.
-const USAGE: &str = "\
-shipo: an app's binaries into signed installers and a signed update feed.
+#[derive(Debug, Parser, PartialEq)]
+#[command(
+  name = "shipo",
+  about = "shipo: an app's binaries into signed installers and a signed update feed.",
+  arg_required_else_help = true,
+  disable_help_subcommand = true,
+  subcommand_value_name = "command"
+)]
+struct Cli {
+  #[command(subcommand)]
+  cmd: Command,
+}
 
-Usage:
-  shipo app --bin <file> [--id] [--name] [--icon]    the macOS .app of the binary, signed
-  shipo release <dir> [--tag v<version>]              the installers of <dir>/<triple>/<bin>[.exe]
-  shipo feed --url <base> [--notes <url>] <files>...  update.txt of the files, signed
-  shipo keygen [<file>...]                            a key per file, its public half printed
-  shipo keygen --public <file>                        print a key's public half
-
-Options:
-  --manifest <file>   app, release, feed: the app's Cargo.toml, by default ./Cargo.toml
-  --bin <file>        app: the binary
-  --id <id>           app: the bundle id, in place of the config's
-  --name <name>       app: the name shown and the bundle's, in place of the config's
-  --icon <png>        app: the icon, in place of the config's
-  --tag v<version>    release: the GitHub release's tag, to write update.txt too
-  --key <file>        release, feed: the private key's file, else $SHIPO_UPDATE_KEY
-  --url <base>        feed: where the files will be served, {version} the version
-  --notes <url>       feed: the release notes' page
-  --public            keygen: print the public half of a key, made before
-  <file>...           keygen: the keys' files, by default update.key update-spare.key
-  -h, --help          print this help
-";
-
-/// A command as the arguments give it.
-#[derive(Debug, PartialEq)]
+/// A command as the arguments give it; its docs are its `--help`.
+#[derive(Debug, PartialEq, Subcommand)]
 enum Command {
-  Help,
+  /// the macOS .app of the binary, signed
   App {
+    /// the app's Cargo.toml
+    #[arg(long, value_name = "file", default_value = "Cargo.toml")]
     manifest: PathBuf,
+    /// the binary
+    #[arg(long, value_name = "file")]
     bin: PathBuf,
-    over: Overrides,
+    /// the bundle id, in place of the config's
+    #[arg(long, value_name = "id")]
+    id: Option<String>,
+    /// the name shown and the bundle's, in place of the config's
+    #[arg(long, value_name = "name")]
+    name: Option<String>,
+    /// the icon, in place of the config's
+    #[arg(long, value_name = "png")]
+    icon: Option<PathBuf>,
   },
+  /// the installers of <dir>/<triple>/<bin>[.exe]
   Release {
+    /// the app's Cargo.toml
+    #[arg(long, value_name = "file", default_value = "Cargo.toml")]
     manifest: PathBuf,
+    /// the binaries' folder
+    #[arg(value_name = "dir")]
     dir: PathBuf,
+    /// the GitHub release's tag, v<version>, to write update.txt too
+    #[arg(long, value_name = "tag")]
     tag: Option<String>,
+    /// the private key's file, else $SHIPO_UPDATE_KEY
+    #[arg(long, value_name = "file")]
     key: Option<PathBuf>,
   },
+  /// update.txt of the files, signed
   Feed {
+    /// the app's Cargo.toml
+    #[arg(long, value_name = "file", default_value = "Cargo.toml")]
     manifest: PathBuf,
+    /// where the files will be served, {version} the version
+    #[arg(long, value_name = "base")]
     url: String,
+    /// the release notes' page
+    #[arg(long, value_name = "url")]
     notes: Option<String>,
+    /// the files the feed lists
+    #[arg(value_name = "files", required = true)]
     files: Vec<PathBuf>,
+    /// the private key's file, else $SHIPO_UPDATE_KEY
+    #[arg(long, value_name = "file")]
     key: Option<PathBuf>,
   },
+  /// a key per file, its public half printed
   Keygen {
+    /// the keys' files
+    #[arg(value_name = "file", default_values = ["update.key", "update-spare.key"])]
     files: Vec<PathBuf>,
-  },
-  Public {
-    file: PathBuf,
+    /// print the public half of one key, made before
+    #[arg(long)]
+    public: bool,
   },
 }
 
 fn main() {
-  if let Err(e) = run(lexopt::Parser::from_env()) {
+  let cmd = parse(std::env::args_os()).unwrap_or_else(|e| e.exit());
+  if let Err(e) = run(cmd) {
     eprintln!("shipo: {e}");
     std::process::exit(1);
   }
 }
 
-/// Runs the command `args` give.
-fn run(args: lexopt::Parser) -> io::Result<()> {
-  let cmd = parse(args).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+/// The command in `args`, the program's name first; clap's error, which prints itself, else.
+fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, clap::Error> {
+  let cmd = Cli::try_parse_from(args)?.cmd;
+  if let Command::Keygen { files, public: true } = &cmd
+    && files.len() != 1
+  {
+    let mut cli = Cli::command();
+    cli.build();
+    let keygen = cli.find_subcommand_mut("keygen").expect("keygen is a command");
+    return Err(keygen.error(ErrorKind::WrongNumberOfValues, "--public takes one key file"));
+  }
+
+  Ok(cmd)
+}
+
+/// Runs `cmd`.
+fn run(cmd: Command) -> io::Result<()> {
   match cmd {
-    Command::Help => {
-      print!("{USAGE}");
-      Ok(())
+    Command::App { manifest, bin, id, name, icon } => {
+      app(&Config::load(&manifest)?.with(Overrides { id, name, icon })?, &bin)
     }
-    Command::App { manifest, bin, over } => app(&Config::load(&manifest)?.with(over)?, &bin),
     Command::Release { manifest, dir, tag, key } => {
       release(&Config::load(&manifest)?, &dir, tag.as_deref(), key.as_deref())
     }
     Command::Feed { manifest, url, notes, files, key } => {
       feed(&Config::load(&manifest)?, &url, notes.as_deref(), &files, key.as_deref())
     }
-    Command::Keygen { files } => keygen(&files),
-    Command::Public { file } => public(&file),
+    Command::Keygen { files, public: true } => public(&files[0]),
+    Command::Keygen { files, public: false } => keygen(&files),
   }
-}
-
-/// The command in `args`, the program's name not among them, checked as [USAGE] gives them.
-fn parse(mut args: lexopt::Parser) -> Result<Command, lexopt::Error> {
-  use lexopt::prelude::*;
-
-  let (mut cmd, mut free) = (None::<String>, vec![]);
-  let (mut manifest, mut bin, mut tag, mut key) = (None, None, None, None);
-  let (mut url, mut notes, mut public) = (None, None, false);
-  let mut over = Overrides::default();
-  while let Some(arg) = args.next()? {
-    let is = |names: &[&str]| cmd.as_deref().is_some_and(|c| names.contains(&c));
-    match arg {
-      Short('h') | Long("help") => return Ok(Command::Help),
-      Value(v) if cmd.is_none() => cmd = Some(v.string()?),
-      Value(v) => free.push(PathBuf::from(v)),
-      Long("manifest") if is(&["app", "release", "feed"]) => {
-        manifest = Some(value(&mut args, "manifest", manifest.is_some())?.into())
-      }
-      Long("bin") if is(&["app"]) => bin = Some(value(&mut args, "bin", bin.is_some())?.into()),
-      Long("id") if is(&["app"]) => {
-        over.id = Some(value(&mut args, "id", over.id.is_some())?.string()?)
-      }
-      Long("name") if is(&["app"]) => {
-        over.name = Some(value(&mut args, "name", over.name.is_some())?.string()?)
-      }
-      Long("icon") if is(&["app"]) => {
-        over.icon = Some(value(&mut args, "icon", over.icon.is_some())?.into())
-      }
-      Long("tag") if is(&["release"]) => {
-        tag = Some(value(&mut args, "tag", tag.is_some())?.string()?)
-      }
-      Long("key") if is(&["release", "feed"]) => {
-        key = Some(value(&mut args, "key", key.is_some())?.into())
-      }
-      Long("url") if is(&["feed"]) => url = Some(value(&mut args, "url", url.is_some())?.string()?),
-      Long("notes") if is(&["feed"]) => {
-        notes = Some(value(&mut args, "notes", notes.is_some())?.string()?)
-      }
-      Long("public") if is(&["keygen"]) && public => return Err(twice("public")),
-      Long("public") if is(&["keygen"]) => public = true,
-      _ => return Err(arg.unexpected()),
-    }
-  }
-
-  let manifest = manifest.unwrap_or_else(|| PathBuf::from("Cargo.toml"));
-  let one = |free: Vec<PathBuf>| <[PathBuf; 1]>::try_from(free).ok().map(|[x]| x);
-  match cmd.as_deref() {
-    None => Err("a command: app, release, feed or keygen; see --help".into()),
-    Some("app") if !free.is_empty() => Err("app takes no files, the binary is --bin".into()),
-    Some("app") => match bin {
-      Some(bin) => Ok(Command::App { manifest, bin, over }),
-      None => Err("app takes --bin, the binary".into()),
-    },
-    Some("release") => match one(free) {
-      Some(dir) => Ok(Command::Release { manifest, dir, tag, key }),
-      None => Err("release takes the binaries' folder".into()),
-    },
-    Some("feed") => match url {
-      Some(url) if !free.is_empty() => Ok(Command::Feed { manifest, url, notes, files: free, key }),
-      _ => Err("feed needs --url and the files".into()),
-    },
-    Some("keygen") if public => match one(free) {
-      Some(file) => Ok(Command::Public { file }),
-      None => Err("keygen --public takes one key file".into()),
-    },
-    Some("keygen") if free.is_empty() => {
-      Ok(Command::Keygen { files: vec!["update.key".into(), "update-spare.key".into()] })
-    }
-    Some("keygen") => Ok(Command::Keygen { files: free }),
-    Some(cmd) => Err(format!("no command {cmd}: app, release, feed or keygen").into()),
-  }
-}
-
-/// The value of the option `--<opt>` just read, given before if `given`: an error then, or when
-/// the value is a word of its own starting with `-`, as in `--url --notes x`.
-fn value(args: &mut lexopt::Parser, opt: &str, given: bool) -> Result<OsString, lexopt::Error> {
-  if given {
-    return Err(twice(opt));
-  }
-
-  if let Some(value) = args.optional_value() {
-    return Ok(value);
-  }
-
-  let value = args.value()?;
-  match value.to_string_lossy().starts_with('-') {
-    true => Err(format!("--{opt} needs a value, not {}", value.to_string_lossy()).into()),
-    false => Ok(value),
-  }
-}
-
-fn twice(opt: &str) -> lexopt::Error {
-  format!("--{opt} is given twice").into()
 }
 
 // MARK: Commands
@@ -479,32 +422,32 @@ mod tests {
 
   use super::*;
 
-  fn args(line: &str) -> Result<Command, String> {
-    let line = line.split_whitespace().map(OsString::from);
-    parse(lexopt::Parser::from_args(line)).map_err(|e| e.to_string())
+  fn args(line: &str) -> Result<Command, clap::Error> {
+    parse(["shipo"].into_iter().chain(line.split_whitespace()).map(OsString::from))
   }
 
   #[test]
   fn commands() {
     let (manifest, cargo) = (PathBuf::from("app/Cargo.toml"), PathBuf::from("Cargo.toml"));
+    let app = |manifest: &PathBuf| Command::App {
+      manifest: manifest.clone(),
+      bin: "x".into(),
+      id: None,
+      name: None,
+      icon: None,
+    };
+
     let cases = [
-      ("--help", Command::Help),
-      ("feed -h --bogus", Command::Help),
-      ("app --bin x", Command::App { manifest: cargo.clone(), bin: "x".into(), over: none() }),
-      (
-        "app --manifest app/Cargo.toml --bin=x",
-        Command::App { manifest: manifest.clone(), bin: "x".into(), over: none() },
-      ),
+      ("app --bin x", app(&cargo)),
+      ("app --manifest app/Cargo.toml --bin=x", app(&manifest)),
       (
         "app --id=me.dev --bin x --icon dev.png --name Dev",
         Command::App {
           manifest: cargo.clone(),
           bin: "x".into(),
-          over: Overrides {
-            id: Some("me.dev".into()),
-            name: Some("Dev".into()),
-            icon: Some("dev.png".into()),
-          },
+          id: Some("me.dev".into()),
+          name: Some("Dev".into()),
+          icon: Some("dev.png".into()),
         },
       ),
       (
@@ -530,9 +473,16 @@ mod tests {
           key: None,
         },
       ),
-      ("keygen", Command::Keygen { files: vec!["update.key".into(), "update-spare.key".into()] }),
-      ("keygen a.key", Command::Keygen { files: vec!["a.key".into()] }),
-      ("keygen --public a.key", Command::Public { file: "a.key".into() }),
+      (
+        "keygen",
+        Command::Keygen {
+          files: vec!["update.key".into(), "update-spare.key".into()],
+          public: false,
+        },
+      ),
+      ("keygen a.key", Command::Keygen { files: vec!["a.key".into()], public: false }),
+      ("keygen --public a.key", Command::Keygen { files: vec!["a.key".into()], public: true }),
+      ("keygen a.key --public", Command::Keygen { files: vec!["a.key".into()], public: true }),
       (
         "release out --tag=-v1",
         Command::Release {
@@ -545,53 +495,56 @@ mod tests {
     ];
 
     for (line, want) in cases {
-      assert_eq!(args(line), Ok(want), "{line}");
+      assert_eq!(args(line).map_err(|e| e.to_string()), Ok(want), "{line}");
     }
 
-    let line = ["app", "--bin", "x", "--name", "Wavo Dev"].map(OsString::from);
-    let Ok(Command::App { over, .. }) = parse(lexopt::Parser::from_args(line)) else { panic!() };
-    assert_eq!(over.name.as_deref(), Some("Wavo Dev"));
-  }
-
-  fn none() -> Overrides {
-    Overrides::default()
+    let line = ["shipo", "app", "--bin", "x", "--name", "Wavo Dev"].map(OsString::from);
+    let Ok(Command::App { name, .. }) = parse(line) else { panic!() };
+    assert_eq!(name.as_deref(), Some("Wavo Dev"));
   }
 
   #[test]
   fn errors() {
+    use ErrorKind::*;
+
     let cases = [
-      ("", "a command: app, release, feed or keygen; see --help"),
-      ("pack", "no command pack: app, release, feed or keygen"),
-      ("--manifest Cargo.toml app", "invalid option '--manifest'"),
-      ("app", "app takes --bin, the binary"),
-      ("app x --bin y", "app takes no files, the binary is --bin"),
-      ("app --tag v1", "invalid option '--tag'"),
-      ("app --bin x --id a.b --id c.d", "--id is given twice"),
-      ("app --bin x --name", "missing argument for option '--name'"),
-      ("app --bin x --icon --name y", "--icon needs a value, not --name"),
-      ("release out --id me.dev", "invalid option '--id'"),
-      ("release out --name Dev", "invalid option '--name'"),
-      ("feed --url https://x a.zip --icon dev.png", "invalid option '--icon'"),
-      ("keygen --id me.dev", "invalid option '--id'"),
-      ("release", "release takes the binaries' folder"),
-      ("release a b", "release takes the binaries' folder"),
-      ("feed a.zip", "feed needs --url and the files"),
-      ("feed --url https://x", "feed needs --url and the files"),
-      ("feed --url", "missing argument for option '--url'"),
-      ("feed --url --notes x a.zip", "--url needs a value, not --notes"),
-      ("feed --url https://x a.zip --url https://y", "--url is given twice"),
-      ("release out --tag v1 --tag=v2", "--tag is given twice"),
-      ("release out --key -", "--key needs a value, not -"),
-      ("app --bin x --manifest a --manifest b", "--manifest is given twice"),
-      ("keygen --public --public a.key", "--public is given twice"),
-      ("keygen --manifest Cargo.toml", "invalid option '--manifest'"),
-      ("keygen --key k", "invalid option '--key'"),
-      ("keygen --public", "keygen --public takes one key file"),
-      ("keygen --public a b", "keygen --public takes one key file"),
+      ("", DisplayHelpOnMissingArgumentOrSubcommand, ""),
+      ("--help", DisplayHelp, ""),
+      ("feed -h --bogus", DisplayHelp, "Usage: shipo feed"),
+      ("pack", InvalidSubcommand, "'pack'"),
+      ("--manifest Cargo.toml app", UnknownArgument, "'--manifest'"),
+      ("app", MissingRequiredArgument, "--bin <file>"),
+      ("app x --bin y", UnknownArgument, "'x'"),
+      ("app --tag v1", UnknownArgument, "'--tag'"),
+      ("app --bin x --id a.b --id c.d", ArgumentConflict, "'--id <id>'"),
+      ("app --bin x --name", InvalidValue, "'--name <name>'"),
+      ("app --bin x --icon --name y", InvalidValue, "'--icon <png>'"),
+      ("release out --id me.dev", UnknownArgument, "'--id'"),
+      ("release out --name Dev", UnknownArgument, "'--name'"),
+      ("feed --url https://x a.zip --icon dev.png", UnknownArgument, "'--icon'"),
+      ("keygen --id me.dev", UnknownArgument, "'--id'"),
+      ("release", MissingRequiredArgument, "<dir>"),
+      ("release a b", UnknownArgument, "'b'"),
+      ("feed a.zip", MissingRequiredArgument, "--url <base>"),
+      ("feed --url https://x", MissingRequiredArgument, "<files>..."),
+      ("feed --url", InvalidValue, "'--url <base>'"),
+      ("feed --url --notes x a.zip", InvalidValue, "'--url <base>'"),
+      ("feed --url https://x a.zip --url https://y", ArgumentConflict, "'--url <base>'"),
+      ("release out --tag v1 --tag=v2", ArgumentConflict, "'--tag <tag>'"),
+      ("release out --key -x", UnknownArgument, "'-x'"),
+      ("app --bin x --manifest a --manifest b", ArgumentConflict, "'--manifest <file>'"),
+      ("keygen --public --public a.key", ArgumentConflict, "'--public'"),
+      ("keygen --manifest Cargo.toml", UnknownArgument, "'--manifest'"),
+      ("keygen --key k", UnknownArgument, "'--key'"),
+      ("keygen --public", WrongNumberOfValues, "--public takes one key file"),
+      ("keygen --public a b", WrongNumberOfValues, "Usage: shipo keygen"),
     ];
 
-    for (line, want) in cases {
-      assert_eq!(args(line), Err(want.into()), "{line}");
+    for (line, kind, has) in cases {
+      let e = args(line).unwrap_err();
+      let text = e.to_string();
+      assert_eq!(e.kind(), kind, "{line}: {text}");
+      assert!(text.contains(has), "{line}: {text}");
     }
   }
 
