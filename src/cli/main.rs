@@ -19,14 +19,14 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::{fmt, fs, io};
 
-use config::Config;
+use config::{Config, Overrides};
 
 /// `shipo --help`.
 const USAGE: &str = "\
 shipo: an app's binaries into signed installers and a signed update feed.
 
 Usage:
-  shipo app --bin <file>                              the macOS .app of the binary, signed
+  shipo app --bin <file> [--id] [--name] [--icon]    the macOS .app of the binary, signed
   shipo release <dir> [--tag v<version>]              the installers of <dir>/<triple>/<bin>[.exe]
   shipo feed --url <base> [--notes <url>] <files>...  update.txt of the files, signed
   shipo keygen [<file>...]                            a key per file, its public half printed
@@ -35,6 +35,9 @@ Usage:
 Options:
   --manifest <file>   app, release, feed: the app's Cargo.toml, by default ./Cargo.toml
   --bin <file>        app: the binary
+  --id <id>           app: the bundle id, in place of the config's
+  --name <name>       app: the name shown and the bundle's, in place of the config's
+  --icon <png>        app: the icon, in place of the config's
   --tag v<version>    release: the GitHub release's tag, to write update.txt too
   --key <file>        release, feed: the private key's file, else $SHIPO_UPDATE_KEY
   --url <base>        feed: where the files will be served, {version} the version
@@ -51,6 +54,7 @@ enum Command {
   App {
     manifest: PathBuf,
     bin: PathBuf,
+    over: Overrides,
   },
   Release {
     manifest: PathBuf,
@@ -88,7 +92,7 @@ fn run(args: lexopt::Parser) -> io::Result<()> {
       print!("{USAGE}");
       Ok(())
     }
-    Command::App { manifest, bin } => app(&Config::load(&manifest)?, &bin),
+    Command::App { manifest, bin, over } => app(&Config::load(&manifest)?.with(over)?, &bin),
     Command::Release { manifest, dir, tag, key } => {
       release(&Config::load(&manifest)?, &dir, tag.as_deref(), key.as_deref())
     }
@@ -107,6 +111,7 @@ fn parse(mut args: lexopt::Parser) -> Result<Command, lexopt::Error> {
   let (mut cmd, mut free) = (None::<String>, vec![]);
   let (mut manifest, mut bin, mut tag, mut key) = (None, None, None, None);
   let (mut url, mut notes, mut public) = (None, None, false);
+  let mut over = Overrides::default();
   while let Some(arg) = args.next()? {
     let is = |names: &[&str]| cmd.as_deref().is_some_and(|c| names.contains(&c));
     match arg {
@@ -117,6 +122,15 @@ fn parse(mut args: lexopt::Parser) -> Result<Command, lexopt::Error> {
         manifest = Some(value(&mut args, "manifest", manifest.is_some())?.into())
       }
       Long("bin") if is(&["app"]) => bin = Some(value(&mut args, "bin", bin.is_some())?.into()),
+      Long("id") if is(&["app"]) => {
+        over.id = Some(value(&mut args, "id", over.id.is_some())?.string()?)
+      }
+      Long("name") if is(&["app"]) => {
+        over.name = Some(value(&mut args, "name", over.name.is_some())?.string()?)
+      }
+      Long("icon") if is(&["app"]) => {
+        over.icon = Some(value(&mut args, "icon", over.icon.is_some())?.into())
+      }
       Long("tag") if is(&["release"]) => {
         tag = Some(value(&mut args, "tag", tag.is_some())?.string()?)
       }
@@ -139,7 +153,7 @@ fn parse(mut args: lexopt::Parser) -> Result<Command, lexopt::Error> {
     None => Err("a command: app, release, feed or keygen; see --help".into()),
     Some("app") if !free.is_empty() => Err("app takes no files, the binary is --bin".into()),
     Some("app") => match bin {
-      Some(bin) => Ok(Command::App { manifest, bin }),
+      Some(bin) => Ok(Command::App { manifest, bin, over }),
       None => Err("app takes --bin, the binary".into()),
     },
     Some("release") => match one(free) {
@@ -476,10 +490,22 @@ mod tests {
     let cases = [
       ("--help", Command::Help),
       ("feed -h --bogus", Command::Help),
-      ("app --bin x", Command::App { manifest: cargo.clone(), bin: "x".into() }),
+      ("app --bin x", Command::App { manifest: cargo.clone(), bin: "x".into(), over: none() }),
       (
         "app --manifest app/Cargo.toml --bin=x",
-        Command::App { manifest: manifest.clone(), bin: "x".into() },
+        Command::App { manifest: manifest.clone(), bin: "x".into(), over: none() },
+      ),
+      (
+        "app --id=me.dev --bin x --icon dev.png --name Dev",
+        Command::App {
+          manifest: cargo.clone(),
+          bin: "x".into(),
+          over: Overrides {
+            id: Some("me.dev".into()),
+            name: Some("Dev".into()),
+            icon: Some("dev.png".into()),
+          },
+        },
       ),
       (
         "release out --manifest app/Cargo.toml",
@@ -521,6 +547,14 @@ mod tests {
     for (line, want) in cases {
       assert_eq!(args(line), Ok(want), "{line}");
     }
+
+    let line = ["app", "--bin", "x", "--name", "Wavo Dev"].map(OsString::from);
+    let Ok(Command::App { over, .. }) = parse(lexopt::Parser::from_args(line)) else { panic!() };
+    assert_eq!(over.name.as_deref(), Some("Wavo Dev"));
+  }
+
+  fn none() -> Overrides {
+    Overrides::default()
   }
 
   #[test]
@@ -532,6 +566,13 @@ mod tests {
       ("app", "app takes --bin, the binary"),
       ("app x --bin y", "app takes no files, the binary is --bin"),
       ("app --tag v1", "invalid option '--tag'"),
+      ("app --bin x --id a.b --id c.d", "--id is given twice"),
+      ("app --bin x --name", "missing argument for option '--name'"),
+      ("app --bin x --icon --name y", "--icon needs a value, not --name"),
+      ("release out --id me.dev", "invalid option '--id'"),
+      ("release out --name Dev", "invalid option '--name'"),
+      ("feed --url https://x a.zip --icon dev.png", "invalid option '--icon'"),
+      ("keygen --id me.dev", "invalid option '--id'"),
       ("release", "release takes the binaries' folder"),
       ("release a b", "release takes the binaries' folder"),
       ("feed a.zip", "feed needs --url and the files"),

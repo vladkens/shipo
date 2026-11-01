@@ -605,6 +605,46 @@ LSEnvironment = { HELLO_MODE = "quiet" }
     assert!(e.ends_with("hello.entitlements: not a 64-bit Mach-O binary"), "{e}");
   }
 
+  /// `--id`, `--name` and `--icon` make another bundle; the executable stays the binary's.
+  #[test]
+  fn bundle_overridden() {
+    let tmp = Temp::new().unwrap();
+    let bin = tmp.join("hello");
+    fs::write(&bin, macho(&[(0x32, &[1, 0x0B_00_00, 0, 0])])).unwrap();
+    icon(&tmp.join("dev.png"));
+    let over = |icon: &str| crate::config::Overrides {
+      id: Some("com.example.hello.dev".into()),
+      name: Some("Hello Dev".into()),
+      icon: Some(tmp.join(icon)),
+    };
+
+    // MACOS's `plist.CFBundleName` gives way to `--name`.
+    let cfg = config(&tmp, MACOS).with(over("dev.png")).unwrap();
+    let app = bundle(&cfg, &bin).unwrap();
+    assert_eq!(app, tmp.join("target/Hello Dev.app"));
+    assert!(app.join("Contents/MacOS/hello").is_file());
+    let icns = fs::read(app.join("Contents/Resources/Hello Dev.icns")).unwrap();
+    assert_eq!(&icns[..4], b"icns");
+
+    let info = Plist::from_file(app.join("Contents/Info.plist")).unwrap();
+    let keys = info.as_dictionary().unwrap();
+    let get = |k| keys.get(k).and_then(Plist::as_string);
+    assert_eq!(get("CFBundleIdentifier"), Some("com.example.hello.dev"));
+    assert_eq!(get("CFBundleName"), Some("Hello Dev"));
+    assert_eq!(get("CFBundleDisplayName"), Some("Hello Dev"));
+    assert_eq!(get("CFBundleIconFile"), Some("Hello Dev"));
+    assert_eq!(get("CFBundleExecutable"), Some("hello"));
+
+    // The icon is checked as the config's.
+    fs::write(
+      tmp.join("small.png"),
+      Image { w: 512, h: 512, px: vec![255; 512 * 512 * 4] }.encode().unwrap(),
+    )
+    .unwrap();
+    let e = bundle(&config(&tmp, "").with(over("small.png")).unwrap(), &bin).unwrap_err();
+    assert_eq!(e.to_string(), "the icon is 512×512, smaller than 1024 px");
+  }
+
   #[test]
   fn a_sandboxed_app_is_refused() {
     let tmp = Temp::new().unwrap();

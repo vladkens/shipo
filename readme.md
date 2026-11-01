@@ -199,6 +199,8 @@ shipo feed --url https://example.com/hello/{version} dist/*.dmg dist/*-setup.exe
 shipo app --bin target/release/hello # the signed Hello.app alone, to try it on a Mac
 ```
 
+`shipo app` also takes `--id`, `--name` and `--icon` in place of the config's, for a dev build beside the installed app, such as `Hello Dev.app`.
+
 Ship one OS only? Put only its build in `dist/`: shipo packs what it finds.
 
 It writes the installers into `dist/`, and with `--tag` the signed feed, `update.txt`:
@@ -319,10 +321,6 @@ Every crate an updater pulls in ships inside your app and must be trusted: shipo
 
 Crates: `cargo tree` of an app with only the updater, on 2026-10-30; for Tauri, what its updater adds. One key: a leaked key can't be replaced by an update. HTTPS only: whoever can change the hosting can ship an update. Sparkle is the reference on macOS; cargo-packager and Tauri also make MSI, .rpm or pacman.
 
-## 🤝 Contributing
-
-Pull requests are welcome, including ones made with agents: point yours at [agents.md](agents.md).
-
 ## 🗺️ Roadmap
 
 - Windows code signing (Authenticode) from any OS, with cloud signing services.
@@ -332,9 +330,11 @@ Pull requests are welcome, including ones made with agents: point yours at [agen
 
 ## 🤖 How it's made
 
-shipo is written by AI agents (Claude Code, Codex) following [agents.md](agents.md); I choose what to build and review every pull request. CI builds every package on Linux, macOS and Windows, checks each with the OS's own tools and that all three give the same bytes (but for the DMG a Mac signs), and has a test app update itself from 1.0.0 to 2.0.0 on each OS.
+shipo is built with AI agents following [agents.md](agents.md): I choose what to build, review the changes and test them on real machines. Before agents, I wrote software by hand for years ([macmon](https://github.com/vladkens/macmon), [twscrape](https://github.com/vladkens/twscrape), [ecloop](https://github.com/vladkens/ecloop)). Releases are rare on purpose: I'd rather test and polish a set of changes than ship each one as it lands, and I try not to break your config or data; when something has to break, [changelog.md](changelog.md) says so.
 
-I've written software by hand for years ([macmon](https://github.com/vladkens/macmon), [twscrape](https://github.com/vladkens/twscrape), [ecloop](https://github.com/vladkens/ecloop)); agents are how I build now. Releases are rare; the CLI and data formats stay compatible, the API may still change before 1.0, and every break is listed in [changelog.md](changelog.md).
+## 🤝 Contributing
+
+Pull requests are welcome, including ones made with agents: point yours at [agents.md](agents.md).
 
 ## 📝 License
 
