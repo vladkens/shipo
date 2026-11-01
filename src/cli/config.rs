@@ -137,7 +137,6 @@ impl Config {
     let mut shipo: Shipo = Value::Table(shipo.clone())
       .try_into()
       .map_err(|e| bad(format!("[package.metadata.shipo] {}", said(e))))?;
-    reverse_dns(&shipo.id, "[package.metadata.shipo] id")?;
 
     shipo.macos.entitlements = shipo.macos.entitlements.map(|path| root.join(path));
     let ws = workspace(&root, &toml, pkg)?;
@@ -203,7 +202,7 @@ impl Config {
   /// icon as the config's, when the bundle is made.
   pub fn with(mut self, over: Overrides) -> io::Result<Self> {
     if let Some(id) = over.id {
-      reverse_dns(&id, "--id")?;
+      reverse_dns(&id)?;
       self.id = id;
     }
 
@@ -244,14 +243,14 @@ impl Config {
   }
 }
 
-/// Checks the `id`, `what` naming it, is reverse DNS as a bundle id takes it: two parts or more of
-/// A-Z, a-z, 0-9 and `-`, joined by dots.
-fn reverse_dns(id: &str, what: &str) -> io::Result<()> {
+/// Checks `--id` is reverse DNS as a bundle id takes it: two parts or more of A-Z, a-z, 0-9 and
+/// `-`, joined by dots. The config's id is not checked, so a release packs what it did before.
+fn reverse_dns(id: &str) -> io::Result<()> {
   let part = |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
   match id.contains('.') && id.split('.').all(part) {
     true => Ok(()),
     false => Err(bad(format!(
-      "{what} {id:?} is not reverse DNS: two parts or more of A-Z, a-z, 0-9 and -, joined by dots"
+      "--id {id:?} is not reverse DNS: two parts or more of A-Z, a-z, 0-9 and -, joined by dots"
     ))),
   }
 }
@@ -480,17 +479,14 @@ mod tests {
   #[test]
   fn ids() {
     for id in ["me.app", "com.example.wavo-dev", "Com.Example.App2"] {
-      assert!(reverse_dns(id, "id").is_ok(), "{id}");
+      assert!(reverse_dns(id).is_ok(), "{id}");
     }
 
     for id in ["app", "", "me.", ".me", "me..app", "me.my_app", "me.app!", "me.wavö"] {
-      let e = reverse_dns(id, "--id").unwrap_err().to_string();
+      let e = reverse_dns(id).unwrap_err().to_string();
       let want = "is not reverse DNS: two parts or more of A-Z, a-z, 0-9 and -, joined by dots";
       assert_eq!(e, format!("--id {id:?} {want}"));
     }
-
-    let e = error(&[("Cargo.toml", &APP.replace("me.app", "app"))], "Cargo.toml");
-    assert!(e.starts_with("[package.metadata.shipo] id \"app\" is not reverse DNS"), "{e}");
   }
 
   #[test]
