@@ -1,9 +1,14 @@
-## Unreleased
+## v0.2.1 – 2026-11-02
+
+Dev builds of your app next to the released one, and help for every command.
 
 ### Features
 
-- Added `--id`, `--name` and `--icon` to `shipo app`, to build a dev flavor beside the installed app.
-- Added `shipo <command> --help`.
+- Added `--id`, `--name` and `--icon` to `shipo app`, to build a dev copy of your macOS app that sits next to the released one without replacing it.
+- Added `--help` to every command, showing its options.
+- Added the command's usage to errors for a wrong argument; they now exit with code 2 instead of 1.
+
+**Full Changelog**: https://github.com/vladkens/shipo/compare/v0.2.0...v0.2.1
 
 ## v0.2.0 – 2026-10-31
 
