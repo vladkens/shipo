@@ -121,6 +121,11 @@ fn failed(cmd: &Command, status: &str, stderr: &[u8]) -> io::Error {
 /// time. One of another hash is removed and an error; a download is [place]d, so a broken one
 /// never stays at `path`. A stalled connection fails, and any error is tried again three times.
 pub fn fetch(url: &str, sha256: &str, path: &Path) -> io::Result<PathBuf> {
+  fetch_tries(url, sha256, path, 3)
+}
+
+/// [fetch] with `retries` tries after the first.
+fn fetch_tries(url: &str, sha256: &str, path: &Path, retries: u32) -> io::Result<PathBuf> {
   let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
   if path.exists() {
     if let Err(e) = check(path, sha256, &name) {
@@ -139,7 +144,7 @@ pub fn fetch(url: &str, sha256: &str, path: &Path) -> io::Result<PathBuf> {
 
   let mut curl = Command::new("curl");
   curl.args(["-fsSL", "--connect-timeout", "30", "--speed-limit", "1024", "--speed-time", "60"]);
-  curl.args(["--retry", "3", "--retry-all-errors", "-o"]);
+  curl.arg("--retry").arg(retries.to_string()).args(["--retry-all-errors", "-o"]);
   let got = place(path, |part| {
     run(curl.arg(part).arg(url))?;
     check(part, sha256, &name)
@@ -656,7 +661,9 @@ mod tests {
     assert!(e.contains(&format!("tool: SHA-256 {good}, pinned {bad}")), "{e}");
     assert_eq!(listed(), 0);
 
-    let e = fetch(&format!("{url}.none"), &good, &tools.join("tool")).unwrap_err().to_string();
+    // Without retries, whose backoff of 1, 2 and 4 s a missing file needn't wait out.
+    let none = format!("{url}.none");
+    let e = fetch_tries(&none, &good, &tools.join("tool"), 0).unwrap_err().to_string();
     assert!(e.contains("curl failed"), "{e}");
     assert_eq!(listed(), 0);
 

@@ -20,7 +20,7 @@ defaults:
     shell: bash
 
 jobs:
-  # checks, tests, and the e2e app
+  # checks and tests
   test:
     strategy:
       fail-fast: false
@@ -43,6 +43,22 @@ jobs:
       - run: make test
       # Linux has no Mach-O to sign; the Mac runs that one
       - run: cargo test -- --ignored ${{ runner.os == 'Linux' && '--skip rcodesign_signs' || '' }}
+
+  # the e2e app, Hello 1.0.0 and 2.0.0, built apart from the tests so e2e starts early
+  hello:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: hello
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       - run: uv run scripts/e2e-update.py build e2e
       - uses: actions/upload-artifact@v7
         with:
@@ -69,7 +85,7 @@ jobs:
 
   # each OS packs every OS's packages, then updates its own from 1.0.0 to 2.0.0
   e2e:
-    needs: test
+    needs: hello
     strategy:
       fail-fast: false
       matrix:
@@ -136,10 +152,14 @@ jobs:
           name: e2e-dmg
           path: dmg
       - run: |
-          tail -n +1 e2e-sums-*/SHA256SUMS
-          diff e2e-sums-Linux/SHA256SUMS e2e-sums-Windows/SHA256SUMS
           own() { grep -v -e '\.dmg$' -e ' update\.txt$' "$1"; }
-          diff <(own e2e-sums-Linux/SHA256SUMS) <(own e2e-sums-macOS/SHA256SUMS)
+          if diff e2e-sums-Linux/SHA256SUMS e2e-sums-Windows/SHA256SUMS &&
+            diff <(own e2e-sums-Linux/SHA256SUMS) <(own e2e-sums-macOS/SHA256SUMS); then
+            echo "every host packed the same bytes"
+          else
+            tail -n +1 e2e-sums-*/SHA256SUMS
+            exit 1
+          fi
       # the ad-hoc DMG of Linux and Windows opens and runs on a Mac
       - run: |
           attach() { for _ in 1 2 3 4 5; do hdiutil attach "$@" && return; sleep 1; done; return 1; }
