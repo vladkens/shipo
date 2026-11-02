@@ -214,7 +214,7 @@ It writes the installers into `dist/`, and with `--tag` the signed feed, `update
 
 With `--tag v1.2.0`, `v` and the app's version, the files are `Hello-v1.2.0-…` and the feed links them in that GitHub release: upload them as they are. GitHub keeps only `A-Z a-z 0-9 . _ -` in file names, so a release's `name` takes only these.
 
-`shipo feed` signs a feed for files served elsewhere and writes it to `target/distrib/update.txt`. `shipo --help` lists every option.
+`shipo feed` signs a feed for files served elsewhere and writes it to `target/distrib/update.txt`. `shipo --help` lists the commands, and `shipo <command> --help` the options of each.
 
 macOS releases need a paid Apple Developer ID, and an App Store Connect API key for notarization. A release takes these secrets:
 

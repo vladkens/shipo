@@ -3,6 +3,7 @@
 ### Features
 
 - Added `--id`, `--name` and `--icon` to `shipo app`, to build a dev flavor beside the installed app.
+- Added `shipo <command> --help`.
 
 ## v0.2.0 – 2026-10-31
 
