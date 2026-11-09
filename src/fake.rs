@@ -4,9 +4,11 @@
 //! so an app's updater UI shows with no feed or release.
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering::Relaxed;
 use std::time::Duration;
 
-use crate::{Error, Feed, Progress, Release, Result, Staged, feed};
+use crate::{Error, Feed, Progress, Release, Result, Staged, Step, feed};
 
 // MARK: Fake
 
@@ -14,12 +16,13 @@ use crate::{Error, Feed, Progress, Release, Result, Staged, feed};
 /// that step.
 pub const VAR: &str = "SHIPO_FAKE_UPDATE";
 
-/// How long the check and the install take; the download, five times it. None in tests.
+/// How long the check, the unpack and the install take; the download, five times it. None in
+/// tests.
 const PACE: Duration = Duration::from_secs(if cfg!(test) { 0 } else { 1 });
 
 /// The step `:fail-<step>` fails.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Step {
+enum Fail {
   Check,
   Download,
 }
@@ -28,7 +31,7 @@ enum Step {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Fake {
   version: Option<String>,
-  fail: Option<Step>,
+  fail: Option<Fail>,
 }
 
 /// [VAR]'s value; an empty one is none.
@@ -39,8 +42,8 @@ pub fn var() -> Option<String> {
 /// [VAR]'s `value`, `None` if malformed.
 fn parse(value: &str) -> Option<Fake> {
   let (version, fail) = match value.rsplit_once(':') {
-    Some((v, "fail-check")) => (v, Some(Step::Check)),
-    Some((v, "fail-download")) => (v, Some(Step::Download)),
+    Some((v, "fail-check")) => (v, Some(Fail::Check)),
+    Some((v, "fail-download")) => (v, Some(Fail::Download)),
     _ => (value, None),
   };
 
@@ -65,7 +68,7 @@ pub fn check(feed: &Feed, value: &str) -> Result<Option<Release>> {
   };
 
   std::thread::sleep(PACE);
-  if fake.fail == Some(Step::Check) {
+  if fake.fail == Some(Fail::Check) {
     return Err(failed(format!("{VAR}={value}: a fake failure, nothing was fetched")));
   }
 
@@ -78,20 +81,28 @@ pub fn check(feed: &Feed, value: &str) -> Result<Option<Release>> {
   Ok(Some(Release { version, notes: Some(notes), url, size, sha512, fake }))
 }
 
-/// [crate::download] of a fake release of `size` bytes: its progress told at the usual rate to the
-/// end in five [PACE]s, or a failure midway; nothing fetched or written.
-pub fn download(fake: &Fake, size: u64, progress: Progress) -> Result<Staged> {
+/// [crate::stage] of a fake release of `size` bytes: its progress told at the usual rate to the
+/// end in five [PACE]s and its unpack in one, or a failure midway, or [Error::Cancelled] after the
+/// pause `cancel` was set in; nothing fetched or written.
+pub fn download(fake: &Fake, size: u64, cancel: &AtomicBool, step: Progress) -> Result<Staged> {
+  let wait = |pace| {
+    std::thread::sleep(pace);
+    if cancel.load(Relaxed) { Err(Error::Cancelled) } else { Ok(()) }
+  };
   let steps: u64 = 20;
-  for step in 1..=steps {
-    std::thread::sleep(PACE * 5 / steps as u32);
-    if fake.fail == Some(Step::Download) && step > steps * 2 / 5 {
+  for i in 1..=steps {
+    wait(PACE * 5 / steps as u32)?;
+    if fake.fail == Some(Fail::Download) && i > steps * 2 / 5 {
       return Err(Error::Mismatch(format!("{VAR}: a fake failure, nothing was fetched")));
     }
 
     // In u128: any size an app sets, up to u64::MAX.
-    progress((u128::from(size) * u128::from(step) / u128::from(steps)) as u64, size);
+    let done = (u128::from(size) * u128::from(i) / u128::from(steps)) as u64;
+    step(if i < steps { Step::Download(done, size) } else { Step::Verify });
   }
 
+  step(Step::Unpack);
+  wait(PACE)?;
   Ok(Staged { new: PathBuf::new(), target: PathBuf::new(), dir: None })
 }
 
@@ -111,9 +122,9 @@ mod tests {
     let cases = [
       ("1.2.0", fake(Some("1.2.0"), None)),
       ("v2", fake(Some("v2"), None)),
-      ("1.3.0-rc.1:fail-download", fake(Some("1.3.0-rc.1"), Some(Step::Download))),
+      ("1.3.0-rc.1:fail-download", fake(Some("1.3.0-rc.1"), Some(Fail::Download))),
       ("none", fake(None, None)),
-      ("none:fail-check", fake(None, Some(Step::Check))),
+      ("none:fail-check", fake(None, Some(Fail::Check))),
     ];
     for (value, want) in cases {
       assert_eq!(parse(value), Some(want), "{value}");

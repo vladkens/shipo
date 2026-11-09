@@ -60,6 +60,10 @@ pub enum Error {
   /// the new version didn't start.
   #[error("installing the update: {0}")]
   Install(String),
+  /// The app stopped [`stage`](crate::stage): nothing was installed, and what it fetched is
+  /// removed.
+  #[error("the update was cancelled")]
+  Cancelled,
 }
 
 /// `Result` with shipo's [`Error`].

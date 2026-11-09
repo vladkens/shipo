@@ -3,7 +3,7 @@
 //! crate is portable and reaches the OS only through it. Each provides:
 //!
 //! - `get`: a URL's body into a file over the OS's HTTP, its errors by [status] and [http], `big`'s
-//!   past the bytes it may take.
+//!   past the bytes it may take, [Error::Cancelled] once its progress says stop.
 //! - `unpack`: the new app of the release's downloaded file.
 //! - `detach`: the installer spawned apart from the app.
 //! - `wait_exit`: the installer's wait for the old app to end, which a reused pid can't fool.
@@ -38,8 +38,8 @@ use crate::{Error, Result};
 
 /// `get`'s error for a body past the bytes it may take.
 pub type Big<'a> = &'a dyn Fn() -> Error;
-/// `get`'s progress: the bytes so far.
-pub type Progress<'a> = &'a mut dyn FnMut(u64);
+/// `get`'s progress: the bytes so far; `false` stops the transfer.
+pub type Progress<'a> = &'a mut dyn FnMut(u64) -> bool;
 
 /// `get`'s answer to the HTTP status `code` of `url`: 2xx is `Ok`.
 fn status(url: &str, code: u32) -> Result<()> {
