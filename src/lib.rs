@@ -188,20 +188,26 @@ pub enum Step {
 ///
 /// A fake release's steps take about 5 s and 1 s, as [download]'s.
 pub fn stage(release: &Release, cancel: &AtomicBool, mut step: impl FnMut(Step)) -> Result<Staged> {
-  let go = || if cancel.load(Relaxed) { Err(Error::Cancelled) } else { Ok(()) };
   if let Some(fake) = &release.fake {
     return fake::download(fake, release.size, cancel, &mut step);
   }
 
-  go()?;
-  let target = installed()?;
+  let target = unless(cancel, installed)?;
   installer::tidy(OS, &target, &imp::alive);
   let (dir, file) = fetch(release, home(OS, &target), cancel, &mut step)?;
-  go()?;
   step(Step::Unpack);
-  let new = imp::unpack(&file, &target)?;
-  go()?;
+  let new = unless(cancel, || imp::unpack(&file, &target))?;
   Ok(Staged { new, target, dir: Some(dir) })
+}
+
+/// `work` run unless `cancel` is set, its result [Error::Cancelled] whatever it was if it was set
+/// meanwhile: a step stopped midway may fail on its own.
+fn unless<T>(cancel: &AtomicBool, work: impl FnOnce() -> Result<T>) -> Result<T> {
+  let go = || if cancel.load(Relaxed) { Err(Error::Cancelled) } else { Ok(()) };
+  go()?;
+  let done = work();
+  go()?;
+  done
 }
 
 /// Starts the [Staged] app's installer, the new version's [finish] (on Windows this one's), and
@@ -435,9 +441,9 @@ fn fetch(
     !cancel.load(Relaxed)
   };
   let big = || Error::Mismatch(format!("{} sent more than {total} bytes", release.url));
-  imp::get(&release.url, &file, total, &big, &mut tell)?;
+  unless(cancel, || imp::get(&release.url, &file, total, &big, &mut tell))?;
   step(Step::Verify);
-  release.verify(&file)?;
+  unless(cancel, || release.verify(&file))?;
   Ok((dir, file))
 }
 
@@ -755,6 +761,24 @@ mod tests {
     assert!(matches!(e, Error::Cancelled), "{e}");
     assert!(start.elapsed() < Duration::from_secs(2), "{:?}", start.elapsed());
     assert_eq!(fs::read_dir(&parent).unwrap().count(), 0, "the partial file is gone");
+    fs::remove_dir(parent).unwrap();
+  }
+
+  /// Stopped as a step is told, the step's work doesn't start: a file that would fail its check
+  /// gives [Error::Cancelled], and nothing is left.
+  #[test]
+  fn a_stop_at_a_step_is_cancelled() {
+    let (url, parent) = (serve(), dir("stopped-at-verify"));
+    let r = Release { url: format!("{url}/abc.exe"), size: 3, ..Release::test("2") };
+    let stop = AtomicBool::new(false);
+    let e = fetch(&r, &parent, &stop, &mut |step| {
+      if step == Step::Verify {
+        stop.store(true, Relaxed);
+      }
+    })
+    .unwrap_err();
+    assert!(matches!(e, Error::Cancelled), "not the mismatch: {e}");
+    assert_eq!(fs::read_dir(&parent).unwrap().count(), 0, "the file is gone");
     fs::remove_dir(parent).unwrap();
   }
 
