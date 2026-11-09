@@ -34,7 +34,7 @@ KINDS = ("code", "docs", "comments", "tests", "blank")
 STEP = 100
 PARTS = {
   # The library: the feed, the download and the install, the public API.
-  "library": (800, ("src/*.rs",)),
+  "library": (900, ("src/*.rs",)),
   # The library's OS code: each OS, the shared Unix code and the dispatch.
   "library/platform": (600, ("src/platform/*.rs",)),
   # The packer's commands, config, tools, feed and icons.

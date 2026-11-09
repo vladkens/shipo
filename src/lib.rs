@@ -1,9 +1,11 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/shipo
 //! In-place updates for desktop apps from a signed feed, as Sparkle does: [check] fetches the feed
 //! the shipo packer writes and gives the newer [Release] for this platform, [download] fetches its
-//! file beside the running app, verifies and stages it, [install] hands it to an installer that
-//! puts it in once the app has quit, and [finish], first in `main`, is that installer. They block:
-//! an app runs them on a thread of its own and posts the result back.
+//! file beside the running app, verifies and stages it ([stage] the same, stoppable, telling each
+//! [Step]), [install] hands it to an installer that puts it in once the app has quit, and
+//! [finish], first in `main`, is that installer. They block: an app runs them on a thread of its
+//! own and posts the result back. Nothing is installed before [install]: an app may stage the
+//! update first and install it when the user says so.
 //!
 //! The library has no UI and no state of its own: the app draws the menu item, the popup, the
 //! progress and the setting, and keeps the check time and a skipped version. It never shows a
@@ -54,7 +56,8 @@ mod uninstall;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering::Relaxed;
 use std::time::{Duration, Instant};
 use std::{env, fs};
 
@@ -111,7 +114,7 @@ fn check_or_fake(feed: &Feed, current: &str, fake: Option<&str>) -> Result<Optio
   let dir = Folder::new(&env::temp_dir())?;
   let to = dir.0.join("update.txt");
   let big = || Error::Feed(format!("more than {} bytes", feed::MAX));
-  imp::get(feed.url, &to, feed::MAX, &big, &mut |_| {})?;
+  imp::get(feed.url, &to, feed::MAX, &big, &mut |_| true)?;
   feed.read(&fs::read(to)?, current)
 }
 
@@ -156,15 +159,55 @@ fn installed() -> Result<PathBuf> {
 /// A fake release, of a fakeable feed while [faking], is not fetched: its progress goes to the end
 /// in about 5 s, or it fails as `SHIPO_FAKE_UPDATE` asks.
 pub fn download(release: &Release, mut progress: impl FnMut(u64, u64)) -> Result<Staged> {
+  let total = release.size;
+  stage(release, &AtomicBool::new(false), |step| match step {
+    Step::Download(done, total) => progress(done, total),
+    Step::Verify => {}
+    Step::Unpack => progress(total, total),
+  })
+}
+
+/// Where [stage] is, for an app's progress and its log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Step {
+  /// The file comes: the bytes done and the total, `release.size`, at most about 4 times a second.
+  Download(u64, u64),
+  /// Every byte is in: its size and SHA-512 are checked.
+  Verify,
+  /// Verified: the new app is staged beside the running one; on macOS the image attached and its
+  /// bundle checked and copied out, which may take seconds.
+  Unpack,
+}
+
+/// [download] that tells each [Step] to `step` on the calling thread and stops once `cancel` is
+/// set, from another thread: at the download's next tick (on Windows at its next bytes) or
+/// before the next step, [Error::Cancelled], the partial file and the staging folder removed.
+/// Nothing is installed before [install], so every step may be stopped; a [Staged] dropped removes
+/// what it staged.
+///
+/// A fake release's steps take about 5 s and 1 s, as [download]'s.
+pub fn stage(release: &Release, cancel: &AtomicBool, mut step: impl FnMut(Step)) -> Result<Staged> {
   if let Some(fake) = &release.fake {
-    return fake::download(fake, release.size, &mut progress);
+    return fake::download(fake, release.size, cancel, &mut step);
   }
 
-  let target = installed()?;
+  let target = unless(cancel, installed)?;
   installer::tidy(OS, &target, &imp::alive);
-  let (dir, file) = fetch(release, home(OS, &target), &mut progress)?;
-  let new = imp::unpack(&file, &target)?;
+  let (dir, file) = fetch(release, home(OS, &target), cancel, &mut step)?;
+  step(Step::Unpack);
+  let new = unless(cancel, || imp::unpack(&file, &target))?;
   Ok(Staged { new, target, dir: Some(dir) })
+}
+
+/// `work` run unless `cancel` is set, its result [Error::Cancelled] whatever it was if it was set
+/// meanwhile: a step stopped midway may fail on its own.
+fn unless<T>(cancel: &AtomicBool, work: impl FnOnce() -> Result<T>) -> Result<T> {
+  let go = || if cancel.load(Relaxed) { Err(Error::Cancelled) } else { Ok(()) };
+  go()?;
+  let done = work();
+  go()?;
+  done
 }
 
 /// Starts the [Staged] app's installer, the new version's [finish] (on Windows this one's), and
@@ -215,7 +258,7 @@ pub fn finish() -> Option<Error> {
     None => {}
   }
 
-  if DONE.swap(true, Ordering::Relaxed) {
+  if DONE.swap(true, Relaxed) {
     return None;
   }
 
@@ -366,16 +409,21 @@ fn replaceable(os: Os, target: &Path, access: Access) -> Result<()> {
 
 // MARK: Download
 
-/// [download]'s progress: the bytes done, the total.
-type Progress<'a> = &'a mut dyn FnMut(u64, u64);
+/// [stage]'s steps.
+type Progress<'a> = &'a mut dyn FnMut(Step);
 
 /// How often [download]'s progress is told at most.
 const TICK: Duration = Duration::from_millis(250);
 
 /// The release's file fetched over https (or loopback) and verified into a fresh folder under
-/// `parent`, gone again on an error; one the user can't write fails first. `progress` as
-/// [download]'s.
-fn fetch(release: &Release, parent: &Path, progress: Progress) -> Result<(Folder, PathBuf)> {
+/// `parent`, gone again on an error; one the user can't write fails first. `step` and `cancel` as
+/// [stage]'s.
+fn fetch(
+  release: &Release,
+  parent: &Path,
+  cancel: &AtomicBool,
+  step: Progress,
+) -> Result<(Folder, PathBuf)> {
   if !feed::secure(&release.url) {
     return Err(Error::Feed(format!("{:?} is not https", release.url)));
   }
@@ -387,13 +435,15 @@ fn fetch(release: &Release, parent: &Path, progress: Progress) -> Result<(Folder
   let mut tell = |done| {
     if 0 < done && done < total && told.is_none_or(|t| t.elapsed() >= TICK) {
       told = Some(Instant::now());
-      progress(done, total);
+      step(Step::Download(done, total));
     }
+
+    !cancel.load(Relaxed)
   };
   let big = || Error::Mismatch(format!("{} sent more than {total} bytes", release.url));
-  imp::get(&release.url, &file, total, &big, &mut tell)?;
-  release.verify(&file)?;
-  progress(total, total);
+  unless(cancel, || imp::get(&release.url, &file, total, &big, &mut tell))?;
+  step(Step::Verify);
+  unless(cancel, || release.verify(&file))?;
   Ok((dir, file))
 }
 
@@ -426,9 +476,13 @@ mod tests {
   use super::*;
   use crate::testing::{ABC, FEED, KEY, RFC_KEY, dir, sign};
 
+  /// A stage nobody stops.
+  static GO: AtomicBool = AtomicBool::new(false);
+
   /// A server on loopback, its URL: `/update.txt` a 302 to `/feed/update.txt`, which with
-  /// `/abc.exe` it serves; `/bad.txt` a feed changed after it was signed; `/spare.txt` a feed of
-  /// this platform's `abc.exe` and notes, signed by [RFC_KEY]; anything else a 404.
+  /// `/abc.exe` it serves; `/slow.exe` `abc` with 2 s between `a` and `bc`; `/bad.txt` a feed
+  /// changed after it was signed; `/spare.txt` a feed of this platform's `abc.exe` and notes,
+  /// signed by [RFC_KEY]; anything else a 404.
   fn serve() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -447,7 +501,16 @@ mod tests {
         }
 
         let req = String::from_utf8_lossy(&req);
-        let (status, body): (_, &[u8]) = match req.split(' ').nth(1).unwrap_or_default() {
+        let path = req.split(' ').nth(1).unwrap_or_default();
+        if path == "/slow.exe" {
+          let head = "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\na";
+          let _ = s.write_all(head.as_bytes()).and_then(|_| s.flush());
+          std::thread::sleep(Duration::from_secs(2));
+          let _ = s.write_all(b"bc");
+          continue;
+        }
+
+        let (status, body): (_, &[u8]) = match path {
           "/update.txt" => ("302 Found\r\nLocation: /feed/update.txt", b""),
           "/feed/update.txt" => ("200 OK", FEED.as_bytes()),
           "/bad.txt" => ("200 OK", bad.as_slice()),
@@ -596,7 +659,7 @@ mod tests {
     let root = dir("read-only");
     fs::set_permissions(&root, fs::Permissions::from_mode(0o555)).unwrap();
     let r = Release { url: "http://127.0.0.1:9/a".into(), size: 1, ..Release::test("2") };
-    let e = fetch(&r, &root, &mut |_, _| {}).unwrap_err();
+    let e = fetch(&r, &root, &GO, &mut |_| {}).unwrap_err();
     fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
     let denied = std::io::ErrorKind::PermissionDenied;
     assert!(matches!(&e, Error::Io(e) if e.kind() == denied), "{e}");
@@ -609,10 +672,14 @@ mod tests {
     let to = root.join("update.txt");
     let (mut seen, big) = (Vec::new(), &|| Error::Feed("big".into()));
     let len = FEED.len() as u64;
-    imp::get(&format!("{url}/update.txt"), &to, len, big, &mut |n| seen.push(n)).unwrap();
+    let tell = &mut |n| {
+      seen.push(n);
+      true
+    };
+    imp::get(&format!("{url}/update.txt"), &to, len, big, tell).unwrap();
     assert_eq!(fs::read_to_string(&to).unwrap(), FEED);
     assert!(seen.is_sorted() && seen.last() == Some(&len), "{seen:?}");
-    let none = &mut |_| {};
+    let none = &mut |_| true;
     let missing = imp::get(&format!("{url}/none"), &to, 1 << 10, big, none).unwrap_err();
     assert!(matches!(&missing, Error::Http { status: Some(404), .. }), "{missing}");
     assert!(missing.to_string().ends_with("/none: HTTP 404"), "{missing}");
@@ -650,9 +717,9 @@ mod tests {
     let sha512 = feed::hex(ABC).unwrap();
     let r = Release { url: at("abc.exe"), size: 3, sha512, ..Release::test("2") };
     let mut seen = Vec::new();
-    let (staged, file) = fetch(&r, &parent, &mut |done, total| seen.push((done, total))).unwrap();
+    let (staged, file) = fetch(&r, &parent, &GO, &mut |step| seen.push(step)).unwrap();
     assert_eq!(fs::read(&file).unwrap(), b"abc");
-    assert_eq!(seen, [(3, 3)], "only the end within a tick");
+    assert_eq!(seen, [Step::Verify], "no byte told within a tick");
     #[cfg(unix)]
     {
       use std::os::unix::fs::PermissionsExt;
@@ -671,15 +738,47 @@ mod tests {
     for (i, change) in changes.into_iter().enumerate() {
       let mut r = r.clone();
       change(&mut r);
-      let e = fetch(&r, &parent, &mut |_, _| {}).unwrap_err();
+      let e = fetch(&r, &parent, &GO, &mut |_| {}).unwrap_err();
       let mismatch = matches!(e, Error::Mismatch(_));
       assert!(if i < 3 { mismatch } else { matches!(e, Error::Feed(_)) }, "{r:?}: {e}");
     }
 
     let gone = Release { url: at("none.exe"), ..r };
-    let e = fetch(&gone, &parent, &mut |_, _| {}).unwrap_err();
+    let e = fetch(&gone, &parent, &GO, &mut |_| {}).unwrap_err();
     assert!(matches!(e, Error::Http { status: Some(404), .. }), "{e}");
     assert_eq!(fs::read_dir(&parent).unwrap().count(), 0, "no folder is left");
+    fs::remove_dir(parent).unwrap();
+  }
+
+  /// Stopped, the download ends at its next tick, long before the file, and leaves nothing.
+  #[test]
+  fn a_stopped_download_leaves_nothing() {
+    let (url, parent) = (serve(), dir("stopped"));
+    let sha512 = feed::hex(ABC).unwrap();
+    let r = Release { url: format!("{url}/slow.exe"), size: 3, sha512, ..Release::test("2") };
+    let (stop, start) = (AtomicBool::new(true), Instant::now());
+    let e = fetch(&r, &parent, &stop, &mut |_| {}).unwrap_err();
+    assert!(matches!(e, Error::Cancelled), "{e}");
+    assert!(start.elapsed() < Duration::from_secs(2), "{:?}", start.elapsed());
+    assert_eq!(fs::read_dir(&parent).unwrap().count(), 0, "the partial file is gone");
+    fs::remove_dir(parent).unwrap();
+  }
+
+  /// Stopped as a step is told, the step's work doesn't start: a file that would fail its check
+  /// gives [Error::Cancelled], and nothing is left.
+  #[test]
+  fn a_stop_at_a_step_is_cancelled() {
+    let (url, parent) = (serve(), dir("stopped-at-verify"));
+    let r = Release { url: format!("{url}/abc.exe"), size: 3, ..Release::test("2") };
+    let stop = AtomicBool::new(false);
+    let e = fetch(&r, &parent, &stop, &mut |step| {
+      if step == Step::Verify {
+        stop.store(true, Relaxed);
+      }
+    })
+    .unwrap_err();
+    assert!(matches!(e, Error::Cancelled), "not the mismatch: {e}");
+    assert_eq!(fs::read_dir(&parent).unwrap().count(), 0, "the file is gone");
     fs::remove_dir(parent).unwrap();
   }
 
@@ -714,7 +813,7 @@ mod tests {
   fn a_test_release_is_refused() {
     let (r, parent) = (Release::test("2.0"), dir("test-release"));
     assert_eq!((r.version.as_str(), r.size, &r.notes), ("2.0", 0, &None));
-    let e = fetch(&r, &parent, &mut |_, _| {}).unwrap_err();
+    let e = fetch(&r, &parent, &GO, &mut |_| {}).unwrap_err();
     assert!(matches!(e, Error::Feed(_)), "{e}");
     assert!(download(&r, |_, _| {}).is_err(), "a build, and no file");
     assert_eq!(fs::read_dir(&parent).unwrap().count(), 0, "nothing fetched");
@@ -748,6 +847,22 @@ mod tests {
     let mut last = 0;
     download(&huge, |done, _| last = done).unwrap();
     assert_eq!(last, u64::MAX, "no overflow");
+
+    // Each step told, the download's below the total; stopped, it ends with no step more.
+    let mut steps = Vec::new();
+    stage(&r, &GO, |step| steps.push(step)).unwrap();
+    let last = Step::Download(r.size / 20 * 19, r.size);
+    assert_eq!(steps[18..], [last, Step::Verify, Step::Unpack]);
+    let e = stage(&r, &AtomicBool::new(true), |step| panic!("{step:?}")).unwrap_err();
+    assert!(matches!(e, Error::Cancelled), "{e}");
+    let stop = AtomicBool::new(false);
+    let e = stage(&r, &stop, |step| match step {
+      Step::Verify => stop.store(true, Relaxed),
+      Step::Unpack => panic!("unpacked after the stop"),
+      _ => {}
+    })
+    .unwrap_err();
+    assert!(matches!(e, Error::Cancelled), "{e}");
 
     // A real release changed to the fake's file stays real.
     let real = Release { url: r.url.clone(), size: r.size, ..Release::test("2") };

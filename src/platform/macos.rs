@@ -61,21 +61,25 @@ pub fn get(url: &str, to: &Path, max: u64, big: Big, progress: Progress) -> Resu
     NSURLSession::sharedSession().downloadTaskWithRequest_completionHandler(&request, &done)
   };
   task.resume();
-  // The bytes so far told and stopped once past `max`; the file it got checked too.
+  // The bytes so far told, stopped once past `max` or told to; the file it got checked too.
   let never = || super::http(url, "the task never ended");
   loop {
     match (rx.recv_timeout(Duration::from_millis(50)), task.countOfBytesReceived() as u64) {
       (Ok(r), n) => {
         let fits = r.and_then(|()| Ok(fs::metadata(to)?.len() <= max))?;
-        return fits.then(|| progress(n)).ok_or_else(big);
+        return fits.then(|| progress(n)).ok_or_else(big).map(drop);
       }
-      (Err(RecvTimeoutError::Timeout), n) if n <= max => progress(n),
-      (Err(RecvTimeoutError::Timeout), _) => break task.cancel(),
+      (Err(RecvTimeoutError::Timeout), n) if n <= max && progress(n) => {}
+      (Err(RecvTimeoutError::Timeout), n) => {
+        task.cancel();
+        // The handler still runs, with the file or the cancel's error: done with the file before
+        // the caller removes its folder.
+        let _ = rx.recv_timeout(Duration::from_secs(5));
+        return Err(if n <= max { Error::Cancelled } else { big() });
+      }
       (Err(RecvTimeoutError::Disconnected), _) => return Err(never()),
     }
   }
-
-  Err(big())
 }
 
 // MARK: Image and signature
