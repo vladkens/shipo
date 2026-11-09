@@ -101,6 +101,7 @@ pub fn download(fake: &Fake, size: u64, cancel: &AtomicBool, step: Progress) -> 
     step(if i < steps { Step::Download(done, size) } else { Step::Verify });
   }
 
+  wait(Duration::ZERO)?;
   step(Step::Unpack);
   wait(PACE)?;
   Ok(Staged { new: PathBuf::new(), target: PathBuf::new(), dir: None })

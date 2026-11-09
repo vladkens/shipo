@@ -69,18 +69,17 @@ pub fn get(url: &str, to: &Path, max: u64, big: Big, progress: Progress) -> Resu
         let fits = r.and_then(|()| Ok(fs::metadata(to)?.len() <= max))?;
         return fits.then(|| progress(n)).ok_or_else(big).map(drop);
       }
-      (Err(RecvTimeoutError::Timeout), n) if n <= max => {
-        if !progress(n) {
-          task.cancel();
-          return Err(Error::Cancelled);
-        }
+      (Err(RecvTimeoutError::Timeout), n) if n <= max && progress(n) => {}
+      (Err(RecvTimeoutError::Timeout), n) => {
+        task.cancel();
+        // The handler still runs, with the file or the cancel's error: done with the file before
+        // the caller removes its folder.
+        let _ = rx.recv_timeout(Duration::from_secs(5));
+        return Err(if n <= max { Error::Cancelled } else { big() });
       }
-      (Err(RecvTimeoutError::Timeout), _) => break task.cancel(),
       (Err(RecvTimeoutError::Disconnected), _) => return Err(never()),
     }
   }
-
-  Err(big())
 }
 
 // MARK: Image and signature

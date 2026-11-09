@@ -855,6 +855,14 @@ mod tests {
     assert_eq!(steps[18..], [last, Step::Verify, Step::Unpack]);
     let e = stage(&r, &AtomicBool::new(true), |step| panic!("{step:?}")).unwrap_err();
     assert!(matches!(e, Error::Cancelled), "{e}");
+    let stop = AtomicBool::new(false);
+    let e = stage(&r, &stop, |step| match step {
+      Step::Verify => stop.store(true, Relaxed),
+      Step::Unpack => panic!("unpacked after the stop"),
+      _ => {}
+    })
+    .unwrap_err();
+    assert!(matches!(e, Error::Cancelled), "{e}");
 
     // A real release changed to the fake's file stays real.
     let real = Release { url: r.url.clone(), size: r.size, ..Release::test("2") };
