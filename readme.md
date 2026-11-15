@@ -135,6 +135,7 @@ publisher = "Example Labs"
 accessory = true
 entitlements = "assets/hello.entitlements"
 plist.NSMicrophoneUsageDescription = "Hello hears you."
+localizations.ru.NSMicrophoneUsageDescription = "Hello слышит вас."
 
 [package.metadata.shipo.windows]
 app-id = "7d3f1c2a-5b8e-4f61-9a0d-2c4e6b8f1a35"
@@ -171,6 +172,7 @@ shipo reads these from `[package]`, or from `[workspace.package]` for `version`,
 | `accessory` | bool | `false` | a menu bar app, without a Dock icon |
 | `entitlements` | path | none | the entitlements plist to sign with; not the App Sandbox, as a sandboxed app can't update itself |
 | `plist` | table | none | Info.plist keys to add or override, like usage strings |
+| `localizations` | table | none | the app's languages besides English, by their `.lproj` names (`ru`, `pt-BR`, `zh-Hans`), each a table of `plist` strings translated; `de = {}` only lists a language |
 
 `[package.metadata.shipo.windows]`:
 

@@ -3,11 +3,12 @@
 //! with the workspace's inheritance, and the binary and the target folder cargo would use. Read as
 //! TOML, so cargo is not needed on the host.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{self, Component, Path, PathBuf};
 use std::{fs, io};
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use toml::{Table, Value};
 
 use crate::{at, bad};
@@ -87,6 +88,37 @@ pub struct Macos {
   pub entitlements: Option<PathBuf>,
   /// Keys over the Info.plist's, usage strings among them: the app's own.
   pub plist: Table,
+  /// The app's languages besides English, each with its Info.plist strings translated.
+  #[serde(deserialize_with = "languages")]
+  pub localizations: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+/// `macos.localizations`, each language named as an `.lproj` folder takes it: `ru`, `pt-BR`,
+/// `zh-Hans`.
+fn languages<'de, D: Deserializer<'de>>(
+  de: D,
+) -> Result<BTreeMap<String, BTreeMap<String, String>>, D::Error> {
+  let all = BTreeMap::<String, BTreeMap<String, String>>::deserialize(de)?;
+  let tag = |s: &str| {
+    s.starts_with(|c: char| c.is_ascii_alphabetic())
+      && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+  };
+
+  // A Mac's disk takes `pt-BR.lproj` and `pt-br.lproj` for one folder.
+  let mut seen = BTreeMap::new();
+  for lang in all.keys() {
+    let error = match seen.insert(lang.to_ascii_lowercase(), lang) {
+      _ if !tag(lang) => format!(
+        "{lang:?} is no language: a letter, then letters, digits, - and _, as ru, pt-BR or zh-Hans"
+      ),
+      Some(first) => format!("{first:?} and {lang:?} are one language"),
+      None => continue,
+    };
+
+    return Err(serde::de::Error::custom(error));
+  }
+
+  Ok(all)
 }
 
 /// `[package.metadata.shipo.windows]`.
@@ -214,9 +246,12 @@ impl Config {
         )));
       }
 
-      // The name shown is the flag's, not a `macos.plist` one.
-      self.macos.plist.remove("CFBundleName");
-      self.macos.plist.remove("CFBundleDisplayName");
+      // The name shown is the flag's, not a `macos.plist` one nor a translation.
+      for key in ["CFBundleName", "CFBundleDisplayName"] {
+        self.macos.plist.remove(key);
+        self.macos.localizations.values_mut().for_each(|keys| _ = keys.remove(key));
+      }
+
       self.name = name;
     }
 
@@ -567,8 +602,7 @@ mod tests {
 
     let typo = app("", "[package.metadata.shipo.macos]\nplist.Anything = 1\nicon = \"x\"\n");
     let typo = error(&[("Cargo.toml", &typo)], "Cargo.toml");
-    let want =
-      "unknown field `icon`, expected one of `accessory`, `entitlements`, `plist` in `macos`";
+    let want = "unknown field `icon`, expected one of `accessory`, `entitlements`, `plist`, `localizations` in `macos`";
     assert_eq!(typo, format!("[package.metadata.shipo] {want}"));
 
     let typo = app("", "[package.metadata.shipo.windows]\ncopyright = \"x\"\nappid = \"x\"\n");
@@ -585,6 +619,16 @@ mod tests {
         "boolean `true`, expected path string in `macos.entitlements`",
       ),
       ("macos", "plist = \"x\"", "string \"x\", expected a map in `macos.plist`"),
+      (
+        "macos",
+        "localizations.ru.NSMicrophoneUsageDescription = 1",
+        "integer `1`, expected a string in `macos.localizations.ru.NSMicrophoneUsageDescription`",
+      ),
+      (
+        "macos",
+        "localizations.ru = \"x\"",
+        "string \"x\", expected a map in `macos.localizations.ru`",
+      ),
       ("windows", "app-id = 1", "integer `1`, expected a string in `windows.app-id`"),
       ("windows", "copyright = 1", "integer `1`, expected a string in `windows.copyright`"),
       (
@@ -605,6 +649,20 @@ mod tests {
       let e = error(&[("Cargo.toml", &manifest)], "Cargo.toml");
       assert_eq!(e, format!("[package.metadata.shipo] invalid type: {want}"), "{table} {value}");
     }
+
+    for lang in ["", "r u", "1ru", "ru.RU", "ру", "../ru"] {
+      let manifest =
+        app("", &format!("[package.metadata.shipo.macos.localizations]\n{lang:?} = {{}}\n"));
+      let e = error(&[("Cargo.toml", &manifest)], "Cargo.toml");
+      let want = "is no language: a letter, then letters, digits, - and _, as ru, pt-BR or zh-Hans";
+      assert_eq!(e, format!("[package.metadata.shipo] {lang:?} {want} in `macos.localizations`"));
+    }
+
+    let manifest =
+      app("", "[package.metadata.shipo.macos.localizations]\npt-BR = {}\npt-br = {}\n");
+    let e = error(&[("Cargo.toml", &manifest)], "Cargo.toml");
+    let want = "\"pt-BR\" and \"pt-br\" are one language in `macos.localizations`";
+    assert_eq!(e, format!("[package.metadata.shipo] {want}"));
 
     let bad = error(&[("Cargo.toml", "[package\n")], "Cargo.toml");
     assert!(bad.contains("Cargo.toml: TOML parse error"), "{bad}");
@@ -833,8 +891,8 @@ mod tests {
     assert_eq!(c.target, abs);
   }
 
-  /// Every key of `[package.metadata.shipo]` and of its tables, a nested `plist` key, and a table
-  /// the config skips.
+  /// Every key of `[package.metadata.shipo]` and of its tables, a nested `plist` key, languages,
+  /// and a table the config skips.
   const FULL: &str = r#"[package]
 name = "hello-app"
 version = "0.3.1"
@@ -851,6 +909,10 @@ publisher = "Example"
 accessory = true
 entitlements = "assets/hello.entitlements"
 plist.LSEnvironment.HELLO_MODE = "quiet"
+plist.NSMicrophoneUsageDescription = "Hello hears you."
+localizations.de = {}
+[package.metadata.shipo.macos.localizations.pt-BR]
+NSMicrophoneUsageDescription = "Olá ouve você."
 [package.metadata.shipo.windows]
 app-id = "00000000-1111-0000-1111-000000000000"
 copyright = "(c) Jane Doe"
@@ -883,6 +945,9 @@ anyhow = "1"
     assert!(c.macos.accessory);
     assert_eq!(c.macos.entitlements, Some(dir.join("assets/hello.entitlements")));
     assert_eq!(c.macos.plist["LSEnvironment"]["HELLO_MODE"].as_str(), Some("quiet"));
+    assert_eq!(c.macos.localizations.keys().collect::<Vec<_>>(), ["de", "pt-BR"]);
+    assert!(c.macos.localizations["de"].is_empty());
+    assert_eq!(c.macos.localizations["pt-BR"]["NSMicrophoneUsageDescription"], "Olá ouve você.");
     assert_eq!(c.windows.app_id.as_deref(), Some("00000000-1111-0000-1111-000000000000"));
     assert_eq!(c.windows.copyright.as_deref(), Some("(c) Jane Doe"));
     assert_eq!(c.linux.categories, ["Utility"]);
