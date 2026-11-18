@@ -1,3 +1,14 @@
+## v0.2.2 – 2026-11-18
+
+Updates users can follow and cancel, and macOS apps in more languages than English.
+
+### Features
+
+- Added `shipo::stage`, which downloads, checks and prepares an update step by step with progress and can be cancelled, so your app can show "Downloading… Cancel", then "Install and Relaunch" when the user clicks it.
+- Added `localizations` to the macOS config: macOS lists your app's languages and shows Info.plist texts, like the microphone prompt, in the user's language.
+
+**Full Changelog**: https://github.com/vladkens/shipo/compare/v0.2.1...v0.2.2
+
 ## v0.2.1 – 2026-11-02
 
 Dev builds of your app next to the released one, and help for every command.
