@@ -27,8 +27,8 @@ const RESERVED: [(&str, &str); 4] = [
   ("CFBundlePackageType", "APPL, an app's"),
 ];
 
-/// The Info.plist of the app, which needs macOS `minos`: the bundle from the config, then the
-/// `macos.plist` keys over it, all sorted.
+/// The Info.plist of the app, which needs macOS `minos`: the bundle from the config, its
+/// languages, then the `macos.plist` keys over it, all sorted.
 fn info(cfg: &Config, minos: &str) -> io::Result<Plist> {
   // Both versions take numbers and dots only: 1.2.0 of 1.2.0-beta.1.
   let version = cfg.numeric()?;
@@ -53,6 +53,14 @@ fn info(cfg: &Config, minos: &str) -> io::Result<Plist> {
     keys.insert("NSSupportsSuddenTermination", false.into());
   }
 
+  let langs = &cfg.macos.localizations;
+  if !langs.is_empty() {
+    // The development region first; without the list, the system's panels and menus stay English.
+    let others = langs.keys().map(String::as_str).filter(|&lang| lang != "en");
+    let all = ["en"].into_iter().chain(others).map(Plist::from).collect();
+    keys.insert("CFBundleLocalizations", Plist::Array(all));
+  }
+
   let mut keys: BTreeMap<String, Plist> = keys.into_iter().map(|(k, v)| (k.into(), v)).collect();
   for (key, value) in &cfg.macos.plist {
     let what = format!("[package.metadata.shipo.macos] plist.{key}");
@@ -64,6 +72,31 @@ fn info(cfg: &Config, minos: &str) -> io::Result<Plist> {
   }
 
   Ok(Plist::Dictionary(keys.into_iter().collect()))
+}
+
+/// The `InfoPlist.strings` of each language of `macos.localizations` with keys, each a key of
+/// `info`, the Info.plist they translate. A binary plist, as Xcode writes it by default and
+/// Apple's apps ship it: Foundation reads it as it reads the old text form, and it holds any text.
+fn strings(cfg: &Config, info: &Plist) -> io::Result<Vec<(String, Vec<u8>)>> {
+  let has = |key: &str| info.as_dictionary().is_some_and(|keys| keys.contains_key(key));
+  let mut out = vec![];
+  for (lang, keys) in cfg.macos.localizations.iter().filter(|(_, keys)| !keys.is_empty()) {
+    for key in keys.keys() {
+      let what = format!("[package.metadata.shipo.macos] localizations.{lang}.{key}");
+      if let Some((_, from)) = RESERVED.iter().find(|(k, _)| k == key) {
+        return Err(bad(format!("{what} can't be set: it is {from}")));
+      }
+
+      if !has(key) {
+        return Err(bad(format!("{what} is not in the Info.plist: set it in `plist` too")));
+      }
+    }
+
+    let keys = keys.iter().map(|(k, v)| (k.clone(), Plist::from(v.as_str())));
+    out.push((lang.clone(), binary(&Plist::Dictionary(keys.collect()))?));
+  }
+
+  Ok(out)
 }
 
 // MARK: Mach-O
@@ -198,11 +231,12 @@ fn allowed(path: &Path) -> io::Result<()> {
 }
 
 /// `<target>/<Name>.app` of the binary `bin`, unsigned, in place of one there: the binary
-/// (0755, whatever its mode: GitHub's artifacts lose it), the `.icns`, `PkgInfo` and the
-/// Info.plist. All is made before the old bundle goes.
+/// (0755, whatever its mode: GitHub's artifacts lose it), the `.icns`, `PkgInfo`, the Info.plist
+/// and its translations. All is made before the old bundle goes.
 pub fn bundle(cfg: &Config, bin: &Path) -> io::Result<PathBuf> {
   let exe = tool::read(bin)?;
-  let plist = xml(&info(cfg, &minos(&exe).map_err(at(bin))?)?)?;
+  let info = info(cfg, &minos(&exe).map_err(at(bin))?)?;
+  let (plist, strings) = (xml(&info)?, strings(cfg, &info)?);
   let sizes: Vec<usize> = ICNS.iter().map(|&(_, n)| n).collect();
   let icon = icns(&icons(&Image::read(&cfg.icon)?, &sizes, false)?)?;
 
@@ -221,6 +255,12 @@ pub fn bundle(cfg: &Config, bin: &Path) -> io::Result<PathBuf> {
   fs::write(contents.join("Resources").join(format!("{}.icns", cfg.name)), icon)?;
   fs::write(contents.join("PkgInfo"), "APPL????")?;
   fs::write(contents.join("Info.plist"), plist)?;
+  for (lang, data) in strings {
+    let dir = contents.join("Resources").join(format!("{lang}.lproj"));
+    fs::create_dir_all(&dir)?;
+    fs::write(dir.join("InfoPlist.strings"), data)?;
+  }
+
   Ok(bundle)
 }
 
@@ -454,6 +494,59 @@ LSEnvironment = { HELLO_MODE = "quiet" }
     );
   }
 
+  /// Languages listed after English, sorted, and each one's strings of its keys only.
+  const LOCALIZED: &str = r#"
+plist.NSMicrophoneUsageDescription = "Hello hears you."
+[localizations]
+ru = { NSMicrophoneUsageDescription = "Привет слышит вас.", CFBundleDisplayName = "Привет" }
+pt-BR.NSMicrophoneUsageDescription = "Olá ouve você."
+de = {}
+en = {}
+"#;
+
+  /// A plist's bytes read back.
+  fn parse(data: &[u8]) -> Plist {
+    Plist::from_reader(io::Cursor::new(data)).unwrap()
+  }
+
+  #[test]
+  fn localized() {
+    let cfg = config(Path::new("/app"), LOCALIZED);
+    let plist = info(&cfg, "11.0").unwrap();
+    let langs = plist.as_dictionary().unwrap().get("CFBundleLocalizations").unwrap();
+    let want = ["en", "de", "pt-BR", "ru"].map(Plist::from);
+    assert_eq!(langs.as_array().unwrap(), &want);
+
+    let files = strings(&cfg, &plist).unwrap();
+    let langs: Vec<_> = files.iter().map(|(lang, _)| lang.as_str()).collect();
+    assert_eq!(langs, ["pt-BR", "ru"]);
+    assert_eq!(&files[0].1[..8], b"bplist00");
+    let ru = dict([
+      ("CFBundleDisplayName", "Привет".into()),
+      ("NSMicrophoneUsageDescription", "Привет слышит вас.".into()),
+    ]);
+    assert_eq!(parse(&files[1].1), ru);
+
+    // The app's own list wins.
+    let own = format!("plist.CFBundleLocalizations = [\"en\", \"fr\"]\n{LOCALIZED}");
+    let plist = info(&config(Path::new("/app"), &own), "11.0").unwrap();
+    let langs = plist.as_dictionary().unwrap().get("CFBundleLocalizations").unwrap();
+    assert_eq!(langs.as_array().unwrap(), &["en", "fr"].map(Plist::from));
+
+    let error = |macos: &str| {
+      let cfg = config(Path::new("/app"), macos);
+      strings(&cfg, &info(&cfg, "11.0").unwrap()).unwrap_err().to_string()
+    };
+    let what = "[package.metadata.shipo.macos] localizations.ru";
+    let e = error("localizations.ru.NSCameraUsageDescription = \"x\"");
+    assert_eq!(
+      e,
+      format!("{what}.NSCameraUsageDescription is not in the Info.plist: set it in `plist` too")
+    );
+    let e = error("localizations.ru.CFBundleIdentifier = \"x\"");
+    assert_eq!(e, format!("{what}.CFBundleIdentifier can't be set: it is the config's `id`"));
+  }
+
   /// A thin 64-bit Mach-O of the load commands `cmds`, each `(cmd, its words after cmdsize)`.
   fn macho(cmds: &[(u32, &[u32])]) -> Vec<u8> {
     let body: Vec<u8> = cmds
@@ -643,6 +736,34 @@ LSEnvironment = { HELLO_MODE = "quiet" }
     .unwrap();
     let e = bundle(&config(&tmp, "").with(over("small.png")).unwrap(), &bin).unwrap_err();
     assert_eq!(e.to_string(), "the icon is 512×512, smaller than 1024 px");
+  }
+
+  /// Each language's strings in its `.lproj`, a plist `plutil` takes; `--name` drops the
+  /// translated name.
+  #[test]
+  fn bundle_localized() {
+    let tmp = Temp::new().unwrap();
+    icon(&tmp.join("icon.png"));
+    let bin = tmp.join("hello");
+    fs::write(&bin, macho(&[(0x32, &[1, 0x0B_00_00, 0, 0])])).unwrap();
+
+    let app = bundle(&config(&tmp, LOCALIZED), &bin).unwrap();
+    let mut files: Vec<_> = walk(&app.join("Contents/Resources"));
+    files.sort();
+    let want = ["Hello.icns", "pt-BR.lproj/InfoPlist.strings", "ru.lproj/InfoPlist.strings"];
+    assert_eq!(files, want.map(|p| app.join("Contents/Resources").join(p)));
+    let ru = app.join("Contents/Resources/ru.lproj/InfoPlist.strings");
+    let keys = Plist::from_file(&ru).unwrap();
+    let keys = keys.as_dictionary().unwrap();
+    assert_eq!(keys.get("CFBundleDisplayName"), Some(&Plist::from("Привет")));
+    #[cfg(target_os = "macos")]
+    run(Command::new("plutil").arg("-lint").arg(&ru)).unwrap();
+
+    let over = crate::config::Overrides { name: Some("Hello Dev".into()), ..Default::default() };
+    let app = bundle(&config(&tmp, LOCALIZED).with(over).unwrap(), &bin).unwrap();
+    let keys = Plist::from_file(app.join("Contents/Resources/ru.lproj/InfoPlist.strings")).unwrap();
+    let keys: Vec<_> = keys.as_dictionary().unwrap().keys().collect();
+    assert_eq!(keys, ["NSMicrophoneUsageDescription"]);
   }
 
   #[test]
