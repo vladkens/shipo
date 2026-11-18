@@ -51,8 +51,9 @@ def out(*cmd: str) -> str:
 def libs() -> Path:
   """The CRT and SDK splatted by xwin from VSMAN for both targets, once per pin."""
   root = SETUP / "target" / "xwin"
-  splat = root / "splat"
   pin = f"{XWIN} {VSMAN_SHA256} {CRT} {SDK}\n"
+  # A folder per pin: its path is in the rustflags, so cargo relinks when the pin changes.
+  splat = root / f"splat-{hashlib.sha256(pin.encode()).hexdigest()[:12]}"
   if (splat / "PIN").is_file() and (splat / "PIN").read_text() == pin:
     return splat
 
