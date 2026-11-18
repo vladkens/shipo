@@ -73,9 +73,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+      # xwin's build alone, a minute: each run still fetches and checks the CRT and SDK it unpacks
+      - uses: actions/cache@v6
         with:
-          tool: cargo-xwin@0.23.1
+          path: |
+            setup/target/xwin/bin
+            setup/target/xwin/.crates.toml
+            setup/target/xwin/.crates2.json
+          key: setup-xwin-${{ hashFiles('scripts/setup-stub.py') }}
       - run: uv run scripts/setup-stub.py --check
       - if: failure()
         uses: actions/upload-artifact@v7
