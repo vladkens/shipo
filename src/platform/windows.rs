@@ -125,7 +125,7 @@ pub fn get(url: &str, to: &Path, max: u64, big: Big, progress: Progress) -> Resu
 }
 
 /// The body of the request `req` for `url` into a new file at `to`, up to `max` bytes (`big`'s
-/// error past them), `tell`ing the bytes so far.
+/// error past them), `tell`ing the bytes so far, stopped when it says so.
 fn read(req: &Handle, to: &Path, url: &str, max: u64, big: Big, tell: Progress) -> Result<()> {
   let (mut file, mut buf, mut left) = (File::create(to)?, vec![0u8; 1 << 16], max);
   loop {
@@ -138,7 +138,9 @@ fn read(req: &Handle, to: &Path, url: &str, max: u64, big: Big, tell: Progress) 
 
     left = left.checked_sub(n as u64).ok_or_else(big)?;
     file.write_all(&buf[..n as usize])?;
-    tell(max - left);
+    if !tell(max - left) {
+      return Err(Error::Cancelled);
+    }
   }
 }
 

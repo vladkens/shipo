@@ -46,6 +46,11 @@ const NOSIGNAL: c_int = 99;
 /// Below a byte a second for a minute, the transfer stops.
 const LOW_SPEED_LIMIT: c_int = 19;
 const LOW_SPEED_TIME: c_int = 20;
+/// The transfer's progress callback, which curl calls about once a second even while no byte
+/// comes: a stop told is noticed on a stalled network too.
+const NOPROGRESS: c_int = 43;
+const XFERINFOFUNCTION: c_int = 20219;
+const XFERINFODATA: c_int = 10057;
 /// `CURLINFO_LONG + 2`.
 const RESPONSE_CODE: c_int = 0x200002;
 
@@ -108,10 +113,25 @@ struct Out<'a> {
   err: Option<io::Error>,
   /// The bytes it may still take.
   left: u64,
-  /// Told the bytes left after each write.
-  tell: &'a mut dyn FnMut(u64),
+  /// Told the bytes left after each write and on each progress callback: `false` stops it.
+  tell: &'a mut dyn FnMut(u64) -> bool,
+  /// `tell` said stop.
+  stopped: bool,
   /// A panic of `tell`, resumed once curl returns.
   panicked: Option<Box<dyn Any + Send>>,
+}
+
+impl Out<'_> {
+  /// Tells the bytes left: whether the transfer goes on. A panic can't unwind through curl: it
+  /// stops the transfer and goes on past it.
+  fn tell(&mut self) -> bool {
+    match panic::catch_unwind(AssertUnwindSafe(|| (self.tell)(self.left))) {
+      Ok(go) => self.stopped = !go,
+      Err(p) => self.panicked = Some(p),
+    }
+
+    !self.stopped && self.panicked.is_none()
+  }
 }
 
 /// curl's `CURLOPT_WRITEFUNCTION`: `size × n` bytes at `data`, all taken or the transfer stops.
@@ -122,9 +142,14 @@ unsafe extern "C" fn write(data: *const u8, size: usize, n: usize, out: P) -> us
   let fits = out.left.checked_sub(data.len() as u64).ok_or(io::ErrorKind::InvalidData.into());
   // Called no more once it took nothing.
   out.err = fits.and_then(|l| out.file.write_all(data).map(|()| out.left = l)).err();
-  // A panic can't unwind through curl: it stops the transfer and goes on past it.
-  out.panicked = panic::catch_unwind(AssertUnwindSafe(|| (out.tell)(out.left))).err();
-  if out.err.is_some() || out.panicked.is_some() { 0 } else { size * n }
+  if out.err.is_none() && out.tell() { size * n } else { 0 }
+}
+
+/// curl's `CURLOPT_XFERINFOFUNCTION`: not 0 stops the transfer.
+unsafe extern "C" fn xferinfo(out: P, _: i64, _: i64, _: i64, _: i64) -> c_int {
+  // SAFETY: curl passes the `Out` set as `CURLOPT_XFERINFODATA`.
+  let out = unsafe { &mut *out.cast::<Out>() };
+  c_int::from(!out.tell())
 }
 
 /// The body of `url` into `to` by libcurl's easy API, its write callback into the file, redirects
@@ -135,7 +160,8 @@ pub fn get(url: &str, to: &Path, max: u64, big: Big, progress: Progress) -> Resu
   let c = curl().ok_or_else(none)?;
   let c_url = CString::new(url).map_err(|_| super::http(url, "not a URL"))?;
   let tell = &mut |left| progress(max - left);
-  let mut out = Out { file: File::create(to)?, err: None, left: max, tell, panicked: None };
+  let file = File::create(to)?;
+  let mut out = Out { file, err: None, left: max, tell, stopped: false, panicked: None };
   let mut code: c_long = 0;
   // SAFETY: a handle of its own, its options of their documented types, cleaned up before `out`
   // and the URL go.
@@ -160,6 +186,9 @@ pub fn get(url: &str, to: &Path, max: u64, big: Big, progress: Progress) -> Resu
     (c.setopt)(h, LOW_SPEED_TIME, 60 as c_long);
     (c.setopt)(h, WRITEFUNCTION, write as *const c_void);
     (c.setopt)(h, WRITEDATA, (&raw mut out).cast::<c_void>());
+    (c.setopt)(h, NOPROGRESS, 0 as c_long);
+    (c.setopt)(h, XFERINFOFUNCTION, xferinfo as *const c_void);
+    (c.setopt)(h, XFERINFODATA, (&raw mut out).cast::<c_void>());
     let done = (c.perform)(h);
     (c.getinfo)(h, RESPONSE_CODE, &raw mut code);
     (c.cleanup)(h);
@@ -168,6 +197,10 @@ pub fn get(url: &str, to: &Path, max: u64, big: Big, progress: Progress) -> Resu
 
   if let Some(p) = out.panicked {
     panic::resume_unwind(p);
+  }
+
+  if out.stopped {
+    return Err(Error::Cancelled);
   }
 
   // A 404's page may be past `max`: the status tells first.

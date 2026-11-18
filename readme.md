@@ -93,6 +93,8 @@ fn update() -> shipo::Result<()> {
 }
 ```
 
+To show the steps and install only when the user says so, as Sparkle's Ready to Install does, call `stage` instead of `download`: it tells each `shipo::Step` (the bytes, then `Verify`, then `Unpack`, which on macOS mounts the image and checks the new app's signature) and stops with `Error::Cancelled` once its `AtomicBool` is set from another thread, removing what it fetched. Nothing is installed before `install`, so the app can keep the `Staged` update until the user clicks, and drop it to throw it away.
+
 The installer waits for the app to quit, puts the new version in and restarts it with the same arguments. If that fails, macOS and Linux put the old version back and Windows reruns the app in its folder; the next `finish` returns the error. `shipo::supported()` tells up front whether this install can update in place, and [examples/update.rs](examples/update.rs) is a console app that updates itself.
 
 A pre-release (a version with `-`, such as `1.3.0-rc.1`) doesn't update itself, not even to `1.3.0`: `check` returns `Error::Unsupported`, and testers install the next build by hand. A release does update to a newer pre-release the feed offers. So publish pre-releases with `gh release create --prerelease`, and the `releases/latest` feed stays on the last release.
@@ -101,7 +103,7 @@ The updater uses the system's HTTP; the dependency counts above leave out 6 crat
 
 ### Fake update
 
-To see your updater's offer, progress and error screens with no release, mark the feed fakeable and run the app with `SHIPO_FAKE_UPDATE` set, a dev build too. `check` offers that version (`none`: nothing newer) after a second with no network, `download` counts to 100% in about 5 s, fetching nothing, and `install` fails with `Error::Install`, nothing installed. A suffix `:fail-check` fails the check with `Error::Http` as offline (a malformed value too), `:fail-download` the download with `Error::Mismatch` at 40%. `check` ignores the variable for a feed not marked; `shipo::supported()`, which knows no feed, is `Ok` while it is set, and `shipo::faking()` tells whether it is, for the app's own gates of its updater. `SHIPO_UPDATE_ERROR=<text>` shows the failed-relaunch screen: `shipo::finish()` returns it as `Error::Install`.
+To see your updater's offer, progress and error screens with no release, mark the feed fakeable and run the app with `SHIPO_FAKE_UPDATE` set, a dev build too. `check` offers that version (`none`: nothing newer) after a second with no network, `download` counts to 100% in about 5 s and unpacks for a second, fetching nothing, and `install` fails with `Error::Install`, nothing installed. A suffix `:fail-check` fails the check with `Error::Http` as offline (a malformed value too), `:fail-download` the download with `Error::Mismatch` at 40%. `check` ignores the variable for a feed not marked; `shipo::supported()`, which knows no feed, is `Ok` while it is set, and `shipo::faking()` tells whether it is, for the app's own gates of its updater. `SHIPO_UPDATE_ERROR=<text>` shows the failed-relaunch screen: `shipo::finish()` returns it as `Error::Install`.
 
 ```rust
 const FEED: shipo::Feed = shipo::Feed::new(URL, KEYS).fakeable();
